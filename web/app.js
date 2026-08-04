@@ -220,7 +220,26 @@ function bindClipboard(tab) {
   });
 }
 
-function closeTab(id) {
+// ---------- 关闭会话 (活跃连接需确认) ----------
+let pendingCloseId = null;
+
+function requestCloseTab(id) {
+  const tab = tabs.find(t => t.id === id);
+  if (!tab) return;
+  // 空闲/已断开的直接关, 活跃连接必须确认
+  if (tab.state !== 'connected' && tab.state !== 'connecting') {
+    doCloseTab(id);
+    return;
+  }
+  pendingCloseId = id;
+  const typeName = TYPE_ICON[tab.cfg.type] || '';
+  const target = tab.cfg.host || tab.cfg.port || '';
+  $('close-info').innerHTML =
+    `${typeName} 将断开连接 <b>${esc(tab.cfg.name || '未命名')}</b>${target ? ` (${esc(target)})` : ''}，<br>该操作会立即关闭会话。`;
+  $('dlg-close-mask').classList.remove('hidden');
+}
+
+function doCloseTab(id) {
   const idx = tabs.findIndex(t => t.id === id);
   if (idx < 0) return;
   send({ type: 'disconnect', id });
@@ -232,6 +251,7 @@ function closeTab(id) {
   if (next) activateTab(next.id);
   renderTabbar();
   updateWelcome();
+  log(`关闭会话「${tab.cfg.name || id}」`);
 }
 
 function activateTab(id) {
@@ -264,9 +284,9 @@ function renderTabbar() {
       <span class="t-state" title="${esc(t.stateMsg || '')}">${dot}</span>
       <span class="t-name">${esc(t.cfg.name || (TYPE_ICON[t.cfg.type] + ' ' + (t.cfg.host || t.cfg.port)))}</span>
       <span class="t-close">✕</span>`;
-    el.querySelector('.t-close').onclick = (e) => { e.stopPropagation(); closeTab(t.id); };
+    el.querySelector('.t-close').onclick = (e) => { e.stopPropagation(); requestCloseTab(t.id); };
     el.onclick = () => activateTab(t.id);
-    el.onauxclick = (e) => { if (e.button === 1) closeTab(t.id); };
+    el.onauxclick = (e) => { if (e.button === 1) requestCloseTab(t.id); };
     bar.appendChild(el);
   }
   if (!tabs.length) $('tabbar').innerHTML = '<span class="muted" style="padding:8px 12px">无连接 — 双击左侧会话或新建</span>';
@@ -454,6 +474,23 @@ $('f-type').onchange = updateDlgFields;
 $('f-auth').onchange = updateDlgFields;
 $('t-autologin').onchange = updateDlgFields;
 $('btn-dlg-cancel').onclick = () => $('dlg-mask').classList.add('hidden');
+
+// 关闭确认
+$('btn-close-ok').onclick = () => {
+  if (pendingCloseId != null) doCloseTab(pendingCloseId);
+  pendingCloseId = null;
+  $('dlg-close-mask').classList.add('hidden');
+};
+$('btn-close-cancel').onclick = () => {
+  pendingCloseId = null;
+  $('dlg-close-mask').classList.add('hidden');
+};
+$('dlg-close-mask').addEventListener('click', (e) => {
+  if (e.target === $('dlg-close-mask')) {   // 点遮罩 = 取消
+    pendingCloseId = null;
+    $('dlg-close-mask').classList.add('hidden');
+  }
+});
 
 // 批量模式
 $('btn-batch').onclick = () => setBatchMode(!batchMode);

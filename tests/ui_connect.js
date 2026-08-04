@@ -60,8 +60,10 @@ async function main() {
     console.log('✅ 路径1(连接): 对话框关闭 → 标签激活 → shell 就绪');
   }
 
-  // 2. 关闭标签, 再测"保存并连接"
+  // 2. 关闭标签 (走确认框), 再测"保存并连接"
   await page.click('.tab .t-close');
+  await sleep(300);
+  await page.click('#btn-close-ok');   // 确认关闭
   await sleep(500);
   console.log('\n[2] 新建 → 填 SSH → 点"保存并连接"...');
   await page.click('#btn-new');

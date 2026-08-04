@@ -8,6 +8,7 @@ const tests = [
   { name: 'Telnet (mock: IAC+自动登录)', cmd: 'node', args: ['tests/e2e_telnet.js'] },
   { name: '串口 (COM27/COM1 打开写入)', cmd: 'node', args: ['tests/e2e_serial.js'] },
   { name: 'UI 功能 (新建→连接→shell→保存)', cmd: 'node', args: ['tests/ui_connect.js', `http://127.0.0.1:${PORT}/`] },
+  { name: 'UI 关闭确认 (取消/确认/断开)', cmd: 'node', args: ['tests/ui_close_confirm.js', `http://127.0.0.1:${PORT}/`] },
   { name: 'UI 新功能 (日志/批量删除/复制)', cmd: 'node', args: ['tests/ui_features.js', `http://127.0.0.1:${PORT}/`] },
   { name: 'UI 卡死回归 (左键选择+右键)', cmd: 'node', args: ['tests/ui_clipboard_regression.js', `http://127.0.0.1:${PORT}/`] },
   { name: 'SSH 重连 (保存会话双击重连)', cmd: 'node', args: ['tests/e2e_reconnect.js', `ws://127.0.0.1:${PORT}`] },

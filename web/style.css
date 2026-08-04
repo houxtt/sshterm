@@ -128,6 +128,20 @@ button.mini { padding: 2px 8px; font-size: 11px; }
 .log-msg { color: #c0caf5; }
 .log-foot { margin-top: 8px; }
 
+/* 关闭确认对话框 (复用 dlg 基础样式) */
+#dlg-close-mask {
+  position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 110;
+  display: flex; align-items: center; justify-content: center;
+}
+#dlg-close-mask.hidden { display: none; }
+#dlg-close {
+  background: #1f2030; border: 1px solid #7f1d1d; border-radius: 8px;
+  padding: 18px 22px; width: 360px;
+}
+#dlg-close h3 { color: #f87171; margin-bottom: 12px; }
+#dlg-close p { color: #a9b1d6; margin-bottom: 16px; line-height: 1.6; }
+#dlg-close p b { color: #e0e2f0; }
+
 /* 对话框 */
 #dlg-mask {
   position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 100;
