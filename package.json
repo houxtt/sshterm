@@ -1,0 +1,27 @@
+{
+  "name": "sshterm",
+  "version": "1.0.0",
+  "description": "SSH / Telnet / 串口 多标签连接工具 (Node 本地服务 + 浏览器 xterm.js)",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "test": "node tests/run_all.js"
+  },
+  "keywords": [
+    "ssh",
+    "telnet",
+    "serial",
+    "terminal",
+    "xterm"
+  ],
+  "author": "Wei Peng",
+  "license": "MIT",
+  "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "puppeteer-core": "^25.4.0",
+    "serialport": "^13.0.0",
+    "ssh2": "^1.17.0",
+    "ws": "^8.21.2"
+  }
+}

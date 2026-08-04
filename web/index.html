@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>sshterm — SSH / Telnet / 串口</title>
+<link rel="stylesheet" href="/vendor/@xterm/xterm/css/xterm.css">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="app">
+  <!-- 工具栏 -->
+  <div id="toolbar">
+    <button id="btn-new" title="新建连接 (Ctrl+N)">＋ 新建连接</button>
+    <button id="btn-save" title="保存当前会话配置">💾 保存会话</button>
+    <button id="btn-log" title="操作日志">📋 日志</button>
+    <span class="sep"></span>
+    <span id="conn-status" class="status-dot idle" title="服务器连接状态"></span>
+    <span id="conn-status-text">未连接服务器</span>
+    <span class="spacer"></span>
+    <span id="srv-addr" class="muted"></span>
+  </div>
+
+  <!-- 主区 -->
+  <div id="main">
+    <!-- 左侧: 会话列表 -->
+    <aside id="sidebar">
+      <div class="side-head">
+        <span>已保存会话</span>
+        <span>
+          <button id="btn-batch" title="批量管理" class="mini">☑ 批量</button>
+          <button id="btn-refresh" title="刷新">⟳</button>
+        </span>
+      </div>
+      <ul id="session-list"></ul>
+      <div id="batch-bar" class="hidden">
+        <label><input type="checkbox" id="batch-all"> 全选</label>
+        <button id="batch-del" class="danger mini">删除选中(<span id="batch-n">0</span>)</button>
+        <button id="batch-cancel" class="mini">取消</button>
+      </div>
+      <div class="side-foot muted">双击连接 · 悬停可编辑/删除</div>
+    </aside>
+
+    <!-- 右侧: 标签 + 终端 -->
+    <div id="workspace">
+      <div id="tabbar"></div>
+      <div id="terms"></div>
+      <div id="welcome" class="hidden">
+        <div class="welcome-box">
+          <h1>sshterm</h1>
+          <p>SSH · Telnet · 串口 一体化连接工具</p>
+          <button id="btn-welcome-new">＋ 新建连接</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 状态栏 -->
+  <div id="statusbar">
+    <span id="sb-left">就绪</span>
+    <span id="sb-right"></span>
+  </div>
+</div>
+
+<!-- 新建/编辑会话对话框 -->
+<div id="dlg-mask" class="hidden">
+  <div id="dlg">
+    <h3 id="dlg-title">新建连接</h3>
+    <div class="form">
+      <label>会话名称 <input id="f-name" placeholder="如: 开发板串口"></label>
+      <label>类型
+        <select id="f-type">
+          <option value="ssh">SSH</option>
+          <option value="telnet">Telnet</option>
+          <option value="serial">串口</option>
+        </select>
+      </label>
+
+      <!-- SSH 字段 -->
+      <div class="grp" id="grp-ssh">
+        <label>主机 <input id="f-host" placeholder="192.168.1.100"></label>
+        <label>端口 <input id="f-port" type="number" value="22" style="width:90px"></label>
+        <label>用户名 <input id="f-user" placeholder="root"></label>
+        <label>认证方式
+          <select id="f-auth">
+            <option value="password">密码</option>
+            <option value="key">密钥</option>
+          </select>
+        </label>
+        <label id="f-pwd-wrap">密码 <input id="f-password" type="password" placeholder="密码"></label>
+        <label id="f-key-wrap" class="hidden">私钥路径 <input id="f-key" placeholder="C:\Users\xxx\.ssh\id_rsa"></label>
+        <label id="f-pass-wrap" class="hidden">密钥口令 <input id="f-passphrase" type="password" placeholder="可选"></label>
+      </div>
+
+      <!-- Telnet 字段 -->
+      <div class="grp hidden" id="grp-telnet">
+        <label>主机 <input id="t-host" placeholder="192.168.1.100"></label>
+        <label>端口 <input id="t-port" type="number" value="23" style="width:90px"></label>
+        <label><input type="checkbox" id="t-autologin"> 自动登录</label>
+        <label id="t-user-wrap" class="hidden">用户名 <input id="t-user"></label>
+        <label id="t-pass-wrap2" class="hidden">密码 <input id="t-pass" type="password"></label>
+      </div>
+
+      <!-- 串口字段 -->
+      <div class="grp hidden" id="grp-serial">
+        <label>端口
+          <select id="s-port"><option value="">(加载中…)</option></select>
+          <button id="s-refresh" class="mini" title="刷新串口列表">⟳</button>
+        </label>
+        <label>波特率
+          <select id="s-baud">
+            <option>9600</option><option>19200</option><option>38400</option>
+            <option>57600</option><option selected>115200</option>
+            <option>230400</option><option>460800</option><option>921600</option>
+          </select>
+        </label>
+        <label>数据位 <select id="s-data"><option>8</option><option>7</option><option>6</option><option>5</option></select></label>
+        <label>停止位 <select id="s-stop"><option>1</option><option>2</option></select></label>
+        <label>校验位 <select id="s-parity"><option value="none">None</option><option value="even">Even</option><option value="odd">Odd</option></select></label>
+        <label><input type="checkbox" id="s-hex"> HEX 显示/发送</label>
+      </div>
+    </div>
+    <div class="dlg-actions">
+      <button id="btn-dlg-conn" class="primary">连接</button>
+      <button id="btn-dlg-save">保存并连接</button>
+      <button id="btn-dlg-cancel">取消</button>
+    </div>
+  </div>
+</div>
+
+<!-- 操作日志对话框 -->
+<div id="dlg-log-mask" class="hidden">
+  <div id="dlg-log">
+    <h3>📋 操作日志 <button id="log-close" class="mini" style="float:right">✕</button></h3>
+    <div id="log-list"></div>
+    <div class="log-foot muted">日志同时写入 %USERPROFILE%\.sshterm\sshterm.log</div>
+  </div>
+</div>
+
+<script src="/vendor/@xterm/xterm/lib/xterm.js"></script>
+<script src="/vendor/@xterm/addon-fit/lib/addon-fit.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<title>链路压测</title>
+<link rel="stylesheet" href="/xterm.css">
+<style>body{margin:0;background:#111;color:#eee;font-family:Consolas,monospace}
+#stats{position:fixed;top:0;right:0;background:#000c;padding:8px 14px;z-index:9;font-size:12px;line-height:1.6}
+#term{position:absolute;inset:0;padding-top:58px}</style>
+</head><body>
+<div id="stats">
+  🖥 帧间隔(期望16.7ms): <span id="frame">-</span><br>
+  ⏱ xterm.write 延迟: <span id="lat">-</span> ms<br>
+  ⚡ 渲染行/秒: <span id="rows">-</span><br>
+  🚨 卡顿(>150ms): <span id="stall">0</span>
+</div>
+<div id="term"></div>
+<script src="/xterm.js"></script>
+<script>
+const term = new Terminal({cols:120, rows:32, convertEol:true});
+term.open(document.getElementById('term'));
+term.writeln('\x1b[1;33m链路压测: WS → xterm.js 渲染中...\x1b[0m');
+
+// 帧间隔监控 (rAF 心跳)
+let last = performance.now(), frameGap = 0, stallCount = 0;
+function heartbeat(t) {
+  frameGap = Math.max(frameGap, t - last);
+  if (t - last > 150) stallCount++;
+  last = t;
+  document.getElementById('frame').textContent =
+    `${(t - last + frameGap).toFixed(1)}ms (最差 ${frameGap.toFixed(1)})`;
+  document.getElementById('stall').textContent = stallCount;
+  requestAnimationFrame(heartbeat);
+}
+requestAnimationFrame(heartbeat);
+
+// WS 数据 → xterm.write, 统计延迟与吞吐
+const ws = new WebSocket('ws://127.0.0.1:8787');
+ws.binaryType = 'arraybuffer';
+let bytes = 0, rows = 0, tStart = null, maxLat = 0, done = false;
+ws.onmessage = (ev) => {
+  if (done) return;
+  if (typeof ev.data === 'string') {
+    if (ev.data === '__DONE__') {
+      done = true;
+      const dt = (performance.now() - tStart) / 1000;
+      document.getElementById('rows').textContent =
+        `${(rows / dt).toFixed(0)} 行/s (共 ${(bytes / 1048576).toFixed(1)} MB)`;
+      term.writeln('\r\n\x1b[1;32m== 测试结束 ==\x1b[0m');
+      return;
+    }
+    return;
+  }
+  const buf = new Uint8Array(ev.data);
+  const now = performance.now();
+  const sentAt = new DataView(buf.buffer).getUint32(0, true);
+  const lat = now - sentAt;                    // 端到端延迟 (本地时钟近似)
+  maxLat = Math.max(maxLat, lat);
+  document.getElementById('lat').textContent =
+    `${lat.toFixed(1)}ms (最差 ${maxLat.toFixed(1)})`;
+  term.write(buf.subarray(4));
+  bytes += buf.length - 4;
+  rows += (buf.length - 4) / 60;               // ~60B/行 估
+  if (tStart === null) tStart = performance.now();
+};
+ws.onerror = () => term.writeln('\x1b[31mWS 错误\x1b[0m');
+</script></body></html>
