@@ -21,7 +21,15 @@ if not exist node_modules (
     )
 )
 
-rem 3. 启动 (自动打开浏览器)
+rem 3. 防重复启动: 8787 已被占用 = 服务已在运行, 直接开浏览器
+curl -s -o nul -m 2 http://127.0.0.1:8787/ >nul 2>nul
+if not errorlevel 1 (
+    echo [提示] sshterm 服务已在运行, 直接打开浏览器...
+    start http://127.0.0.1:8787
+    exit /b 0
+)
+
+rem 4. 启动 (自动打开浏览器)
 echo 启动 sshterm... 关闭本窗口将停止服务
 node server/index.js
 pause
