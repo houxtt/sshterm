@@ -60,11 +60,14 @@ class SSHConnection extends BaseConnection {
     });
   }
 
-  // 列出目录: 返回 [{name, isDir, size, mtime}]
+  // 列出目录: 先 realpath 规范化为绝对路径, 返回 { path, entries:[{name,isDir,size,mtime}] }
   async sftpList(dir) {
     const sftp = await this.getSftp();
-    return new Promise((resolve, reject) => {
-      sftp.readdir(dir, (err, list) => {
+    const real = await new Promise((resolve, reject) => {
+      sftp.realpath(dir, (err, p) => (err ? reject(err) : resolve(p)));
+    });
+    const entries = await new Promise((resolve, reject) => {
+      sftp.readdir(real, (err, list) => {
         if (err) return reject(err);
         resolve(list.map(f => ({
           name: f.filename,
@@ -74,6 +77,7 @@ class SSHConnection extends BaseConnection {
         })).sort((a, b) => (b.isDir - a.isDir) || a.name.localeCompare(b.name)));
       });
     });
+    return { path: real, entries };
   }
 
   sftpCreateReadStream(remotePath) {

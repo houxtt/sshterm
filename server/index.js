@@ -217,8 +217,8 @@ async function handle(ws, m) {
       }
       if (m.action === 'list') {
         try {
-          const entries = await conn.sftpList(m.path || '.');
-          send(ws, { type: 'sftp', id: m.id, action: 'list', path: m.path || '.', entries });
+          const r = await conn.sftpList(m.path || '.');
+          send(ws, { type: 'sftp', id: m.id, action: 'list', path: r.path, entries: r.entries });
         } catch (e) {
           send(ws, { type: 'error', id: m.id, msg: `SFTP: ${e.message}` });
         }

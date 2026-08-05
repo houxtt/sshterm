@@ -102,7 +102,7 @@ function handleMsg(m) {
     }
     case 'sftp': {
       if (m.action === 'list' && m.id === sftpConnId) {
-        sftpPath = m.path;
+        sftpPath = m.path;              // 服务端 realpath 后的绝对路径
         $('sftp-path').value = m.path;
         renderSftpList(m.entries);
       }
@@ -484,6 +484,11 @@ function sftpLoad() {
   send({ type: 'sftp', id: sftpConnId, action: 'list', path: sftpPath });
 }
 
+// 绝对路径拼接工具 (服务端返回 realpath 绝对路径)
+function sftpJoin(dir, name) {
+  return dir.endsWith('/') ? dir + name : `${dir}/${name}`;
+}
+
 function renderSftpList(entries) {
   const el = $('sftp-list');
   el.innerHTML = '';
@@ -506,12 +511,12 @@ function renderSftpList(entries) {
       ${e.isDir ? '' : '<button class="mini sftp-dl" title="下载">⬇</button>'}`;
     row.onclick = () => {
       if (!e.isDir) return;
-      sftpPath = sftpPath === '.' ? e.name : `${sftpPath}/${e.name}`;
+      sftpPath = sftpJoin(sftpPath, e.name);
       sftpLoad();
     };
     row.querySelector('.sftp-dl')?.addEventListener('click', (ev) => {
       ev.stopPropagation();
-      const full = sftpPath === '.' ? e.name : `${sftpPath}/${e.name}`;
+      const full = sftpJoin(sftpPath, e.name);
       const a = document.createElement('a');
       a.href = `/api/sftp/download?conn=${sftpConnId}&path=${encodeURIComponent(full)}`;
       a.download = e.name;
@@ -553,10 +558,9 @@ $('log-close').onclick = () => $('dlg-log-mask').classList.add('hidden');
 $('btn-sftp').onclick = toggleSftpPanel;
 $('sftp-close').onclick = () => { sftpOpen = false; $('sftp-panel').classList.add('hidden'); $('terms').classList.remove('sftp-open'); };
 $('sftp-up').onclick = () => {
-  if (sftpPath === '.' || sftpPath === '/') return;
-  const parts = sftpPath.split('/').filter(Boolean);
-  parts.pop();
-  sftpPath = parts.length ? '/' + parts.join('/') : '.';
+  if (sftpPath === '/' || sftpPath === '.') return;
+  const idx = sftpPath.lastIndexOf('/');
+  sftpPath = idx <= 0 ? '/' : sftpPath.slice(0, idx);
   sftpLoad();
 };
 $('sftp-refresh').onclick = sftpLoad;
