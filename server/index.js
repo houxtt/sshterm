@@ -48,6 +48,28 @@ const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css
                '.json': 'application/json', '.png': 'image/png', '.woff2': 'font/woff2' };
 const server = http.createServer((req, res) => {
   let url = decodeURIComponent(req.url.split('?')[0]);
+
+  // SFTP 文件下载 (流式): /api/sftp/download?conn=<id>&path=<远端路径>
+  if (url.startsWith('/api/sftp/download')) {
+    const qs = new URLSearchParams(req.url.split('?')[1] || '');
+    const conn = connections.get(parseInt(qs.get('conn'), 10));
+    const rpath = qs.get('path') || '';
+    if (!conn || !conn.getSftpInst()) {
+      res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+      return res.end('SFTP 通道未就绪(连接可能已断开)');
+    }
+    const name = path.basename(rpath);
+    res.writeHead(200, {
+      'Content-Type': 'application/octet-stream',
+      'Content-Disposition': `attachment; filename="${encodeURIComponent(name)}"`,
+      'Cache-Control': 'no-cache',
+    });
+    const rs = conn.getSftpInst().createReadStream(rpath);
+    rs.on('error', (e) => { res.end(`\n[下载错误] ${e.message}`); });
+    rs.pipe(res);
+    return;
+  }
+
   if (url === '/') url = '/index.html';
   // node_modules 资源映射 (xterm.js)
   let file;
@@ -186,6 +208,21 @@ async function handle(ws, m) {
     case 'resize': {
       const conn = connections.get(m.id);
       if (conn && conn.resize) conn.resize(m.cols, m.rows);
+      break;
+    }
+    case 'sftp': {
+      const conn = connections.get(m.id);
+      if (!conn || conn.config.type !== 'ssh') {
+        return send(ws, { type: 'error', id: m.id, msg: 'SFTP 需要活跃的 SSH 连接' });
+      }
+      if (m.action === 'list') {
+        try {
+          const entries = await conn.sftpList(m.path || '.');
+          send(ws, { type: 'sftp', id: m.id, action: 'list', path: m.path || '.', entries });
+        } catch (e) {
+          send(ws, { type: 'error', id: m.id, msg: `SFTP: ${e.message}` });
+        }
+      }
       break;
     }
   }

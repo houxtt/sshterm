@@ -47,6 +47,41 @@ class SSHConnection extends BaseConnection {
     if (this.stream) this.stream.write(data);
   }
 
+  // ---------- SFTP 文件访问 (独立子系统, 与 shell 通道共存) ----------
+  getSftp() {
+    return new Promise((resolve, reject) => {
+      if (this._sftp) return resolve(this._sftp);
+      if (!this.client) return reject(new Error('SSH 未连接'));
+      this.client.sftp((err, sftp) => {
+        if (err) return reject(err);
+        this._sftp = sftp;
+        resolve(sftp);
+      });
+    });
+  }
+
+  // 列出目录: 返回 [{name, isDir, size, mtime}]
+  async sftpList(dir) {
+    const sftp = await this.getSftp();
+    return new Promise((resolve, reject) => {
+      sftp.readdir(dir, (err, list) => {
+        if (err) return reject(err);
+        resolve(list.map(f => ({
+          name: f.filename,
+          isDir: f.attrs.isDirectory(),
+          size: f.attrs.size,
+          mtime: f.attrs.mtime * 1000,   // sftp 返回秒, 转 ms
+        })).sort((a, b) => (b.isDir - a.isDir) || a.name.localeCompare(b.name)));
+      });
+    });
+  }
+
+  sftpCreateReadStream(remotePath) {
+    return this.getSftp().then(sftp => sftp.createReadStream(remotePath));
+  }
+
+  getSftpInst() { return this._sftp; }
+
   resize(cols, rows) {
     if (this.stream) this.stream.setWindow(rows, cols);
   }
@@ -55,6 +90,7 @@ class SSHConnection extends BaseConnection {
     if (this.state === 'closed') return;
     this.state = 'closing';
     try {
+      if (this._sftp) { this._sftp.end(); this._sftp = null; }
       if (this.stream) { this.stream.end(); this.stream = null; }
       if (this.client) { this.client.end(); }
     } catch (e) { /* 忽略 */ }

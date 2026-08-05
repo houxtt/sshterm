@@ -128,6 +128,36 @@ button.mini { padding: 2px 8px; font-size: 11px; }
 .log-msg { color: #c0caf5; }
 .log-foot { margin-top: 8px; }
 
+/* SFTP 文件面板 */
+#sftp-panel {
+  position: absolute; top: 0; right: 0; bottom: 0; width: 360px;
+  background: #16161e; border-left: 1px solid #2a2b3a; z-index: 5;
+  display: flex; flex-direction: column;
+}
+#sftp-panel.hidden { display: none; }
+#terms.sftp-open { margin-right: 360px; transition: margin-right .15s; }
+.sftp-head {
+  display: flex; align-items: center; gap: 4px; padding: 6px;
+  border-bottom: 1px solid #2a2b3a;
+}
+.sftp-head input {
+  flex: 1; background: #1a1b26; color: #a9b1d6; border: 1px solid #3a3b4d;
+  border-radius: 4px; padding: 3px 6px; font-size: 12px;
+}
+#sftp-list { flex: 1; overflow-y: auto; }
+.sftp-item {
+  display: flex; align-items: center; gap: 6px; padding: 5px 8px;
+  cursor: pointer; font-size: 12px; border-bottom: 1px solid #1f2030;
+}
+.sftp-item:hover { background: #1f2030; }
+.sftp-item.dir .sftp-name { color: #7dcfff; }
+.sftp-ico { width: 18px; text-align: center; }
+.sftp-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #c0caf5; }
+.sftp-size { width: 60px; text-align: right; color: #565f89; }
+.sftp-time { width: 72px; text-align: right; color: #565f89; font-size: 11px; }
+.sftp-item .sftp-dl { padding: 0 6px; font-size: 12px; }
+.sftp-status { padding: 5px 10px; border-top: 1px solid #2a2b3a; color: #565f89; font-size: 11px; }
+
 /* 关闭确认对话框 (复用 dlg 基础样式) */
 #dlg-close-mask {
   position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 110;

@@ -100,6 +100,14 @@ function handleMsg(m) {
       renderLogs(m.list || []);
       break;
     }
+    case 'sftp': {
+      if (m.action === 'list' && m.id === sftpConnId) {
+        sftpPath = m.path;
+        $('sftp-path').value = m.path;
+        renderSftpList(m.entries);
+      }
+      break;
+    }
   }
 }
 
@@ -442,6 +450,80 @@ function fillSerialPorts() {
   }
 }
 
+// ---------- SFTP 文件面板 (SSH) ----------
+let sftpOpen = false;
+let sftpConnId = null;
+let sftpPath = '.';
+
+function fmtSize(n) {
+  if (n < 1024) return n + 'B';
+  if (n < 1048576) return (n / 1024).toFixed(1) + 'KB';
+  if (n < 1073741824) return (n / 1048576).toFixed(1) + 'MB';
+  return (n / 1073741824).toFixed(2) + 'GB';
+}
+
+function toggleSftpPanel() {
+  const tab = tabs.find(t => t.id === activeTabId);
+  if (!tab) return setStatus('没有激活的会话');
+  if (tab.cfg.type !== 'ssh') return setStatus('文件面板仅支持 SSH 会话');
+  if (tab.state !== 'connected') return setStatus('SSH 未连接, 无法访问文件');
+  sftpOpen = !sftpOpen;
+  $('sftp-panel').classList.toggle('hidden', !sftpOpen);
+  $('terms').classList.toggle('sftp-open', sftpOpen);
+  if (sftpOpen) {
+    sftpConnId = tab.id;
+    sftpPath = '.';
+    sftpLoad();
+  }
+}
+
+function sftpLoad() {
+  if (!sftpConnId) return;
+  $('sftp-path').value = sftpPath;
+  $('sftp-status').textContent = '加载中…';
+  send({ type: 'sftp', id: sftpConnId, action: 'list', path: sftpPath });
+}
+
+function renderSftpList(entries) {
+  const el = $('sftp-list');
+  el.innerHTML = '';
+  $('sftp-status').textContent = `${entries.length} 项`;
+  if (!entries.length) {
+    el.innerHTML = '<div class="muted" style="padding:12px">(空目录)</div>';
+    return;
+  }
+  for (const e of entries) {
+    const row = document.createElement('div');
+    row.className = 'sftp-item ' + (e.isDir ? 'dir' : 'file');
+    const size = e.isDir ? '—' : fmtSize(e.size);
+    const time = new Date(e.mtime).toLocaleString('zh-CN',
+      { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+    row.innerHTML = `
+      <span class="sftp-ico">${e.isDir ? '📁' : '📄'}</span>
+      <span class="sftp-name" title="${esc(e.name)}">${esc(e.name)}</span>
+      <span class="sftp-size">${size}</span>
+      <span class="sftp-time">${time}</span>
+      ${e.isDir ? '' : '<button class="mini sftp-dl" title="下载">⬇</button>'}`;
+    row.onclick = () => {
+      if (!e.isDir) return;
+      sftpPath = sftpPath === '.' ? e.name : `${sftpPath}/${e.name}`;
+      sftpLoad();
+    };
+    row.querySelector('.sftp-dl')?.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const full = sftpPath === '.' ? e.name : `${sftpPath}/${e.name}`;
+      const a = document.createElement('a');
+      a.href = `/api/sftp/download?conn=${sftpConnId}&path=${encodeURIComponent(full)}`;
+      a.download = e.name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      $('sftp-status').textContent = `下载中: ${e.name}`;
+    });
+    el.appendChild(row);
+  }
+}
+
 // ---------- 操作日志面板 ----------
 function openLogPanel() {
   $('dlg-log-mask').classList.remove('hidden');
@@ -468,6 +550,16 @@ $('btn-save').onclick = () => {
 };
 $('btn-log').onclick = openLogPanel;
 $('log-close').onclick = () => $('dlg-log-mask').classList.add('hidden');
+$('btn-sftp').onclick = toggleSftpPanel;
+$('sftp-close').onclick = () => { sftpOpen = false; $('sftp-panel').classList.add('hidden'); $('terms').classList.remove('sftp-open'); };
+$('sftp-up').onclick = () => {
+  if (sftpPath === '.' || sftpPath === '/') return;
+  const parts = sftpPath.split('/').filter(Boolean);
+  parts.pop();
+  sftpPath = parts.length ? '/' + parts.join('/') : '.';
+  sftpLoad();
+};
+$('sftp-refresh').onclick = sftpLoad;
 $('btn-refresh').onclick = () => { send({ type: 'list' }); send({ type: 'serialports' }); };
 $('s-refresh').onclick = () => send({ type: 'serialports' });
 $('f-type').onchange = updateDlgFields;
