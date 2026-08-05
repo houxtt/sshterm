@@ -19,6 +19,7 @@ const tests = [
   { name: 'UI 刷新 (会话保留)', cmd: 'node', args: ['tests/ui_refresh.js', `http://127.0.0.1:${PORT}/`] },
   { name: 'UI 全部断开+清理', cmd: 'node', args: ['tests/ui_killall.js', `http://127.0.0.1:${PORT}/`] },
   { name: 'UI 刷新恢复会话', cmd: 'node', args: ['tests/ui_restore.js', `http://127.0.0.1:${PORT}/`] },
+  { name: 'UI 文件按钮+定位当前目录', cmd: 'node', args: ['tests/ui_sftp_btn.js', `http://127.0.0.1:${PORT}/`] },
   { name: 'SSH 真实连接层 (192.168.1.216)', cmd: 'node', args: ['tests/e2e_ssh.js'] },
 ];
 

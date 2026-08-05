@@ -146,6 +146,38 @@ class SSHConnection extends BaseConnection {
 
   getSftpInst() { return this._sftp; }
 
+  // 获取 shell 当前目录 (通过 shell 通道发 pwd, 带标记; 终端会显示命令回显)
+  // 实现: data 只累积, 轮询解析 (避免事件回调时序问题)
+  getShellCwd() {
+    if (!this.stream || this.state !== 'connected') return Promise.resolve(null);
+    const stream = this.stream;
+    const marker = '__SSHTERM_CWD_END__';
+    let buf = '';
+    const onData = (d) => { buf += d.toString('utf8'); };
+    stream.on('data', onData);
+    stream.write(`pwd && echo ${marker}\r\n`);
+    return new Promise((resolve) => {
+      const t0 = Date.now();
+      const check = () => {
+        const idx = buf.lastIndexOf(marker);
+        if (idx >= 0) {
+          stream.removeListener('data', onData);
+          // 提取绝对路径: 白名单字符 + 至少两级目录 (排除提示符 ~/xxx 的干扰)
+          const text = buf.slice(0, idx);
+          const match = text.match(/(\/[a-zA-Z0-9_\-.\/]+)/g) || [];
+          const paths = match.filter(p => (p.match(/\//g) || []).length >= 2);
+          resolve(paths.length ? paths.reduce((a, b) => (b.length > a.length ? b : a)) : null);
+        } else if (Date.now() - t0 > 5000) {
+          stream.removeListener('data', onData);
+          resolve(null);
+        } else {
+          setTimeout(check, 50);
+        }
+      };
+      setTimeout(check, 50);
+    });
+  }
+
   resize(cols, rows) {
     if (this.stream) this.stream.setWindow(rows, cols);
   }

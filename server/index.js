@@ -278,6 +278,10 @@ async function handle(ws, m) {
         } catch (e) {
           send(ws, { type: 'error', id: m.id, msg: `SFTP: ${e.message}` });
         }
+      } else if (m.action === 'cwd') {
+        // 获取 shell 当前目录 (定位文件面板)
+        const cwd = await conn.getShellCwd();
+        send(ws, { type: 'sftp', id: m.id, action: 'cwd', path: cwd });
       }
       break;
     }
