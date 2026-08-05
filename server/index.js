@@ -231,6 +231,13 @@ async function handle(ws, m) {
       send(ws, { type: 'logs', list: logs.slice(-300) });
       break;
     }
+    case 'cleanup': {
+      // 页面加载兜底: 强制关闭该客户端全部连接 (刷新时 close 事件可能未触发导致残留)
+      for (const [id, conn] of connections) conn.close();
+      connections.clear();
+      liveByConfig.clear();
+      break;
+    }
     case 'connect': {
       const sess = { ...m.session };
       // 双击列表重连时前端只有脱敏副本, 从存储补全敏感字段

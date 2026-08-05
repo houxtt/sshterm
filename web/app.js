@@ -32,6 +32,7 @@ ws.binaryType = 'arraybuffer';
 ws.onopen = () => {
   $('conn-status').className = 'status-dot ok';
   $('conn-status-text').textContent = '服务器已连接';
+  send({ type: 'cleanup' });      // 兜底清理刷新残留的连接
   send({ type: 'list' });
   send({ type: 'serialports' });
 };
@@ -568,6 +569,13 @@ $('btn-save').onclick = () => {
 $('btn-log').onclick = openLogPanel;
 $('log-close').onclick = () => $('dlg-log-mask').classList.add('hidden');
 $('btn-sftp').onclick = toggleSftpPanel;
+$('btn-killall').onclick = () => {
+  if (!tabs.length) return setStatus('没有打开的会话');
+  if (!confirm(`断开全部 ${tabs.length} 个会话?`)) return;
+  const n = tabs.length;
+  for (const t of [...tabs]) doCloseTab(t.id);
+  setStatus(`已断开 ${n} 个会话`);
+};
 $('sftp-close').onclick = () => { sftpOpen = false; $('sftp-panel').classList.add('hidden'); $('terms').classList.remove('sftp-open'); };
 $('sftp-up').onclick = () => {
   if (sftpPath === '/' || sftpPath === '.') return;

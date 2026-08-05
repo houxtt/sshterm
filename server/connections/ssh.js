@@ -8,7 +8,11 @@ class SSHConnection extends BaseConnection {
     this.state = 'connecting';
     const { host, port = 22, username, auth = 'password',
             password, privateKey, passphrase } = this.config;
-    const cfg = { host, port, username, readyTimeout: 10000 };
+    const cfg = {
+      host, port, username, readyTimeout: 10000,
+      keepaliveInterval: 15000,   // 15 秒心跳, 防空闲断链(网络设备 idle timeout)
+      keepaliveCountMax: 3,       // 连续 3 次无响应才判定连接死亡
+    };
 
     if (auth === 'key') {
       cfg.privateKey = fs.readFileSync(privateKey);
@@ -36,8 +40,20 @@ class SSHConnection extends BaseConnection {
         });
       });
       client.on('error', (e) => {
-        this._emitError(`SSH 连接失败: ${e.message}`);
-        reject(e);
+        // 连接建立后中断 vs 建连失败: 给出具体原因
+        const msg = this.state === 'connected'
+          ? `SSH 连接中断: ${e.message}`
+          : `SSH 连接失败: ${e.message}`;
+        this._emitError(msg);
+        if (this.state !== 'connected') reject(e);
+      });
+      client.on('close', (hadError) => {
+        // 连接建立后 client 关闭: 报告具体原因
+        if (this.state === 'connected' || this.state === 'connecting') {
+          this._emitClose(hadError
+            ? `SSH 连接异常中断(网络问题)`
+            : 'SSH 连接已关闭(远端)');
+        }
       });
       client.connect(cfg);
     });

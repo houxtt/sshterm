@@ -17,6 +17,7 @@ const tests = [
   { name: 'SFTP 目录打包下载', cmd: 'node', args: ['tests/e2e_sftp_dir.js', `ws://127.0.0.1:${PORT}`] },
   { name: 'UI SFTP 面板 (连点防错)', cmd: 'node', args: ['tests/ui_sftp.js', `http://127.0.0.1:${PORT}/`] },
   { name: 'UI 刷新 (会话保留)', cmd: 'node', args: ['tests/ui_refresh.js', `http://127.0.0.1:${PORT}/`] },
+  { name: 'UI 全部断开+清理', cmd: 'node', args: ['tests/ui_killall.js', `http://127.0.0.1:${PORT}/`] },
   { name: 'SSH 真实连接层 (192.168.1.216)', cmd: 'node', args: ['tests/e2e_ssh.js'] },
 ];
 
