@@ -52,6 +52,11 @@ ws.onmessage = (ev) => {
   const payload = buf.subarray(2);
   if (tab.hex) tab.term.write(hexOf(payload) + ' ');
   else tab.term.write(payload);
+  // 累积终端内容 (保留最近 BUF_MAX), 供刷新后重放
+  try {
+    const text = new TextDecoder('utf-8', { fatal: false }).decode(payload);
+    tab.recBuf = (tab.recBuf + text).slice(-BUF_MAX);
+  } catch (e) { /* 忽略 */ }
 };
 function send(obj) { if (ws.readyState === 1) ws.send(JSON.stringify(obj)); }
 function log(msg) { send({ type: 'log', msg }); }
@@ -115,12 +120,13 @@ function handleMsg(m) {
   }
 }
 
-// ---------- 标签持久化 (刷新页面自动恢复打开的会话) ----------
+// ---------- 标签持久化 (刷新页面自动恢复打开的会话 + 终端内容) ----------
 const LS_TABS = 'sshterm.tabs';
+const BUF_MAX = 200 * 1024;   // 每标签保留最近 200KB 输出, 刷新后重放
 function saveTabs() {
   try {
     localStorage.setItem(LS_TABS, JSON.stringify(tabs.map(t => ({
-      cfg: t.cfg, hex: !!t.hex,
+      cfg: t.cfg, hex: !!t.hex, buf: t.recBuf || '',
     }))));
   } catch (e) { /* 存储失败忽略 */ }
 }
@@ -132,12 +138,14 @@ function restoreTabs() {
     if (!Array.isArray(list)) return;
     for (const item of list) {
       if (item && item.cfg && item.cfg.type) {
-        newTab(item.cfg, { connect: true, hex: item.hex });
+        newTab(item.cfg, { connect: true, hex: item.hex, replay: item.buf });
       }
     }
     setStatus(`已恢复 ${list.length} 个会话`);
   } catch (e) { /* 解析失败忽略 */ }
 }
+// 刷新/关闭页面前保存最新终端内容
+window.addEventListener('beforeunload', () => saveTabs());
 
 // ---------- 标签管理 ----------
 function newTab(cfg, opts = {}) {
@@ -156,12 +164,21 @@ function newTab(cfg, opts = {}) {
   term.open(host);
   setTimeout(() => fitAddon.fit(), 0);
 
-  const tab = { id, cfg, term, host, state: 'idle', hex: !!(opts.hex ?? cfg.hexMode), fitAddon };
+  const tab = { id, cfg, term, host, state: 'idle', hex: !!(opts.hex ?? cfg.hexMode), fitAddon, recBuf: '' };
   tabs.push(tab);
   renderTabbar();
   activateTab(id);
   bindClipboard(tab);
   saveTabs();
+
+  // 刷新恢复: 先重放之前的终端内容, 再建立连接
+  if (opts.replay) {
+    tab.recBuf = opts.replay;
+    try {
+      term.write(opts.replay);
+      term.write('\r\n\x1b[33m[--- 连接已重新建立 ---]\x1b[0m\r\n');
+    } catch (e) { /* 忽略 */ }
+  }
 
   term.onData((d) => sendInput(id, d));
   term.onResize(({ cols, rows }) => send({ type: 'resize', id, cols, rows }));

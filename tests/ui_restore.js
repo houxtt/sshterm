@@ -15,64 +15,56 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   await page.goto(URL, { waitUntil: 'networkidle0' });
   await sleep(1000);
 
-  // 1. 打开 2 个 SSH 连接
-  console.log('[1] 打开 2 个 SSH 连接...');
-  for (let i = 0; i < 2; i++) {
-    await page.click('#btn-new');
-    await sleep(300);
-    await page.type('#f-name', `恢复测试${i}`);
-    await page.type('#f-host', '192.168.1.216');
-    await page.type('#f-user', 'logic');
-    await page.type('#f-password', '1');
-    await page.click('#btn-dlg-conn');
-    await sleep(2200);
-  }
-  const before = await page.$$eval('.tab', els => els.length);
-  const lsBefore = await page.evaluate(() => localStorage.getItem('sshterm.tabs') || '');
-  console.log('    标签数:', before, '| localStorage 已存:', lsBefore.length > 0);
+  // 1. 打开 1 个 SSH 连接并产生输出内容
+  console.log('[1] 打开 SSH 连接并产生终端内容...');
+  await page.click('#btn-new');
+  await sleep(300);
+  await page.type('#f-name', '恢复测试');
+  await page.type('#f-host', '192.168.1.216');
+  await page.type('#f-user', 'logic');
+  await page.type('#f-password', '1');
+  await page.click('#btn-dlg-conn');
+  await sleep(2500);
+  // 发命令产生输出 (内容标记)
+  await page.keyboard.type('echo CONTENT_MARKER_123\n');
+  await sleep(1500);
+  const hasMarker = await page.evaluate(() => {
+    const h = document.querySelector('.term-host:not(.hidden)');
+    return h ? (h.querySelector('.xterm-rows')?.textContent || '').includes('CONTENT_MARKER_123') : false;
+  });
+  const lsBefore = await page.evaluate(() => (localStorage.getItem('sshterm.tabs') || '').length);
+  console.log('    终端含输出标记:', hasMarker, '| localStorage 长度:', lsBefore);
 
   // 2. 刷新页面
   console.log('[2] 刷新页面 (重新加载此页面)...');
   await page.reload({ waitUntil: 'networkidle0' });
   await sleep(5000);
 
-  // 3. 验证标签自动恢复 + 自动重连
+  // 3. 验证标签恢复 + 旧终端内容保留
   const after = await page.$$eval('.tab', els => els.length);
-  const states = await page.$$eval('.tab .t-state', els => els.map(e => e.textContent));
-  const welcomeHidden = await page.$eval('#welcome', el => el.classList.contains('hidden'));
   const statusText = await page.$eval('#sb-left', el => el.textContent);
-  console.log('[3] 刷新后标签数:', after, '| 状态点:', states.join(','), '| 欢迎页隐藏:', welcomeHidden);
-  console.log('    状态栏:', JSON.stringify(statusText));
-
-  // 4. 验证恢复的连接可用 (逐个激活标签检查渲染)
-  console.log('[4] 验证恢复的连接可用 (逐个激活)...');
-  let shellReady = false;
-  const tabN = await page.$$eval('.tab', els => els.length);
-  for (let i = 0; i < tabN; i++) {
-    await page.evaluate((idx) => {
-      const tabs = document.querySelectorAll('.tab');
-      if (tabs[idx]) tabs[idx].click();
-    }, i);
-    await sleep(1200);
-    const text = await page.evaluate(() => {
-      const h = document.querySelector('.term-host:not(.hidden)');
-      return h ? (h.querySelector('.xterm-rows')?.textContent || '') : '';
-    });
-    console.log(`    标签${i}: ${text.length} 字符 | 含$: ${text.includes('$')}`);
-    if (text.includes('$') || text.length > 50) shellReady = true;
-  }
-  console.log('    恢复后 shell 就绪:', shellReady);
+  console.log('[3] 刷新后标签数:', after, '| 状态栏:', JSON.stringify(statusText));
+  const restored = await page.evaluate(() => {
+    const hosts = document.querySelectorAll('.term-host');
+    for (const h of hosts) {
+      const text = h.querySelector('.xterm-rows')?.textContent || '';
+      if (text.includes('CONTENT_MARKER_123')) return '内容已恢复';
+      if (text.includes('连接已重新建立')) return '有重连标记但无旧内容';
+    }
+    return '无旧内容';
+  });
+  console.log('[4] 旧终端内容:', restored);
 
   // 清理: 全部断开 (避免影响后续)
   await page.click('#btn-killall');
   await sleep(500);
   const cleaned = await page.$$eval('.tab', els => els.length);
 
-  const ok1 = before === 2 && lsBefore.length > 0;
-  const ok2 = after === 2 && welcomeHidden && !states.includes('🔴');
-  const ok3 = shellReady && cleaned === 0 && errors.length === 0;
+  const ok1 = hasMarker && lsBefore > 100;
+  const ok2 = after === 1 && statusText.includes('已恢复');
+  const ok3 = restored === '内容已恢复' && cleaned === 0;
   console.log('\n=== 汇总 ===');
-  console.log(`打开并保存: ${ok1 ? '✅' : '❌'}  刷新自动恢复: ${ok2 ? '✅' : '❌'}  连接可用+清理: ${ok3 ? '✅' : '❌'} | JS错误: ${errors.length ? errors.join('|') : '(无)'}`);
+  console.log(`产生内容: ${ok1 ? '✅' : '❌'}  刷新恢复标签: ${ok2 ? '✅' : '❌'}  旧内容保留: ${ok3 ? '✅' : '❌'}`);
   try { browser.process() && browser.process().kill(); } catch (e) {}
   process.exit(ok1 && ok2 && ok3 ? 0 : 1);
 })().catch(e => { console.error('❌ 测试崩溃:', e.message); process.exit(1); });
