@@ -422,7 +422,14 @@ function setBatchMode(on) {
   renderSessionList();
 }
 
-function connectTo(s) { newTab({ ...s }); }
+// 连接防抖: 连续点击/双击只触发一次, 防止疯狂开新连接卡死页面
+let _lastConnAt = 0;
+function connectTo(s) {
+  const now = Date.now();
+  if (now - _lastConnAt < 600) return;
+  _lastConnAt = now;
+  newTab({ ...s });
+}
 
 // ---------- 新建/编辑对话框 ----------
 function openDlg(existing = null) {
