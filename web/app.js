@@ -211,7 +211,7 @@ function fitTerm(tab) {
 }
 
 // ---------- 复制粘贴 (Xshell 习惯, 防剪贴板竞争卡死) ----------
-const COPY_MAX = 512 * 1024;   // 单次复制上限 512KB, 防止大选择卡死浏览器
+const COPY_MAX = 512 * 1024;   // 单次复制上限 512KB
 let _lastCopyAt = 0;
 let _clipBusy = false;         // 剪贴板操作互斥锁: 一次只允许一个, 防并发竞争死锁
 
@@ -219,19 +219,12 @@ function copySelection(term) {
   const sel = term.getSelection();
   if (!sel || _clipBusy) return false;
   _clipBusy = true;
-  if (sel.length > COPY_MAX) {
-    const kb = (sel.length / 1024).toFixed(0);
-    setStatus(`选择过大 (${kb}KB), 已截断前 512KB`);
-  }
   const toCopy = sel.length > COPY_MAX ? sel.slice(0, COPY_MAX) : sel;
-  // 超时释放锁: 剪贴板服务繁忙时绝不无限等待
-  const timer = setTimeout(() => {
-    _clipBusy = false;
-    setStatus('复制超时(剪贴板繁忙), 可稍后重试');
-  }, 1500);
+  // 失败/超时静默处理: 不弹提示不重试 (系统剪贴板被其他程序锁定时快速放弃)
+  const timer = setTimeout(() => { _clipBusy = false; }, 800);
   navigator.clipboard.writeText(toCopy).then(
-    () => { clearTimeout(timer); _clipBusy = false; setStatus(`已复制 ${toCopy.length} 字符`); },
-    () => { clearTimeout(timer); _clipBusy = false; setStatus('复制失败(剪贴板权限)'); });
+    () => { clearTimeout(timer); _clipBusy = false; },
+    () => { clearTimeout(timer); _clipBusy = false; });
   return true;
 }
 function pasteClipboard(term) {
@@ -248,18 +241,20 @@ function pasteClipboard(term) {
 function bindClipboard(tab) {
   const { term, host } = tab;
 
-  // 1. 鼠标左键选中文本 → 自动复制 (只处理左键, 延迟执行不阻塞事件处理)
+  // 1. 鼠标左键选中文本 → 自动复制
+  // 点击风暴防护: clearTimeout 合并, 无论点击多快最多 1 个定时器在跑
   host.addEventListener('mouseup', (e) => {
     if (e.button !== 0) return;
-    setTimeout(() => {
-      const now = Date.now();
-      if (now - _lastCopyAt < 400) return;
-      const sel = term.getSelection();
-      if (sel) { _lastCopyAt = now; copySelection(term); }
-    }, 0);
+    clearTimeout(tab._copyTimer);
+    tab._copyTimer = setTimeout(() => {
+      try {
+        const sel = term.getSelection();
+        if (sel) copySelection(term);
+      } catch (err) { /* 忽略 */ }
+    }, 300);
   });
 
-  // 2. 右键: 有选中文本 → 复制 (符合直觉); 无选中 → 尝试粘贴
+  // 2. 右键: 有选中文本 → 复制; 无选中 → 不碰剪贴板 (readText 权限气泡模态会阻塞页面)
   host.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     // 清掉 xterm 右键时灌入隐藏 textarea 的选中文本, 消除 DOM 选择与剪贴板操作竞争
@@ -267,9 +262,8 @@ function bindClipboard(tab) {
     if (term.getSelection()) {
       copySelection(term);
       term.clearSelection();        // 复制后清空选择, 避免重复触发
-    } else {
-      pasteClipboard(term);
     }
+    // 无选中时不做任何剪贴板操作 (粘贴请用 Ctrl+Shift+V / Ctrl+V)
   });
 
   // 3. 快捷键 (Ctrl/⌘ + C/V, Ctrl+Shift+C/V)

@@ -23,6 +23,7 @@ const tests = [
   { name: 'UI 同IP多会话', cmd: 'node', args: ['tests/ui_multi_conn.js', `http://127.0.0.1:${PORT}/`] },
   { name: 'UI 连续点击防卡死', cmd: 'node', args: ['tests/ui_dblclick.js', `http://127.0.0.1:${PORT}/`] },
   { name: 'UI 会话列表选择不复制', cmd: 'node', args: ['tests/ui_sidebar.js', `http://127.0.0.1:${PORT}/`] },
+  { name: 'UI 鼠标乱点不卡死', cmd: 'node', args: ['tests/ui_mouse_mash.js', `http://127.0.0.1:${PORT}/`] },
   { name: 'SSH 真实连接层 (192.168.1.216)', cmd: 'node', args: ['tests/e2e_ssh.js'] },
 ];
 
