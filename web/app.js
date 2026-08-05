@@ -35,6 +35,7 @@ ws.onopen = () => {
   send({ type: 'cleanup' });      // 兜底清理刷新残留的连接
   send({ type: 'list' });
   send({ type: 'serialports' });
+  restoreTabs();                  // 恢复刷新前打开的会话 (重新连接)
 };
 ws.onclose = () => {
   $('conn-status').className = 'status-dot err';
@@ -114,6 +115,30 @@ function handleMsg(m) {
   }
 }
 
+// ---------- 标签持久化 (刷新页面自动恢复打开的会话) ----------
+const LS_TABS = 'sshterm.tabs';
+function saveTabs() {
+  try {
+    localStorage.setItem(LS_TABS, JSON.stringify(tabs.map(t => ({
+      cfg: t.cfg, hex: !!t.hex,
+    }))));
+  } catch (e) { /* 存储失败忽略 */ }
+}
+function restoreTabs() {
+  try {
+    const raw = localStorage.getItem(LS_TABS);
+    if (!raw) return;
+    const list = JSON.parse(raw);
+    if (!Array.isArray(list)) return;
+    for (const item of list) {
+      if (item && item.cfg && item.cfg.type) {
+        newTab(item.cfg, { connect: true, hex: item.hex });
+      }
+    }
+    setStatus(`已恢复 ${list.length} 个会话`);
+  } catch (e) { /* 解析失败忽略 */ }
+}
+
 // ---------- 标签管理 ----------
 function newTab(cfg, opts = {}) {
   const id = tabSeq++;
@@ -131,11 +156,12 @@ function newTab(cfg, opts = {}) {
   term.open(host);
   setTimeout(() => fitAddon.fit(), 0);
 
-  const tab = { id, cfg, term, host, state: 'idle', hex: !!cfg.hexMode, fitAddon };
+  const tab = { id, cfg, term, host, state: 'idle', hex: !!(opts.hex ?? cfg.hexMode), fitAddon };
   tabs.push(tab);
   renderTabbar();
   activateTab(id);
   bindClipboard(tab);
+  saveTabs();
 
   term.onData((d) => sendInput(id, d));
   term.onResize(({ cols, rows }) => send({ type: 'resize', id, cols, rows }));
@@ -262,6 +288,7 @@ function doCloseTab(id) {
   if (next) activateTab(next.id);
   renderTabbar();
   updateWelcome();
+  saveTabs();
   log(`关闭会话「${tab.cfg.name || id}」`);
 }
 
