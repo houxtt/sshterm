@@ -14,6 +14,7 @@ const tests = [
   { name: 'SSH 重连 (保存会话双击重连)', cmd: 'node', args: ['tests/e2e_reconnect.js', `ws://127.0.0.1:${PORT}`] },
   { name: 'WS 全链路 (SSH 真实连接)', cmd: 'node', args: ['tests/e2e_ws_chain.js', `ws://127.0.0.1:${PORT}`] },
   { name: 'SFTP 文件浏览+下载', cmd: 'node', args: ['tests/e2e_sftp.js', `ws://127.0.0.1:${PORT}`] },
+  { name: 'UI SFTP 面板 (连点防错)', cmd: 'node', args: ['tests/ui_sftp.js', `http://127.0.0.1:${PORT}/`] },
   { name: 'SSH 真实连接层 (192.168.1.216)', cmd: 'node', args: ['tests/e2e_ssh.js'] },
 ];
 

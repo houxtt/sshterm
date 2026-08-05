@@ -80,6 +80,7 @@ function handleMsg(m) {
       break;
     }
     case 'error': {
+      sftpBusy = false;                 // SFTP 加载失败也释放锁
       const tab = tabs.find(t => t.id === m.id);
       const where = tab ? tab : { term: null };
       if (tab) { tab.term.writeln(`\r\n\x1b[31m[错误] ${m.msg}\x1b[0m`); setTabState(tab.id, 'closed', '出错'); }
@@ -102,6 +103,7 @@ function handleMsg(m) {
     }
     case 'sftp': {
       if (m.action === 'list' && m.id === sftpConnId) {
+        sftpBusy = false;
         sftpPath = m.path;              // 服务端 realpath 后的绝对路径
         $('sftp-path').value = m.path;
         renderSftpList(m.entries);
@@ -454,6 +456,7 @@ function fillSerialPorts() {
 let sftpOpen = false;
 let sftpConnId = null;
 let sftpPath = '.';
+let sftpBusy = false;          // 加载锁: 防止双击/连点导致路径重复拼接
 
 function fmtSize(n) {
   if (n < 1024) return n + 'B';
@@ -478,10 +481,13 @@ function toggleSftpPanel() {
 }
 
 function sftpLoad() {
-  if (!sftpConnId) return;
+  if (sftpBusy || !sftpConnId) return;   // 加载中忽略重复点击
+  sftpBusy = true;
   $('sftp-path').value = sftpPath;
   $('sftp-status').textContent = '加载中…';
   send({ type: 'sftp', id: sftpConnId, action: 'list', path: sftpPath });
+  // 超时兜底: 8 秒无响应释放锁
+  setTimeout(() => { sftpBusy = false; }, 8000);
 }
 
 // 绝对路径拼接工具 (服务端返回 realpath 绝对路径)
