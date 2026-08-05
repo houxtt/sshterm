@@ -52,10 +52,15 @@ ws.onmessage = (ev) => {
   const payload = buf.subarray(2);
   if (tab.hex) tab.term.write(hexOf(payload) + ' ');
   else tab.term.write(payload);
-  // 累积终端内容 (保留最近 BUF_MAX), 供刷新后重放
+  // 累积终端内容 (数组 push, 避免高频输出时的字符串拼接卡顿)
   try {
     const text = new TextDecoder('utf-8', { fatal: false }).decode(payload);
-    tab.recBuf = (tab.recBuf + text).slice(-BUF_MAX);
+    if (!tab.recParts) tab.recParts = [];
+    tab.recLen = (tab.recLen || 0) + text.length;
+    tab.recParts.push(text);
+    while (tab.recLen > BUF_MAX && tab.recParts.length) {
+      tab.recLen -= tab.recParts.shift().length;
+    }
   } catch (e) { /* 忽略 */ }
 };
 function send(obj) { if (ws.readyState === 1) ws.send(JSON.stringify(obj)); }
@@ -132,7 +137,7 @@ const BUF_MAX = 200 * 1024;   // 每标签保留最近 200KB 输出, 刷新后�
 function saveTabs() {
   try {
     localStorage.setItem(LS_TABS, JSON.stringify(tabs.map(t => ({
-      cfg: t.cfg, hex: !!t.hex, buf: t.recBuf || '',
+      cfg: t.cfg, hex: !!t.hex, buf: (t.recParts || []).join(''),
     }))));
   } catch (e) { /* 存储失败忽略 */ }
 }
@@ -170,7 +175,7 @@ function newTab(cfg, opts = {}) {
   term.open(host);
   setTimeout(() => fitAddon.fit(), 0);
 
-  const tab = { id, cfg, term, host, state: 'idle', hex: !!(opts.hex ?? cfg.hexMode), fitAddon, recBuf: '' };
+  const tab = { id, cfg, term, host, state: 'idle', hex: !!(opts.hex ?? cfg.hexMode), fitAddon, recParts: [], recLen: 0 };
   tabs.push(tab);
   renderTabbar();
   activateTab(id);
@@ -179,7 +184,8 @@ function newTab(cfg, opts = {}) {
 
   // 刷新恢复: 先重放之前的终端内容, 再建立连接
   if (opts.replay) {
-    tab.recBuf = opts.replay;
+    tab.recParts = [opts.replay];
+    tab.recLen = opts.replay.length;
     try {
       term.write(opts.replay);
       term.write('\r\n\x1b[33m[--- 连接已重新建立 ---]\x1b[0m\r\n');
@@ -242,13 +248,15 @@ function pasteClipboard(term) {
 function bindClipboard(tab) {
   const { term, host } = tab;
 
-  // 1. 鼠标左键选中文本 → 自动复制 (只处理左键! 右键 mouseup 绝不触发复制)
+  // 1. 鼠标左键选中文本 → 自动复制 (只处理左键, 延迟执行不阻塞事件处理)
   host.addEventListener('mouseup', (e) => {
     if (e.button !== 0) return;
-    const now = Date.now();
-    if (now - _lastCopyAt < 400) return;
-    const sel = term.getSelection();
-    if (sel) { _lastCopyAt = now; copySelection(term); }
+    setTimeout(() => {
+      const now = Date.now();
+      if (now - _lastCopyAt < 400) return;
+      const sel = term.getSelection();
+      if (sel) { _lastCopyAt = now; copySelection(term); }
+    }, 0);
   });
 
   // 2. 右键: 有选中文本 → 复制 (符合直觉); 无选中 → 尝试粘贴

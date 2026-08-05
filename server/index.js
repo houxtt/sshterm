@@ -289,9 +289,9 @@ async function handle(ws, m) {
 }
 
 async function doConnect(ws, cfg, tabId) {
-  // 同一配置指纹的活跃连接复用
+  // 串口物理独占, 保留去重; SSH/Telnet 允许同 IP 开多个会话
   const fpKey = cfg.type + '|' + (cfg.host || '') + '|' + (cfg.port || '') + '|' + (cfg.baudRate || '');
-  if (liveByConfig.has(fpKey)) {
+  if (cfg.type === 'serial' && liveByConfig.has(fpKey)) {
     return send(ws, { type: 'reuse', id: tabId, connId: liveByConfig.get(fpKey) });
   }
 
