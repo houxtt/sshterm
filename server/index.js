@@ -64,22 +64,35 @@ const server = http.createServer((req, res) => {
       'Content-Disposition': `attachment; filename="${encodeURIComponent(dirName)}.zip"`,
       'Cache-Control': 'no-cache',
     });
-    conn.sftpCollectFiles(rdir).then((files) => {
+    conn.sftpCollectFiles(rdir).then(async (files) => {
       try {
         const { ZipArchive } = require('archiver');
-        const archive = new ZipArchive({ zlib: { level: 6 } });
+        const archive = new ZipArchive({ zlib: { level: 1 } });   // 低压缩快打包
         archive.on('error', (e) => { console.log('[sftp-zip]', e.message); res.end(); });
         archive.pipe(res);
-        for (const f of files) {
-          archive.append(conn.getSftpInst().createReadStream(f.path), { name: f.name });
-        }
+        // worker 限流: 同时只读 16 个文件流, 防止 SFTP 通道过载 (大目录 1.3 万文件)
+        const MAX_STREAMS = 16;
+        let idx = 0;
+        const worker = () => new Promise((resolve) => {
+          const next = () => {
+            const f = files[idx++];
+            if (!f) return resolve();
+            const rs = conn.getSftpInst().createReadStream(f.path);
+            rs.on('error', () => next());          // 单文件失败跳过
+            rs.on('end', next);
+            archive.append(rs, { name: f.name });
+          };
+          next();
+        });
+        await Promise.all(Array.from({ length: Math.min(MAX_STREAMS, files.length) }, worker));
         archive.finalize();
-        console.log(`[sftp-zip] ${rdir} → ${files.length} 文件打包中`);
+        console.log(`[sftp-zip] ${rdir} → ${files.length} 文件打包完成`);
       } catch (e) {
         console.log('[sftp-zip] 异常:', e.message);
         res.end(`\n[目录打包失败] ${e.message}`);
       }
     }).catch((e) => {
+      console.log('[sftp-zip] 收集失败:', e.message);
       res.end(`\n[目录打包失败] ${e.message}`);
     });
     return;

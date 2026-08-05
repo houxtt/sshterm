@@ -85,30 +85,45 @@ class SSHConnection extends BaseConnection {
   }
 
   // 递归收集目录下所有文件: 返回 [{path, name(相对目录), size}]
-  // 并发遍历 (每层 limit 路), 大目录(SDK 上万文件)也能快速收集
-  async sftpCollectFiles(dir, base = '', limit = 8) {
+  // 迭代式遍历 (显式栈, 深层目录树不会栈溢出), 批并发 limit 路
+  // seen 去重防符号链接循环, 每批 readdir 超时防挂起
+  async sftpCollectFiles(dir, base = '', limit = 4) {
     const sftp = await this.getSftp();
-    return this._sftpWalk(sftp, dir, base, limit);
-  }
-
-  async _sftpWalk(sftp, dir, base, limit) {
-    const entries = await new Promise((resolve, reject) => {
-      sftp.readdir(dir, (err, list) => (err ? reject(err) : resolve(list)));
-    });
     const files = [];
-    const subDirs = [];
-    for (const e of entries) {
-      const full = dir.endsWith('/') ? dir + e.filename : `${dir}/${e.filename}`;
-      const name = base ? `${base}/${e.filename}` : e.filename;
-      if (e.attrs.isDirectory()) subDirs.push({ full, name });
-      else files.push({ path: full, name, size: e.attrs.size });
-    }
-    // 按批并发遍历子目录
-    for (let i = 0; i < subDirs.length; i += limit) {
-      const chunk = subDirs.slice(i, i + limit);
-      const results = await Promise.all(
-        chunk.map(d => this._sftpWalk(sftp, d.full, d.name, limit)));
-      for (const r of results) files.push(...r);
+    const seen = new Set([dir]);
+    const stack = [{ dir, base }];
+    const readdirWithTimeout = (d, ms = 30000) => new Promise((resolve) => {
+      let done = false;
+      const timer = setTimeout(() => { if (!done) { done = true; resolve(null); } }, ms);
+      sftp.readdir(d, (err, list) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        resolve(err ? null : list);
+      });
+    });
+    while (stack.length) {
+      const batch = stack.splice(0, limit * 8);
+      const results = await Promise.all(batch.map(async (item) => {
+        const entries = await readdirWithTimeout(item.dir);
+        if (!entries) return null;                 // 无法读取/超时的目录跳过
+        const sub = { files: [], dirs: [] };
+        for (const e of entries) {
+          const full = item.dir.endsWith('/') ? item.dir + e.filename : `${item.dir}/${e.filename}`;
+          const name = item.base ? `${item.base}/${e.filename}` : e.filename;
+          if (e.attrs.isDirectory()) {
+            if (!seen.has(full)) { seen.add(full); sub.dirs.push({ dir: full, base: name }); }
+          } else {
+            sub.files.push({ path: full, name, size: e.attrs.size });
+          }
+        }
+        return sub;
+      }));
+      for (const r of results) {
+        if (!r) continue;
+        files.push(...r.files);
+        stack.push(...r.dirs);
+      }
     }
     return files;
   }
