@@ -242,9 +242,24 @@ function bindClipboard(tab) {
   const { term, host } = tab;
 
   // 1. 鼠标左键选中文本 → 自动复制
-  // 点击风暴防护: clearTimeout 合并, 无论点击多快最多 1 个定时器在跑
+  // 点击风暴防护: ①clearTimeout 合并定时器 ②1 秒内点击超阈值进入防风暴模式, 完全停用复制
+  let _stormCount = 0;
+  let _stormUntil = 0;
+  const inStorm = () => Date.now() < _stormUntil;
+  const markClick = () => {
+    const now = Date.now();
+    if (now > _stormUntil) {
+      _stormCount = (now - _stormUntil > 1000) ? 1 : _stormCount + 1;
+      if (_stormCount > 12) {           // 1 秒内超过 12 次 = 风暴
+        _stormUntil = now + 3000;       // 防风暴 3 秒: 完全不碰选择/剪贴板
+        _stormCount = 0;
+      }
+    }
+    return inStorm();
+  };
   host.addEventListener('mouseup', (e) => {
     if (e.button !== 0) return;
+    if (markClick()) return;            // 风暴中: 直接忽略, 不产生任何定时器
     clearTimeout(tab._copyTimer);
     tab._copyTimer = setTimeout(() => {
       try {
@@ -257,6 +272,7 @@ function bindClipboard(tab) {
   // 2. 右键: 有选中文本 → 复制; 无选中 → 不碰剪贴板 (readText 权限气泡模态会阻塞页面)
   host.addEventListener('contextmenu', (e) => {
     e.preventDefault();
+    if (inStorm()) return;              // 风暴中: 右键也不碰选择/剪贴板
     // 清掉 xterm 右键时灌入隐藏 textarea 的选中文本, 消除 DOM 选择与剪贴板操作竞争
     try { if (term.textarea) term.textarea.value = ''; } catch (err) { /* 忽略 */ }
     if (term.getSelection()) {
