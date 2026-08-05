@@ -514,7 +514,9 @@ function renderSftpList(entries) {
       <span class="sftp-name" title="${esc(e.name)}">${esc(e.name)}</span>
       <span class="sftp-size">${size}</span>
       <span class="sftp-time">${time}</span>
-      ${e.isDir ? '' : '<button class="mini sftp-dl" title="下载">⬇</button>'}`;
+      ${e.isDir
+        ? '<button class="mini sftp-dl" title="打包下载整个目录 (zip)">📦</button>'
+        : '<button class="mini sftp-dl" title="下载">⬇</button>'}`;
     row.onclick = () => {
       if (!e.isDir) return;
       sftpPath = sftpJoin(sftpPath, e.name);
@@ -524,12 +526,16 @@ function renderSftpList(entries) {
       ev.stopPropagation();
       const full = sftpJoin(sftpPath, e.name);
       const a = document.createElement('a');
-      a.href = `/api/sftp/download?conn=${sftpConnId}&path=${encodeURIComponent(full)}`;
-      a.download = e.name;
+      a.href = e.isDir
+        ? `/api/sftp/download-dir?conn=${sftpConnId}&path=${encodeURIComponent(full)}`
+        : `/api/sftp/download?conn=${sftpConnId}&path=${encodeURIComponent(full)}`;
+      a.download = e.isDir ? e.name + '.zip' : e.name;
       document.body.appendChild(a);
       a.click();
       a.remove();
-      $('sftp-status').textContent = `下载中: ${e.name}`;
+      $('sftp-status').textContent = e.isDir
+        ? `打包中: ${e.name}/ (大目录需耐心等待)`
+        : `下载中: ${e.name}`;
     });
     el.appendChild(row);
   }

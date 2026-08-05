@@ -49,6 +49,42 @@ const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css
 const server = http.createServer((req, res) => {
   let url = decodeURIComponent(req.url.split('?')[0]);
 
+  // SFTP 目录下载 (递归打包 zip, 流式): /api/sftp/download-dir?conn=<id>&path=<远端目录>
+  if (url.startsWith('/api/sftp/download-dir')) {
+    const qs = new URLSearchParams(req.url.split('?')[1] || '');
+    const conn = connections.get(parseInt(qs.get('conn'), 10));
+    const rdir = qs.get('path') || '';
+    if (!conn || !conn.getSftpInst()) {
+      res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+      return res.end('SFTP 通道未就绪(连接可能已断开)');
+    }
+    const dirName = path.basename(rdir) || 'download';
+    res.writeHead(200, {
+      'Content-Type': 'application/zip',
+      'Content-Disposition': `attachment; filename="${encodeURIComponent(dirName)}.zip"`,
+      'Cache-Control': 'no-cache',
+    });
+    conn.sftpCollectFiles(rdir).then((files) => {
+      try {
+        const { ZipArchive } = require('archiver');
+        const archive = new ZipArchive({ zlib: { level: 6 } });
+        archive.on('error', (e) => { console.log('[sftp-zip]', e.message); res.end(); });
+        archive.pipe(res);
+        for (const f of files) {
+          archive.append(conn.getSftpInst().createReadStream(f.path), { name: f.name });
+        }
+        archive.finalize();
+        console.log(`[sftp-zip] ${rdir} → ${files.length} 文件打包中`);
+      } catch (e) {
+        console.log('[sftp-zip] 异常:', e.message);
+        res.end(`\n[目录打包失败] ${e.message}`);
+      }
+    }).catch((e) => {
+      res.end(`\n[目录打包失败] ${e.message}`);
+    });
+    return;
+  }
+
   // SFTP 文件下载 (流式): /api/sftp/download?conn=<id>&path=<远端路径>
   if (url.startsWith('/api/sftp/download')) {
     const qs = new URLSearchParams(req.url.split('?')[1] || '');
@@ -299,3 +335,11 @@ server.on('error', (e) => {
   throw e;
 });
 process.on('SIGINT', () => { for (const c of connections.values()) c.close(); process.exit(0); });
+// 崩溃保护: 单个请求异常不杀死整个服务端
+process.on('uncaughtException', (e) => {
+  console.error('[uncaughtException]', e.message);
+  log('error', `服务端异常: ${e.message}`);
+});
+process.on('unhandledRejection', (e) => {
+  console.error('[unhandledRejection]', e && e.message);
+});

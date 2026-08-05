@@ -84,6 +84,35 @@ class SSHConnection extends BaseConnection {
     return this.getSftp().then(sftp => sftp.createReadStream(remotePath));
   }
 
+  // 递归收集目录下所有文件: 返回 [{path, name(相对目录), size}]
+  // 并发遍历 (每层 limit 路), 大目录(SDK 上万文件)也能快速收集
+  async sftpCollectFiles(dir, base = '', limit = 8) {
+    const sftp = await this.getSftp();
+    return this._sftpWalk(sftp, dir, base, limit);
+  }
+
+  async _sftpWalk(sftp, dir, base, limit) {
+    const entries = await new Promise((resolve, reject) => {
+      sftp.readdir(dir, (err, list) => (err ? reject(err) : resolve(list)));
+    });
+    const files = [];
+    const subDirs = [];
+    for (const e of entries) {
+      const full = dir.endsWith('/') ? dir + e.filename : `${dir}/${e.filename}`;
+      const name = base ? `${base}/${e.filename}` : e.filename;
+      if (e.attrs.isDirectory()) subDirs.push({ full, name });
+      else files.push({ path: full, name, size: e.attrs.size });
+    }
+    // 按批并发遍历子目录
+    for (let i = 0; i < subDirs.length; i += limit) {
+      const chunk = subDirs.slice(i, i + limit);
+      const results = await Promise.all(
+        chunk.map(d => this._sftpWalk(sftp, d.full, d.name, limit)));
+      for (const r of results) files.push(...r);
+    }
+    return files;
+  }
+
   getSftpInst() { return this._sftp; }
 
   resize(cols, rows) {
