@@ -110,6 +110,15 @@
         <label id="f-pwd-wrap">密码 <input id="f-password" type="password" placeholder="密码"></label>
         <label id="f-key-wrap" class="hidden">私钥路径 <input id="f-key" placeholder="C:\Users\xxx\.ssh\id_rsa"></label>
         <label id="f-pass-wrap" class="hidden">密钥口令 <input id="f-passphrase" type="password" placeholder="可选"></label>
+        <label>代理
+          <select id="f-proxy-type">
+            <option value="">无代理</option>
+            <option value="socks5">SOCKS5</option>
+            <option value="http">HTTP CONNECT</option>
+          </select>
+        </label>
+        <label id="f-proxy-wrap" class="hidden">代理地址 <input id="f-proxy-host" placeholder="127.0.0.1" style="width:140px">
+          <input id="f-proxy-port" type="number" placeholder="1080" style="width:80px"></label>
       </div>
 
       <!-- Telnet 字段 -->

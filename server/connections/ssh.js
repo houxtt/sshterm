@@ -7,12 +7,25 @@ class SSHConnection extends BaseConnection {
   async connect() {
     this.state = 'connecting';
     const { host, port = 22, username, auth = 'password',
-            password, privateKey, passphrase } = this.config;
+            password, privateKey, passphrase, proxy } = this.config;
     const cfg = {
       host, port, username, readyTimeout: 10000,
       keepaliveInterval: 15000,   // 15 秒心跳, 防空闲断链(网络设备 idle timeout)
       keepaliveCountMax: 3,       // 连续 3 次无响应才判定连接死亡
     };
+
+    // 代理支持: SOCKS5 / HTTP CONNECT (公司网络场景)
+    if (proxy && proxy.host && proxy.port) {
+      try {
+        const { connectProxy } = require('./proxy');
+        const sock = await connectProxy({ host, port }, proxy);
+        cfg.sock = sock;
+        sock.on('error', (e) => this._emitError(`代理连接错误: ${e.message}`));
+      } catch (e) {
+        this._emitError(`代理连接失败: ${e.message}`);
+        return Promise.reject(e);
+      }
+    }
 
     if (auth === 'key') {
       cfg.privateKey = fs.readFileSync(privateKey);

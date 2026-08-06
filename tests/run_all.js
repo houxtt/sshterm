@@ -13,6 +13,7 @@ const tests = [
   { name: 'UI 卡死回归 (左键选择+右键)', cmd: 'node', args: ['tests/ui_clipboard_regression.js', `http://127.0.0.1:${PORT}/`] },
   { name: 'SSH 重连 (保存会话双击重连)', cmd: 'node', args: ['tests/e2e_reconnect.js', `ws://127.0.0.1:${PORT}`] },
   { name: 'WS 全链路 (SSH 真实连接)', cmd: 'node', args: ['tests/e2e_ws_chain.js', `ws://127.0.0.1:${PORT}`] },
+  { name: 'SSH 代理 (SOCKS5)', cmd: 'node', args: ['tests/e2e_ssh_proxy.js', `ws://127.0.0.1:${PORT}`] },
   { name: 'SFTP 文件浏览+下载', cmd: 'node', args: ['tests/e2e_sftp.js', `ws://127.0.0.1:${PORT}`] },
   { name: 'SFTP 文件上传', cmd: 'node', args: ['tests/e2e_sftp_upload.js', `ws://127.0.0.1:${PORT}`] },
   { name: 'SFTP 文件夹上传', cmd: 'node', args: ['tests/e2e_sftp_dir_upload.js', `ws://127.0.0.1:${PORT}`] },

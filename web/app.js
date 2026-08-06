@@ -454,6 +454,9 @@ function openDlg(existing = null) {
   $('f-password').value = '';
   $('f-key').value = existing?.privateKey || '';
   $('f-passphrase').value = '';
+  $('f-proxy-type').value = existing?.proxy?.type || '';
+  $('f-proxy-host').value = existing?.proxy?.host || '';
+  $('f-proxy-port').value = existing?.proxy?.port || '';
   $('t-host').value = existing?.host || '';
   $('t-port').value = existing?.port || 23;
   $('t-autologin').checked = !!existing?.autoLogin;
@@ -479,6 +482,8 @@ function updateDlgFields() {
   $('f-pwd-wrap').classList.toggle('hidden', auth !== 'password');
   $('f-key-wrap').classList.toggle('hidden', auth !== 'key');
   $('f-pass-wrap').classList.toggle('hidden', auth !== 'key');
+  const proxy = $('f-proxy-type').value;
+  $('f-proxy-wrap').classList.toggle('hidden', !proxy);
   const auto = $('t-autologin').checked;
   $('t-user-wrap').classList.toggle('hidden', !auto);
   $('t-pass-wrap2').classList.toggle('hidden', !auto);
@@ -488,12 +493,18 @@ function collectDlg() {
   const type = $('f-type').value;
   const base = { id: editingId || undefined, name: $('f-name').value.trim(), type };
   if (type === 'ssh') {
+    const ptype = $('f-proxy-type').value;
     Object.assign(base, {
       host: $('f-host').value.trim(), port: parseInt($('f-port').value, 10) || 22,
       username: $('f-user').value.trim(), auth: $('f-auth').value,
       password: $('f-password').value || undefined,
       privateKey: $('f-key').value.trim() || undefined,
       passphrase: $('f-passphrase').value || undefined,
+      proxy: ptype ? {
+        type: ptype,
+        host: $('f-proxy-host').value.trim(),
+        port: parseInt($('f-proxy-port').value, 10) || 1080,
+      } : undefined,
     });
   } else if (type === 'telnet') {
     Object.assign(base, {
@@ -797,6 +808,7 @@ $('btn-refresh').onclick = () => { send({ type: 'list' }); send({ type: 'serialp
 $('s-refresh').onclick = () => send({ type: 'serialports' });
 $('f-type').onchange = updateDlgFields;
 $('f-auth').onchange = updateDlgFields;
+$('f-proxy-type').onchange = updateDlgFields;
 $('t-autologin').onchange = updateDlgFields;
 $('btn-dlg-cancel').onclick = () => $('dlg-mask').classList.add('hidden');
 
