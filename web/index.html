@@ -19,6 +19,7 @@
     <button id="btn-timer" title="定时发送(串口)">⏱ 定时</button>
     <button id="btn-scan" title="端口扫描/设备发现">🔍 扫描</button>
     <button id="btn-split" title="分屏(当前标签左右分屏)">⊞ 分屏</button>
+    <button id="btn-cmds" title="快捷命令(保存/执行/脚本)">⚡ 命令</button>
     <span class="sep"></span>
     <span id="conn-status" class="status-dot idle" title="服务器连接状态"></span>
     <span id="conn-status-text">未连接服务器</span>
@@ -140,6 +141,11 @@
         <label id="t-user-wrap" class="hidden">用户名 <input id="t-user"></label>
         <label id="t-pass-wrap2" class="hidden">密码 <input id="t-pass" type="password"></label>
       </div>
+      <div class="grp">
+        <label>连接后自动执行(每行一条)
+          <textarea id="f-autocmds" rows="3" placeholder="如:&#10;ls&#10;dmesg | tail -20"></textarea>
+        </label>
+      </div>
 
       <!-- 串口字段 -->
       <div class="grp hidden" id="grp-serial">
@@ -177,6 +183,23 @@
       <button id="btn-close-ok" class="danger">确认关闭</button>
       <button id="btn-close-cancel">取消</button>
     </div>
+  </div>
+</div>
+
+<!-- 快捷命令面板 -->
+<div id="dlg-cmds-mask" class="hidden">
+  <div id="dlg-cmds">
+    <h3>⚡ 快捷命令 <button id="cmds-close" class="mini" style="float:right">✕</button></h3>
+    <div class="form">
+      <label>命令名称 <input id="cmd-name" placeholder="如: 查看内核日志"></label>
+      <label>命令内容 <input id="cmd-content" placeholder="如: dmesg | tail -50" style="font-family:Consolas,monospace"></label>
+      <div class="dlg-actions">
+        <button id="btn-cmd-add" class="primary">保存命令</button>
+        <button id="btn-cmd-runall" title="按顺序执行全部命令">执行全部</button>
+      </div>
+    </div>
+    <div id="cmd-list"></div>
+    <div class="muted cmd-foot">点击命令=立即发送到当前会话;连接后自动执行见"新建连接→SSH/Telnet→连接后执行"</div>
   </div>
 </div>
 

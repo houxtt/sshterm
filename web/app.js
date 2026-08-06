@@ -107,7 +107,13 @@ function handleMsg(m) {
         }
         if (m.state === 'connected') {
           tab.cfg._serverCfg = m.cfg;
-          if (!pane) fitTerm(tab);
+          if (!pane) {
+            fitTerm(tab);
+            // 连接后自动执行脚本 (Xshell 登录脚本风格)
+            if (tab.cfg.autoCmds && tab.cfg.autoCmds.length) {
+              setTimeout(() => runAutoCmds(tab.cfg), 300);
+            }
+          }
         }
       }
       break;
@@ -593,6 +599,7 @@ function openDlg(existing = null) {
   $('t-autologin').checked = !!existing?.autoLogin;
   $('t-user').value = existing?.loginUser || '';
   $('t-pass').value = '';
+  $('f-autocmds').value = (existing?.autoCmds || []).join('\n');
   $('s-port').value = existing?.port2 || existing?.port || '';
   $('s-baud').value = String(existing?.baudRate || 115200);
   $('s-data').value = String(existing?.dataBits || 8);
@@ -653,6 +660,9 @@ function collectDlg() {
       parity: $('s-parity').value, hexMode: $('s-hex').checked,
     });
   }
+  // 连接后自动执行脚本 (所有协议通用)
+  const autoCmds = $('f-autocmds').value.split('\n').map(s => s.trim()).filter(Boolean);
+  if (autoCmds.length) base.autoCmds = autoCmds;
   return base;
 }
 
@@ -854,6 +864,82 @@ $('btn-tm-start').onclick = () => {
 };
 $('btn-tm-stop').onclick = () => { stopTimer(); $('dlg-timer-mask').classList.add('hidden'); setStatus('定时发送已停止'); };
 function stopTimer() { if (_timerHandle) { clearInterval(_timerHandle); _timerHandle = null; } }
+
+// ---------- 快捷命令 (Xshell 风格: 保存/记忆/执行/自动脚本) ----------
+const LS_CMDS = 'sshterm.commands';
+let commands = [];
+try { commands = JSON.parse(localStorage.getItem(LS_CMDS) || '[]'); } catch (e) { commands = []; }
+
+function saveCommands() {
+  try { localStorage.setItem(LS_CMDS, JSON.stringify(commands)); } catch (e) {}
+}
+function renderCommands() {
+  const el = $('cmd-list');
+  el.innerHTML = '';
+  if (!commands.length) {
+    el.innerHTML = '<div class="muted" style="padding:10px">(还没有保存的命令, 上面添加)</div>';
+    return;
+  }
+  for (let i = 0; i < commands.length; i++) {
+    const c = commands[i];
+    const row = document.createElement('div');
+    row.className = 'cmd-item';
+    row.innerHTML = `
+      <span class="cmd-ico">⚡</span>
+      <span class="cmd-name" title="${esc(c.name)}">${esc(c.name)}</span>
+      <span class="cmd-cmd" title="${esc(c.cmd)}">${esc(c.cmd)}</span>
+      <button class="cmd-del mini" title="删除">🗑</button>`;
+    row.onclick = () => runCommand(c.cmd);
+    row.querySelector('.cmd-del').onclick = (e) => {
+      e.stopPropagation();
+      commands.splice(i, 1);
+      saveCommands();
+      renderCommands();
+    };
+    el.appendChild(row);
+  }
+}
+// 执行命令: 发送到激活会话
+function runCommand(cmd) {
+  const tab = tabs.find(t => t.id === activeTabId);
+  if (!tab) return setStatus('没有激活的会话');
+  if (tab.state !== 'connected') return setStatus('会话未连接');
+  sendInput(tab.id, cmd + '\n');
+  setStatus(`已发送: ${cmd}`);
+}
+// 连接后自动执行脚本 (会话配置 autoCmds)
+function runAutoCmds(cfg) {
+  if (!cfg.autoCmds || !cfg.autoCmds.length) return;
+  const tab = tabs.find(t => t.id === activeTabId && t.cfg === cfg);
+  const id = tab ? tab.id : null;
+  if (!id) return;
+  setStatus(`自动执行 ${cfg.autoCmds.length} 条命令...`);
+  cfg.autoCmds.forEach((cmd, i) => {
+    setTimeout(() => {
+      const t = tabs.find(x => x.id === id);
+      if (t && t.state === 'connected') sendInput(id, cmd + '\n');
+    }, 800 * (i + 1));
+  });
+}
+
+$('btn-cmds').onclick = () => { $('dlg-cmds-mask').classList.remove('hidden'); renderCommands(); };
+$('cmds-close').onclick = () => $('dlg-cmds-mask').classList.add('hidden');
+$('btn-cmd-add').onclick = () => {
+  const name = $('cmd-name').value.trim();
+  const cmd = $('cmd-content').value.trim();
+  if (!name || !cmd) return setStatus('命令名称和内容不能为空');
+  commands.push({ name, cmd });
+  saveCommands();
+  $('cmd-name').value = '';
+  $('cmd-content').value = '';
+  renderCommands();
+  setStatus(`命令已保存: ${name}`);
+};
+$('btn-cmd-runall').onclick = () => {
+  if (!commands.length) return setStatus('没有命令可执行');
+  commands.forEach((c, i) => setTimeout(() => runCommand(c.cmd), 600 * i));
+  setStatus(`执行 ${commands.length} 条命令...`);
+};
 
 // ---------- 端口扫描 (设备发现, 只需输入 IP) ----------
 const SCAN_PORTS = [21, 22, 23, 80, 443, 2000, 3389, 5555, 5900, 6379, 8080, 3306, 5432, 27017, 11211];

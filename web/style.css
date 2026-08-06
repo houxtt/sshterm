@@ -216,6 +216,29 @@ button.mini { padding: 2px 8px; font-size: 11px; }
 .scan-open { color: #22c55e; }
 .scan-closed { color: #565f89; }
 
+/* 快捷命令面板 */
+#dlg-cmds-mask {
+  position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 110;
+  display: flex; align-items: center; justify-content: center;
+}
+#dlg-cmds-mask.hidden { display: none; }
+#dlg-cmds {
+  background: #1f2030; border: 1px solid #3a3b4d; border-radius: 8px;
+  padding: 18px 22px; width: 480px; max-height: 80vh; display: flex; flex-direction: column;
+}
+#dlg-cmds h3 { color: #e0e2f0; margin-bottom: 12px; }
+#cmd-list { flex: 1; overflow-y: auto; margin-top: 10px; min-height: 120px; }
+.cmd-item {
+  display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+  border-bottom: 1px solid #2a2b3a; cursor: pointer; font-size: 12px;
+}
+.cmd-item:hover { background: #2a2b3a; }
+.cmd-item .cmd-ico { color: #3b82f6; }
+.cmd-item .cmd-name { color: #c0caf5; width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmd-item .cmd-cmd { flex: 1; color: #7dcfff; font-family: Consolas, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmd-item .cmd-del { color: #ef4444; }
+.cmd-foot { margin-top: 8px; font-size: 11px; }
+
 /* 定时发送对话框 (复用 dlg 样式) */
 #dlg-timer-mask {
   position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 110;
