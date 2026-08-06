@@ -136,10 +136,30 @@ const server = http.createServer((req, res) => {
   });
 });
 
+// ---------- 空闲自动退出 (桌面启动器 --auto-exit 模式): 无 WS 连接 10 秒后退出 ----------
+const AUTO_EXIT = process.argv.includes('--auto-exit');
+let wsCount = 0;
+let idleExitTimer = null;
+function scheduleIdleExit() {
+  if (!AUTO_EXIT) return;
+  clearTimeout(idleExitTimer);
+  if (wsCount <= 0) {
+    idleExitTimer = setTimeout(() => {
+      console.log('[auto-exit] 无客户端连接, 服务自动退出');
+      for (const c of connections.values()) c.close();
+      process.exit(0);
+    }, 10000);
+  }
+}
+
 // ---------- WebSocket 协议 ----------
 const wss = new WebSocketServer({ server });
 wss.on('connection', (ws) => {
+  wsCount++;
+  clearTimeout(idleExitTimer);
   ws.on('close', () => {
+    wsCount--;
+    scheduleIdleExit();
     // 浏览器离开 → 关闭该客户端发起的全部连接, 防止僵尸连接
     for (const [id, conn] of connections) {
       conn.close();
@@ -346,6 +366,7 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log('└──────────────────────────────────────────────┘');
   console.log(`  地址: http://127.0.0.1:${PORT}`);
   console.log(`  会话: ${CONN_FILE}`);
+  scheduleIdleExit();   // auto-exit 模式: 浏览器未连上则 10 秒后退出
   const open = !process.argv.includes('--no-open');
   if (open) {
     require('child_process').exec(`start http://127.0.0.1:${PORT}`);
