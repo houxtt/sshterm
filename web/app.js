@@ -865,19 +865,29 @@ $('btn-tm-start').onclick = () => {
 $('btn-tm-stop').onclick = () => { stopTimer(); $('dlg-timer-mask').classList.add('hidden'); setStatus('定时发送已停止'); };
 function stopTimer() { if (_timerHandle) { clearInterval(_timerHandle); _timerHandle = null; } }
 
-// ---------- 快捷命令 (Xshell 风格: 保存/记忆/执行/自动脚本) ----------
-const LS_CMDS = 'sshterm.commands';
+// ---------- 快捷命令 (Xshell 风格: 每会话独立命令集) ----------
+// 命令按会话隔离存储: localStorage key = sshterm.commands.<sessionKey>
+function sessionCmdKey(cfg) {
+  if (!cfg) return 'default';
+  return cfg.id || `${cfg.type}|${cfg.name}|${cfg.host}|${cfg.port || ''}|${cfg.baudRate || ''}`;
+}
+let cmdKey = 'default';
 let commands = [];
-try { commands = JSON.parse(localStorage.getItem(LS_CMDS) || '[]'); } catch (e) { commands = []; }
-
+function loadCommands() {
+  try { commands = JSON.parse(localStorage.getItem('sshterm.commands.' + cmdKey) || '[]'); }
+  catch (e) { commands = []; }
+}
 function saveCommands() {
-  try { localStorage.setItem(LS_CMDS, JSON.stringify(commands)); } catch (e) {}
+  try { localStorage.setItem('sshterm.commands.' + cmdKey, JSON.stringify(commands)); } catch (e) {}
 }
 function renderCommands() {
   const el = $('cmd-list');
   el.innerHTML = '';
+  const tab = tabs.find(t => t.id === activeTabId);
+  const curName = tab ? (tab.cfg.name || tab.cfg.host || '会话') : '未连接';
+  $('cmd-cur').textContent = `当前会话: ${curName} (${commands.length} 条命令)`;
   if (!commands.length) {
-    el.innerHTML = '<div class="muted" style="padding:10px">(还没有保存的命令, 上面添加)</div>';
+    el.innerHTML = '<div class="muted" style="padding:10px">(该会话还没有命令, 上面添加)</div>';
     return;
   }
   for (let i = 0; i < commands.length; i++) {
@@ -922,7 +932,13 @@ function runAutoCmds(cfg) {
   });
 }
 
-$('btn-cmds').onclick = () => { $('dlg-cmds-mask').classList.remove('hidden'); renderCommands(); };
+$('btn-cmds').onclick = () => {
+  const tab = tabs.find(t => t.id === activeTabId);
+  cmdKey = sessionCmdKey(tab ? tab.cfg : null);
+  loadCommands();
+  $('dlg-cmds-mask').classList.remove('hidden');
+  renderCommands();
+};
 $('cmds-close').onclick = () => $('dlg-cmds-mask').classList.add('hidden');
 $('btn-cmd-add').onclick = () => {
   const name = $('cmd-name').value.trim();
