@@ -131,6 +131,77 @@ function handleMsg(m) {
   }
 }
 
+// ---------- 国际化 (中/英) ----------
+const I18N = {
+  zh: {
+    btn_new: '＋ 新建连接', btn_save: '💾 保存会话', btn_log: '📋 日志',
+    btn_sftp: '📁 文件', btn_killall: '⏹ 全部断开', btn_lang: '🌐 EN',
+    dl_title_new: '新建连接', dl_title_edit: '编辑会话',
+    dl_conn: '连接', dl_save_conn: '保存并连接', dl_cancel: '取消',
+    f_name: '会话名称', f_type: '类型', f_host: '主机', f_port: '端口',
+    f_user: '用户名', f_auth: '认证方式', f_password: '密码', f_key: '私钥路径',
+    f_passphrase: '密钥口令', f_proxy: '代理', f_proxy_addr: '代理地址',
+    t_autologin: '自动登录', s_baud: '波特率', s_hex: 'HEX 显示/发送',
+    sftp_up: '上级', sftp_upload: '上传', sftp_upload_dir: '传文件夹',
+    sftp_refresh: '刷新', sftp_close: '关闭', sftp_dl: '下载', sftp_dir_dl: '打包下载',
+    side_title: '已保存会话', side_batch: '批量', side_foot: '双击连接',
+    batch_all: '全选', batch_del: '删除选中', batch_cancel: '取消',
+    close_title: '关闭会话?', close_ok: '确认关闭', welcome_p: 'SSH · Telnet · 串口 一体化连接工具',
+    ws_ok: '服务器已连接', ws_off: '服务器已断开', ws_init: '未连接服务器',
+  },
+  en: {
+    btn_new: '＋ New', btn_save: '💾 Save', btn_log: '📋 Log',
+    btn_sftp: '📁 Files', btn_killall: '⏹ Disconnect All', btn_lang: '🌐 中文',
+    dl_title_new: 'New Connection', dl_title_edit: 'Edit Session',
+    dl_conn: 'Connect', dl_save_conn: 'Save & Connect', dl_cancel: 'Cancel',
+    f_name: 'Name', f_type: 'Type', f_host: 'Host', f_port: 'Port',
+    f_user: 'Username', f_auth: 'Auth', f_password: 'Password', f_key: 'Private Key',
+    f_passphrase: 'Passphrase', f_proxy: 'Proxy', f_proxy_addr: 'Proxy Address',
+    t_autologin: 'Auto login', s_baud: 'Baud', s_hex: 'HEX mode',
+    sftp_up: 'Up', sftp_upload: 'Upload', sftp_upload_dir: 'Folder',
+    sftp_refresh: 'Refresh', sftp_close: 'Close', sftp_dl: 'Download', sftp_dir_dl: 'Zip',
+    side_title: 'Sessions', side_batch: 'Batch', side_foot: 'Double-click to connect',
+    batch_all: 'All', batch_del: 'Delete', batch_cancel: 'Cancel',
+    close_title: 'Close session?', close_ok: 'Close', welcome_p: 'SSH · Telnet · Serial all-in-one',
+    ws_ok: 'Server connected', ws_off: 'Server disconnected', ws_init: 'Not connected',
+  },
+};
+let LANG = localStorage.getItem('sshterm.lang') || 'zh';
+function t(key) { return (I18N[LANG] && I18N[LANG][key]) || I18N.zh[key] || key; }
+function applyI18n() {
+  const map = {
+    'btn-new': 'btn_new', 'btn-save': 'btn_save', 'btn-log': 'btn_log',
+    'btn-sftp': 'btn_sftp', 'btn-killall': 'btn_killall', 'btn-lang': 'btn_lang',
+    'btn-batch': 'side_batch',
+  };
+  for (const [id, key] of Object.entries(map)) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = t(key);
+  }
+  const dyn = {
+    'btn-dlg-conn': 'dl_conn', 'btn-dlg-save': 'dl_save_conn', 'btn-dlg-cancel': 'dl_cancel',
+    'btn-close-ok': 'close_ok', 'btn-close-cancel': 'dl_cancel',
+    'sftp-up': 'sftp_up', 'sftp-upload': 'sftp_upload', 'sftp-upload-dir': 'sftp_upload_dir',
+    'sftp-refresh': 'sftp_refresh', 'sftp-close': 'sftp_close',
+    'batch-del': 'batch_del', 'batch-cancel': 'batch_cancel',
+  };
+  for (const [id, key] of Object.entries(dyn)) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = t(key);
+  }
+  $('batch-all').parentElement.firstChild.textContent = t('batch_all') + ' ';
+  $('dlg-title').textContent = t('dl_title_new');
+  document.querySelectorAll('label[for]').forEach(() => {});
+  // 状态栏
+  if (ws && ws.readyState === 1) $('conn-status-text').textContent = t('ws_ok');
+}
+function toggleLang() {
+  LANG = LANG === 'zh' ? 'en' : 'zh';
+  localStorage.setItem('sshterm.lang', LANG);
+  applyI18n();
+  setStatus(t(LANG === 'zh' ? 'ws_ok' : 'ws_ok'));
+}
+
 // ---------- 标签持久化 (刷新页面自动恢复打开的会话 + 终端内容) ----------
 const LS_TABS = 'sshterm.tabs';
 const BUF_MAX = 200 * 1024;   // 每标签保留最近 200KB 输出, 刷新后重放
@@ -680,6 +751,7 @@ $('btn-save').onclick = () => {
 };
 $('btn-log').onclick = openLogPanel;
 $('log-close').onclick = () => $('dlg-log-mask').classList.add('hidden');
+$('btn-lang').onclick = toggleLang;
 $('btn-sftp').onclick = toggleSftpPanel;
 $('btn-killall').onclick = () => {
   if (!tabs.length) return setStatus('没有打开的会话');
@@ -871,3 +943,4 @@ $('srv-addr').textContent = `localhost${location.port ? ':' + location.port : ''
 // 初始欢迎
 updateWelcome();
 updateSftpBtn();
+applyI18n();

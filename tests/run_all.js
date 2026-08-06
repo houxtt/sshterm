@@ -28,6 +28,7 @@ const tests = [
   { name: 'UI 会话列表选择不复制', cmd: 'node', args: ['tests/ui_sidebar.js', `http://127.0.0.1:${PORT}/`] },
   { name: 'UI 鼠标乱点不卡死', cmd: 'node', args: ['tests/ui_mouse_mash.js', `http://127.0.0.1:${PORT}/`] },
   { name: 'UI SFTP 传输进度条', cmd: 'node', args: ['tests/ui_sftp_progress.js', `http://127.0.0.1:${PORT}/`] },
+  { name: 'UI 语言切换 (中英)', cmd: 'node', args: ['tests/ui_i18n.js', `http://127.0.0.1:${PORT}/`] },
   { name: 'SSH 真实连接层 (192.168.1.216)', cmd: 'node', args: ['tests/e2e_ssh.js'] },
 ];
 
