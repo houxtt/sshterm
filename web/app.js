@@ -822,12 +822,11 @@ $('search-next').onclick = () => doSearch(1);
 $('search-prev').onclick = () => doSearch(-1);
 $('search-close').onclick = closeSearch;
 
-// ---------- 定时发送 ----------
+// ---------- 定时发送 (串口/SSH/Telnet 通用) ----------
 let _timerHandle = null;
 $('btn-timer').onclick = () => {
   const tab = tabs.find(t => t.id === activeTabId);
   if (!tab) return setStatus('没有激活的会话');
-  if (tab.cfg.type !== 'serial') return setStatus('定时发送仅串口会话可用');
   $('dlg-timer-mask').classList.remove('hidden');
 };
 $('btn-tm-cancel').onclick = () => $('dlg-timer-mask').classList.add('hidden');
