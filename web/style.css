@@ -158,6 +158,21 @@ button.mini { padding: 2px 8px; font-size: 11px; }
 .sftp-item .sftp-dl { padding: 0 6px; font-size: 12px; }
 .sftp-status { padding: 5px 10px; border-top: 1px solid #2a2b3a; color: #565f89; font-size: 11px; }
 
+/* 分屏 pane */
+.term-host.pane1 {
+  position: absolute; top: 0; right: 0; bottom: 0; left: 50%;
+  padding: 4px; border-left: 1px solid #2a2b3a; background: #1a1b26;
+}
+#terms .split-container { display: flex; flex-direction: row; }
+#terms .split-container .term-host { position: relative; flex: 1; padding: 4px; }
+#terms .split-container .term-host.pane-split { flex: 1; }
+.pane-close {
+  position: absolute; top: 4px; right: 8px; z-index: 9;
+  background: rgba(0,0,0,.5); color: #ef4444; border: none;
+  border-radius: 3px; padding: 0 6px; font-size: 11px; cursor: pointer;
+}
+.pane-close:hover { background: rgba(239,68,68,.3); }
+
 /* 终端搜索条 */
 #search-bar {
   display: flex; align-items: center; gap: 6px; padding: 5px 10px;

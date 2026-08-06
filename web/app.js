@@ -46,27 +46,37 @@ ws.onclose = () => {
 };
 ws.onmessage = (ev) => {
   if (typeof ev.data === 'string') return handleMsg(JSON.parse(ev.data));
-  // binary: [tabId: 2B LE][data]
+  // binary: [connId: 2B LE][data] → 找对应标签/pane
   const buf = new Uint8Array(ev.data);
   const id = buf[0] | (buf[1] << 8);
-  const tab = tabs.find(t => t.id === id);
+  let tab = tabs.find(t => t.id === id);
+  let pane = null;
+  if (!tab) {
+    for (const t of tabs) {
+      const p = (t.extraPanes || []).find(x => x.connId === id);
+      if (p) { tab = t; pane = p; break; }
+    }
+  }
   if (!tab) return;
+  const term = pane ? pane.term : tab.term;
   const payload = buf.subarray(2);
-  if (tab.hex) tab.term.write(hexOf(payload) + ' ');
-  else tab.term.write(payload);
+  if ((pane ? pane.hex : tab.hex)) term.write(hexOf(payload) + ' ');
+  else term.write(payload);
   // 串口日志 (开启时带时间戳累积)
   try {
     const text = new TextDecoder('utf-8', { fatal: false }).decode(payload);
-    if (tab.logging) logToTab(tab, text);
+    const target = pane || tab;
+    if (target.logging) logToTab(target, text);
   } catch (e) { /* 忽略 */ }
   // 累积终端内容 (数组 push, 避免高频输出时的字符串拼接卡顿)
   try {
     const text = new TextDecoder('utf-8', { fatal: false }).decode(payload);
-    if (!tab.recParts) tab.recParts = [];
-    tab.recLen = (tab.recLen || 0) + text.length;
-    tab.recParts.push(text);
-    while (tab.recLen > BUF_MAX && tab.recParts.length) {
-      tab.recLen -= tab.recParts.shift().length;
+    const target = pane || tab;
+    if (!target.recParts) target.recParts = [];
+    target.recLen = (target.recLen || 0) + text.length;
+    target.recParts.push(text);
+    while (target.recLen > BUF_MAX && target.recParts.length) {
+      target.recLen -= target.recParts.shift().length;
     }
   } catch (e) { /* 忽略 */ }
 };
@@ -88,21 +98,36 @@ function handleMsg(m) {
       break;
     }
     case 'status': {
-      const tab = tabs.find(t => t.id === m.id);
+      let tab = tabs.find(t => t.id === m.id);
+      let pane = null;
+      if (!tab) for (const t of tabs) {
+        const p = (t.extraPanes || []).find(x => x.connId === m.id);
+        if (p) { tab = t; pane = p; break; }
+      }
       if (tab) {
-        setTabState(m.id, m.state, m.msg);
+        if (pane) {
+          pane.state = m.state;
+          if (m.state === 'connected') { fitTerm(pane); }
+        } else {
+          setTabState(m.id, m.state, m.msg);
+        }
         if (m.state === 'connected') {
           tab.cfg._serverCfg = m.cfg;
-          fitTerm(tab);
+          if (!pane) fitTerm(tab);
         }
       }
       break;
     }
     case 'error': {
       sftpBusy = false;                 // SFTP 加载失败也释放锁
-      const tab = tabs.find(t => t.id === m.id);
-      const where = tab ? tab : { term: null };
-      if (tab) { tab.term.writeln(`\r\n\x1b[31m[错误] ${m.msg}\x1b[0m`); setTabState(tab.id, 'closed', '出错'); }
+      let tab = tabs.find(t => t.id === m.id);
+      let pane = null;
+      if (!tab) for (const t of tabs) {
+        const p = (t.extraPanes || []).find(x => x.connId === m.id);
+        if (p) { tab = t; pane = p; break; }
+      }
+      const term = pane ? pane.term : (tab ? tab.term : null);
+      if (term) { term.writeln(`\r\n\x1b[31m[错误] ${m.msg}\x1b[0m`); if (!pane) setTabState(tab.id, 'closed', '出错'); }
       else setStatus(`错误: ${m.msg}`);
       break;
     }
@@ -269,7 +294,7 @@ function newTab(cfg, opts = {}) {
   term.open(host);
   setTimeout(() => fitAddon.fit(), 0);
 
-  const tab = { id, cfg, term, host, state: 'idle', hex: !!(opts.hex ?? cfg.hexMode), fitAddon, searchAddon, recParts: [], recLen: 0 };
+  const tab = { id, cfg, term, host, state: 'idle', hex: !!(opts.hex ?? cfg.hexMode), fitAddon, searchAddon, recParts: [], recLen: 0, extraPanes: [] };
   tabs.push(tab);
   renderTabbar();
   activateTab(id);
@@ -415,8 +440,14 @@ function requestCloseTab(id) {
 function doCloseTab(id) {
   const idx = tabs.findIndex(t => t.id === id);
   if (idx < 0) return;
+  const tab = tabs[idx];
+  for (const p of tab.extraPanes) {
+    send({ type: 'disconnect', id: p.connId });
+    try { p.term.dispose(); } catch (e) {}
+    p.host.remove();
+  }
   send({ type: 'disconnect', id });
-  const [tab] = tabs.splice(idx, 1);
+  tabs.splice(idx, 1);
   try { tab.term.dispose(); } catch (e) {}
   tab.host.remove();
   if (activeTabId === id) activeTabId = null;
@@ -872,6 +903,51 @@ function renderScan(m) {
   }
   $('scan-result').innerHTML = `<div class="muted">${esc(m.host)} 开放端口:</div>` +
     m.open.map(p => `<div class="scan-open">● ${p} ${PORT_NAMES[p] ? ' (' + PORT_NAMES[p] + ')' : ''}</div>`).join('');
+}
+
+// ---------- 分屏 (标签内左右第二 pane) ----------
+$('btn-split').onclick = () => {
+  const tab = tabs.find(t => t.id === activeTabId);
+  if (!tab) return setStatus('没有激活的会话');
+  if (tab.extraPanes.length) return setStatus('最多分 2 屏');
+  const host = document.createElement('div');
+  host.className = 'term-host pane1';
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'pane-close';
+  closeBtn.textContent = '✕';
+  closeBtn.title = '关闭此分屏';
+  host.appendChild(closeBtn);
+  $('terms').appendChild(host);
+
+  const term = new Terminal({
+    fontSize: 13, fontFamily: 'Consolas, "Courier New", monospace',
+    cursorBlink: true, scrollback: 5000, allowProposedApi: true,
+    theme: { background: '#1a1b26', foreground: '#c0caf5' },
+  });
+  const fitAddon = new (FitAddonCtor)();
+  term.loadAddon(fitAddon);
+  term.open(host);
+  setTimeout(() => fitAddon.fit(), 0);
+
+  const pane = { connId: tabSeq++, term, host, cfg: { ...tab.cfg },
+    state: 'connecting', hex: !!tab.hex, fitAddon, recParts: [], recLen: 0, logging: false, logBuf: '' };
+  tab.extraPanes.push(pane);
+  bindClipboard(pane);                    // 复用复制粘贴
+  term.onData((d) => sendInput(pane.connId, d));
+  term.onResize(({ cols, rows }) => send({ type: 'resize', id: pane.connId, cols, rows }));
+  closeBtn.onclick = () => closePane(tab, pane);
+  send({ type: 'connect', session: pane.cfg, id: pane.connId });
+  // 焦点还给主 pane (pane1 创建时 term.open 会抢焦点)
+  setTimeout(() => { if (tabs.includes(tab)) tab.term.focus(); }, 100);
+  setStatus('已分屏');
+};
+
+function closePane(tab, pane) {
+  send({ type: 'disconnect', id: pane.connId });
+  try { pane.term.dispose(); } catch (e) {}
+  pane.host.remove();
+  const i = tab.extraPanes.indexOf(pane);
+  if (i >= 0) tab.extraPanes.splice(i, 1);
 }
 
 // ---------- 操作日志面板 ----------

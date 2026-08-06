@@ -33,6 +33,7 @@ const tests = [
   { name: 'UI 语言切换 (中英)', cmd: 'node', args: ['tests/ui_i18n.js', `http://127.0.0.1:${PORT}/`] },
   { name: 'UI 终端搜索高亮', cmd: 'node', args: ['tests/ui_search.js', `http://127.0.0.1:${PORT}/`] },
   { name: 'UI 串口日志/定时发送', cmd: 'node', args: ['tests/ui_serial_tools.js', `http://127.0.0.1:${PORT}/`] },
+  { name: 'UI 分屏', cmd: 'node', args: ['tests/ui_split.js', `http://127.0.0.1:${PORT}/`] },
   { name: 'SSH 真实连接层 (192.168.1.216)', cmd: 'node', args: ['tests/e2e_ssh.js'] },
 ];
 
