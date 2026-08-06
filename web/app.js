@@ -6,9 +6,11 @@ const $ = (id) => document.getElementById(id);
 const hexOf = (u8) => Array.from(u8).map(b => b.toString(16).padStart(2, '0')).join(' ').toUpperCase();
 const esc = (s) => s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
-// FitAddon 兼容: UMD 可能是 { FitAddon: class } 命名空间
+// FitAddon/SearchAddon 兼容: UMD 可能是 { Xxx: class } 命名空间
 const FitAddonCtor = (typeof FitAddon === 'function') ? FitAddon
   : (window.FitAddon && window.FitAddon.FitAddon);
+const SearchAddonCtor = (typeof SearchAddon === 'function') ? SearchAddon
+  : (window.SearchAddon && window.SearchAddon.SearchAddon);
 if (typeof Terminal !== 'function' || !FitAddonCtor) {
   document.body.innerHTML = '<div style="padding:40px;font:14px sans-serif;color:#f87171">' +
     '❌ 终端核心加载失败(xterm.js / addon-fit), 请刷新或检查服务端资源。</div>';
@@ -239,14 +241,26 @@ function newTab(cfg, opts = {}) {
   const term = new Terminal({
     fontSize: 13, fontFamily: 'Consolas, "Courier New", monospace',
     cursorBlink: true, scrollback: 5000,
+    allowProposedApi: true,   // SearchAddon decorations (搜索高亮) 需要
     theme: { background: '#1a1b26', foreground: '#c0caf5' },
   });
   const fitAddon = new (FitAddonCtor)();
   term.loadAddon(fitAddon);
+  let searchAddon = null;
+  if (SearchAddonCtor) {
+    searchAddon = new SearchAddonCtor();
+    term.loadAddon(searchAddon);
+    // 搜索结果计数
+    searchAddon.onDidChangeResults((r) => {
+      if ($('search-count') && !$('search-bar').classList.contains('hidden')) {
+        $('search-count').textContent = r.resultCount ? `${r.resultIndex + 1}/${r.resultCount}` : '0';
+      }
+    });
+  }
   term.open(host);
   setTimeout(() => fitAddon.fit(), 0);
 
-  const tab = { id, cfg, term, host, state: 'idle', hex: !!(opts.hex ?? cfg.hexMode), fitAddon, recParts: [], recLen: 0 };
+  const tab = { id, cfg, term, host, state: 'idle', hex: !!(opts.hex ?? cfg.hexMode), fitAddon, searchAddon, recParts: [], recLen: 0 };
   tabs.push(tab);
   renderTabbar();
   activateTab(id);
@@ -365,6 +379,7 @@ function bindClipboard(tab) {
     if (mod && !e.shiftKey && k === 'v') { pasteClipboard(term); return false; }
     if (mod && e.shiftKey && k === 'c') { copySelection(term); return false; }
     if (mod && e.shiftKey && k === 'v') { pasteClipboard(term); return false; }
+    if (mod && k === 'f') { openSearch(); return false; }
     return true;
   });
 }
@@ -724,6 +739,43 @@ function renderSftpList(entries) {
     el.appendChild(row);
   }
 }
+
+// ---------- 终端搜索 (Ctrl+F, SearchAddon 高亮) ----------
+let _searchActive = false;
+function openSearch() {
+  const tab = tabs.find(t => t.id === activeTabId);
+  if (!tab) return;
+  _searchActive = true;
+  $('search-bar').classList.remove('hidden');
+  $('search-input').focus();
+  $('search-input').select();
+  doSearch();
+}
+function closeSearch() {
+  _searchActive = false;
+  $('search-bar').classList.add('hidden');
+  $('search-input').value = '';
+  $('search-count').textContent = '';
+}
+function doSearch(dir = 1) {
+  const tab = tabs.find(t => t.id === activeTabId);
+  if (!tab || !tab.searchAddon) return;
+  const q = $('search-input').value;
+  if (!q) { $('search-count').textContent = ''; return; }
+  try {
+    if (dir > 0) tab.searchAddon.findNext(q, { decorations: { matchBackground: '#2d3a5f' } });
+    else tab.searchAddon.findPrevious(q, { decorations: { matchBackground: '#2d3a5f' } });
+  } catch (e) { /* 忽略 */ }
+}
+// 事件
+$('search-input').addEventListener('input', () => doSearch(1));
+$('search-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); doSearch(e.shiftKey ? -1 : 1); }
+  else if (e.key === 'Escape') closeSearch();
+});
+$('search-next').onclick = () => doSearch(1);
+$('search-prev').onclick = () => doSearch(-1);
+$('search-close').onclick = closeSearch;
 
 // ---------- 操作日志面板 ----------
 function openLogPanel() {

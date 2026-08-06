@@ -46,6 +46,13 @@
     <!-- 右侧: 标签 + 终端 -->
     <div id="workspace">
       <div id="tabbar"></div>
+      <div id="search-bar" class="hidden">
+        <input id="search-input" placeholder="搜索 (Enter=下一个, Shift+Enter=上一个, Esc=关闭)" autocomplete="off">
+        <button id="search-prev" class="mini" title="上一个">▲</button>
+        <button id="search-next" class="mini" title="下一个">▼</button>
+        <button id="search-close" class="mini" title="关闭">✕</button>
+        <span id="search-count" class="muted"></span>
+      </div>
       <div id="terms"></div>
       <!-- SFTP 文件面板 (SSH) -->
       <div id="sftp-panel" class="hidden">
@@ -181,6 +188,7 @@
 
 <script src="/vendor/@xterm/xterm/lib/xterm.js"></script>
 <script src="/vendor/@xterm/addon-fit/lib/addon-fit.js"></script>
+<script src="/vendor/@xterm/addon-search/lib/addon-search.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>
