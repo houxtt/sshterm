@@ -14,6 +14,15 @@ class SSHConnection extends BaseConnection {
       keepaliveCountMax: 3,       // 连续 3 次无响应才判定连接死亡
     };
 
+    // Zmodem 接收器: 检测 sz 文件传输
+    const ZmodemReceiver = require('./zmodem');
+    this._zmodem = new ZmodemReceiver(
+      (buf) => { if (this.stream) this.stream.write(buf); },
+      (filename, filePath, size) => {
+        this.emit('zmodem-file', filename, filePath, size);
+        this._zmodem.reset();
+      });
+
     // 代理支持: SOCKS5 / HTTP CONNECT (公司网络场景)
     if (proxy && proxy.host && proxy.port) {
       try {
@@ -42,7 +51,14 @@ class SSHConnection extends BaseConnection {
           if (err) { this._emitError(`shell: ${err.message}`); return reject(err); }
           this.stream = stream;
           this.state = 'connected';
-          stream.on('data', (d) => this._emitData(d));
+          stream.on('data', (d) => {
+            // Zmodem 接收: 检测到传输时吞掉数据, 否则正常转发
+            if (this._zmodem) {
+              this._zmodem.feed(d);
+              if (this._zmodem.state !== 'idle') return;
+            }
+            this._emitData(d);
+          });
           stream.on('close', () => {
             this._emitClose('SSH 会话已关闭');
             client.end();

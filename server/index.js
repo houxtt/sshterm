@@ -49,6 +49,23 @@ const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css
 const server = http.createServer((req, res) => {
   let url = decodeURIComponent(req.url.split('?')[0]);
 
+  // Zmodem 文件下载: /api/zmodem/download?file=<文件名>
+  if (url.startsWith('/api/zmodem/download')) {
+    const qs = new URLSearchParams(req.url.split('?')[1] || '');
+    const name = qs.get('file') || '';
+    const safe = path.basename(name).replace(/[\\/]/g, '_');
+    const fp = path.join(os.homedir(), '.sshterm', 'zmodem', safe);
+    fs.readFile(fp, (err, data) => {
+      if (err) { res.writeHead(404); return res.end('文件不存在'); }
+      res.writeHead(200, {
+        'Content-Type': 'application/octet-stream',
+        'Content-Disposition': `attachment; filename="${encodeURIComponent(safe)}"`,
+      });
+      res.end(data);
+    });
+    return;
+  }
+
   // SFTP 上传: HEAD 查询远端文件已存在大小 (断点续传判断)
   // PUT /api/sftp/upload?conn=<id>&path=<dir>&name=<file>&offset=N → 从 N 偏移续写
   if (req.method === 'HEAD' && url.startsWith('/api/sftp/upload')) {
@@ -427,6 +444,11 @@ async function doConnect(ws, cfg, tabId) {
     console.log(`[conn] ${cfg.type} ${tabId} open`);
     log('info', `[${cfg.name || cfg.type}] 已连接`);
     send(ws, { type: 'status', id: connId, state: 'connected', msg: '已连接' });
+  });
+  conn.on('zmodem-file', (filename, filePath, size) => {
+    console.log(`[zmodem] 收到文件 ${filename} (${size}B)`);
+    log('info', `Zmodem 收到文件 ${filename} (${size}B)`);
+    send(ws, { type: 'zmodem', id: connId, filename, filePath, size });
   });
 
   try {

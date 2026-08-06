@@ -149,6 +149,17 @@ function handleMsg(m) {
       renderScan(m);
       break;
     }
+    case 'zmodem': {
+      // Zmodem 文件接收完成: 终端提示 + 状态栏
+      const tab = tabs.find(t => t.id === m.id);
+      const fileName = m.filename || 'file';
+      if (tab) {
+        tab.term.writeln(`\r\n\x1b[32m[Zmodem] 已接收: ${fileName} (${fmtSize(m.size)})\x1b[0m`);
+        tab.term.writeln(`\x1b[33m点击下载: /api/zmodem/download?file=${encodeURIComponent(fileName)}\x1b[0m`);
+      }
+      setStatus(`Zmodem 收到文件: ${fileName} (${fmtSize(m.size)})`);
+      break;
+    }
     case 'sftp': {
       if (m.id !== sftpConnId) break;
       if (m.action === 'cwd') {
