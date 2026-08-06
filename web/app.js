@@ -856,7 +856,8 @@ $('btn-tm-start').onclick = () => {
 $('btn-tm-stop').onclick = () => { stopTimer(); $('dlg-timer-mask').classList.add('hidden'); setStatus('定时发送已停止'); };
 function stopTimer() { if (_timerHandle) { clearInterval(_timerHandle); _timerHandle = null; } }
 
-// ---------- 端口扫描 (设备发现) ----------
+// ---------- 端口扫描 (设备发现, 只需输入 IP) ----------
+const SCAN_PORTS = [21, 22, 23, 80, 443, 2000, 3389, 5555, 5900, 6379, 8080, 3306, 5432, 27017, 11211];
 const PORT_NAMES = { 22: 'SSH', 23: 'Telnet', 21: 'FTP', 80: 'HTTP', 443: 'HTTPS',
   8080: 'HTTP-Proxy', 3389: 'RDP', 5900: 'VNC', 6379: 'Redis', 3306: 'MySQL',
   5432: 'PostgreSQL', 27017: 'MongoDB', 5555: 'ADB', 11211: 'Memcache', 2000: 'telnetd' };
@@ -864,11 +865,9 @@ $('btn-scan').onclick = () => $('dlg-scan-mask').classList.remove('hidden');
 $('btn-scan-close').onclick = () => $('dlg-scan-mask').classList.add('hidden');
 $('btn-scan-start').onclick = () => {
   const host = $('scan-host').value.trim();
-  const ports = $('scan-ports').value.split(/[\s,，]+/).filter(Boolean).map(p => parseInt(p, 10)).filter(p => !isNaN(p));
   if (!host) return setStatus('请输入目标主机');
-  if (!ports.length) return setStatus('请输入端口');
   $('scan-result').innerHTML = '<div class="muted">扫描中…</div>';
-  send({ type: 'scan', host, ports });
+  send({ type: 'scan', host, ports: SCAN_PORTS });
 };
 function renderScan(m) {
   if (!m.open.length) {
