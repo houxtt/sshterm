@@ -194,6 +194,7 @@
     <div class="form">
       <label>命令名称 <input id="cmd-name" placeholder="如: 查看内核日志"></label>
       <label>命令内容 <input id="cmd-content" placeholder="如: dmesg | tail -50" style="font-family:Consolas,monospace"></label>
+      <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="cmd-auto"> 连接后自动执行此命令集</label>
       <div class="dlg-actions">
         <button id="btn-cmd-add" class="primary">保存命令</button>
         <button id="btn-cmd-runall" title="按顺序执行全部命令">执行全部</button>

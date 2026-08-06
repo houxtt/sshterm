@@ -109,10 +109,8 @@ function handleMsg(m) {
           tab.cfg._serverCfg = m.cfg;
           if (!pane) {
             fitTerm(tab);
-            // 连接后自动执行脚本 (Xshell 登录脚本风格)
-            if (tab.cfg.autoCmds && tab.cfg.autoCmds.length) {
-              setTimeout(() => runAutoCmds(tab.cfg), 300);
-            }
+            // 连接后自动执行 (Xshell 登录脚本风格): IP 命令集 auto + 会话 autoCmds
+            setTimeout(() => runAutoCmds(tab.cfg), 300);
           }
         }
       }
@@ -865,33 +863,38 @@ $('btn-tm-start').onclick = () => {
 $('btn-tm-stop').onclick = () => { stopTimer(); $('dlg-timer-mask').classList.add('hidden'); setStatus('定时发送已停止'); };
 function stopTimer() { if (_timerHandle) { clearInterval(_timerHandle); _timerHandle = null; } }
 
-// ---------- 快捷命令 (Xshell 风格: 每会话独立命令集) ----------
-// 命令按会话隔离存储: localStorage key = sshterm.commands.<sessionKey>
+// ---------- 快捷命令 (Xshell 命令集: 按 IP 独立, 可连接时自动执行) ----------
+// 存储: localStorage['sshterm.commands.<ip>'] = { auto: bool, items: [{name, cmd}] }
 function sessionCmdKey(cfg) {
-  if (!cfg) return 'default';
-  return cfg.id || `${cfg.type}|${cfg.name}|${cfg.host}|${cfg.port || ''}|${cfg.baudRate || ''}`;
+  // 命令集按 IP (host) 隔离: 同一 IP 的所有会话共享
+  return (cfg && cfg.host) || 'default';
 }
 let cmdKey = 'default';
-let commands = [];
+let cmdSet = { auto: false, items: [] };
 function loadCommands() {
-  try { commands = JSON.parse(localStorage.getItem('sshterm.commands.' + cmdKey) || '[]'); }
-  catch (e) { commands = []; }
+  try {
+    const raw = localStorage.getItem('sshterm.commands.' + cmdKey);
+    const d = JSON.parse(raw || '[]');
+    if (Array.isArray(d)) cmdSet = { auto: false, items: d };   // 兼容旧格式
+    else cmdSet = { auto: !!d.auto, items: Array.isArray(d.items) ? d.items : [] };
+  } catch (e) { cmdSet = { auto: false, items: [] }; }
 }
 function saveCommands() {
-  try { localStorage.setItem('sshterm.commands.' + cmdKey, JSON.stringify(commands)); } catch (e) {}
+  try { localStorage.setItem('sshterm.commands.' + cmdKey, JSON.stringify(cmdSet)); } catch (e) {}
 }
 function renderCommands() {
   const el = $('cmd-list');
   el.innerHTML = '';
   const tab = tabs.find(t => t.id === activeTabId);
-  const curName = tab ? (tab.cfg.name || tab.cfg.host || '会话') : '未连接';
-  $('cmd-cur').textContent = `当前会话: ${curName} (${commands.length} 条命令)`;
-  if (!commands.length) {
-    el.innerHTML = '<div class="muted" style="padding:10px">(该会话还没有命令, 上面添加)</div>';
+  const curIp = cmdKey === 'default' ? '未连接' : cmdKey;
+  $('cmd-cur').textContent = `命令集 (IP: ${curIp}) — ${cmdSet.items.length} 条命令`;
+  $('cmd-auto').checked = cmdSet.auto;
+  if (!cmdSet.items.length) {
+    el.innerHTML = '<div class="muted" style="padding:10px">(该 IP 还没有命令, 上面添加)</div>';
     return;
   }
-  for (let i = 0; i < commands.length; i++) {
-    const c = commands[i];
+  for (let i = 0; i < cmdSet.items.length; i++) {
+    const c = cmdSet.items[i];
     const row = document.createElement('div');
     row.className = 'cmd-item';
     row.innerHTML = `
@@ -902,7 +905,7 @@ function renderCommands() {
     row.onclick = () => runCommand(c.cmd);
     row.querySelector('.cmd-del').onclick = (e) => {
       e.stopPropagation();
-      commands.splice(i, 1);
+      cmdSet.items.splice(i, 1);
       saveCommands();
       renderCommands();
     };
@@ -917,14 +920,24 @@ function runCommand(cmd) {
   sendInput(tab.id, cmd + '\n');
   setStatus(`已发送: ${cmd}`);
 }
-// 连接后自动执行脚本 (会话配置 autoCmds)
+// 连接后自动执行: Xshell 风格 = 该 IP 命令集(auto=true) + 会话 autoCmds 合并执行
 function runAutoCmds(cfg) {
-  if (!cfg.autoCmds || !cfg.autoCmds.length) return;
   const tab = tabs.find(t => t.id === activeTabId && t.cfg === cfg);
   const id = tab ? tab.id : null;
   if (!id) return;
-  setStatus(`自动执行 ${cfg.autoCmds.length} 条命令...`);
-  cfg.autoCmds.forEach((cmd, i) => {
+  // 1. IP 命令集 (auto 开启)
+  const ipCmds = [];
+  try {
+    const d = JSON.parse(localStorage.getItem('sshterm.commands.' + (cfg.host || '')) || '[]');
+    const set = Array.isArray(d) ? { auto: false, items: d } : d;
+    if (set.auto && Array.isArray(set.items)) ipCmds.push(...set.items.map(i => i.cmd));
+  } catch (e) {}
+  // 2. 会话配置 autoCmds
+  const cfgCmds = (cfg.autoCmds || []);
+  const all = [...ipCmds, ...cfgCmds];
+  if (!all.length) return;
+  setStatus(`自动执行 ${all.length} 条命令...`);
+  all.forEach((cmd, i) => {
     setTimeout(() => {
       const t = tabs.find(x => x.id === id);
       if (t && t.state === 'connected') sendInput(id, cmd + '\n');
@@ -940,11 +953,12 @@ $('btn-cmds').onclick = () => {
   renderCommands();
 };
 $('cmds-close').onclick = () => $('dlg-cmds-mask').classList.add('hidden');
+$('cmd-auto').onchange = () => { cmdSet.auto = $('cmd-auto').checked; saveCommands(); };
 $('btn-cmd-add').onclick = () => {
   const name = $('cmd-name').value.trim();
   const cmd = $('cmd-content').value.trim();
   if (!name || !cmd) return setStatus('命令名称和内容不能为空');
-  commands.push({ name, cmd });
+  cmdSet.items.push({ name, cmd });
   saveCommands();
   $('cmd-name').value = '';
   $('cmd-content').value = '';
@@ -952,9 +966,9 @@ $('btn-cmd-add').onclick = () => {
   setStatus(`命令已保存: ${name}`);
 };
 $('btn-cmd-runall').onclick = () => {
-  if (!commands.length) return setStatus('没有命令可执行');
-  commands.forEach((c, i) => setTimeout(() => runCommand(c.cmd), 600 * i));
-  setStatus(`执行 ${commands.length} 条命令...`);
+  if (!cmdSet.items.length) return setStatus('该 IP 没有命令可执行');
+  cmdSet.items.forEach((c, i) => setTimeout(() => runCommand(c.cmd), 600 * i));
+  setStatus(`执行 ${cmdSet.items.length} 条命令...`);
 };
 
 // ---------- 端口扫描 (设备发现, 只需输入 IP) ----------
