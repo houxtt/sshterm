@@ -183,7 +183,7 @@ function applyI18n() {
     'btn-close-ok': 'close_ok', 'btn-close-cancel': 'dl_cancel',
     'sftp-up': 'sftp_up', 'sftp-upload': 'sftp_upload', 'sftp-upload-dir': 'sftp_upload_dir',
     'sftp-refresh': 'sftp_refresh', 'sftp-close': 'sftp_close',
-    'batch-del': 'batch_del', 'batch-cancel': 'batch_cancel',
+    'batch-del-text': 'batch_del', 'batch-cancel': 'batch_cancel',
   };
   for (const [id, key] of Object.entries(dyn)) {
     const el = document.getElementById(id);
