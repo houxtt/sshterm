@@ -120,6 +120,10 @@ function handleMsg(m) {
       renderLogs(m.list || []);
       break;
     }
+    case 'scan': {
+      renderScan(m);
+      break;
+    }
     case 'sftp': {
       if (m.id !== sftpConnId) break;
       if (m.action === 'cwd') {
@@ -846,6 +850,29 @@ $('btn-tm-start').onclick = () => {
 };
 $('btn-tm-stop').onclick = () => { stopTimer(); $('dlg-timer-mask').classList.add('hidden'); setStatus('定时发送已停止'); };
 function stopTimer() { if (_timerHandle) { clearInterval(_timerHandle); _timerHandle = null; } }
+
+// ---------- 端口扫描 (设备发现) ----------
+const PORT_NAMES = { 22: 'SSH', 23: 'Telnet', 21: 'FTP', 80: 'HTTP', 443: 'HTTPS',
+  8080: 'HTTP-Proxy', 3389: 'RDP', 5900: 'VNC', 6379: 'Redis', 3306: 'MySQL',
+  5432: 'PostgreSQL', 27017: 'MongoDB', 5555: 'ADB', 11211: 'Memcache', 2000: 'telnetd' };
+$('btn-scan').onclick = () => $('dlg-scan-mask').classList.remove('hidden');
+$('btn-scan-close').onclick = () => $('dlg-scan-mask').classList.add('hidden');
+$('btn-scan-start').onclick = () => {
+  const host = $('scan-host').value.trim();
+  const ports = $('scan-ports').value.split(/[\s,，]+/).filter(Boolean).map(p => parseInt(p, 10)).filter(p => !isNaN(p));
+  if (!host) return setStatus('请输入目标主机');
+  if (!ports.length) return setStatus('请输入端口');
+  $('scan-result').innerHTML = '<div class="muted">扫描中…</div>';
+  send({ type: 'scan', host, ports });
+};
+function renderScan(m) {
+  if (!m.open.length) {
+    $('scan-result').innerHTML = `<div class="muted">${esc(m.host)}: 未发现开放端口</div>`;
+    return;
+  }
+  $('scan-result').innerHTML = `<div class="muted">${esc(m.host)} 开放端口:</div>` +
+    m.open.map(p => `<div class="scan-open">● ${p} ${PORT_NAMES[p] ? ' (' + PORT_NAMES[p] + ')' : ''}</div>`).join('');
+}
 
 // ---------- 操作日志面板 ----------
 function openLogPanel() {

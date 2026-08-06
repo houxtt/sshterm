@@ -310,6 +310,28 @@ async function handle(ws, m) {
       send(ws, { type: 'logs', list: logs.slice(-300) });
       break;
     }
+    case 'scan': {
+      // 端口扫描: TCP 探测 (并发 20, 单端口 800ms 超时)
+      const { host, ports } = m;
+      if (!host || !Array.isArray(ports) || !ports.length) {
+        return send(ws, { type: 'error', msg: '扫描参数错误' });
+      }
+      const net = require('net');
+      const open = [];
+      let idx = 0;
+      const test = (port) => new Promise((resolve) => {
+        const s = net.connect({ host, port, timeout: 800 });
+        s.on('connect', () => { open.push(port); s.destroy(); resolve(); });
+        s.on('error', () => resolve());
+        s.on('timeout', () => { s.destroy(); resolve(); });
+      });
+      const workers = Array.from({ length: 20 }, async () => {
+        while (idx < ports.length) { const p = ports[idx++]; await test(p); }
+      });
+      await Promise.all(workers);
+      send(ws, { type: 'scan', host, open: open.sort((a, b) => a - b) });
+      break;
+    }
     case 'cleanup': {
       // 页面加载兜底: 强制关闭该客户端全部连接 (刷新时 close 事件可能未触发导致残留)
       for (const [id, conn] of connections) conn.close();

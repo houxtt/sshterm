@@ -18,6 +18,7 @@
     <button id="btn-lang" title="切换语言">🌐 EN</button>
     <button id="btn-logging" title="开启/关闭接收日志(带时间戳)">📝 日志</button>
     <button id="btn-timer" title="定时发送(串口)">⏱ 定时</button>
+    <button id="btn-scan" title="端口扫描/设备发现">🔍 扫描</button>
     <span class="sep"></span>
     <span id="conn-status" class="status-dot idle" title="服务器连接状态"></span>
     <span id="conn-status-text">未连接服务器</span>
@@ -176,6 +177,22 @@
       <button id="btn-close-ok" class="danger">确认关闭</button>
       <button id="btn-close-cancel">取消</button>
     </div>
+  </div>
+</div>
+
+<!-- 端口扫描对话框 -->
+<div id="dlg-scan-mask" class="hidden">
+  <div id="dlg-scan">
+    <h3>🔍 端口扫描</h3>
+    <div class="form">
+      <label>目标主机 <input id="scan-host" placeholder="192.168.1.100"></label>
+      <label>端口 <input id="scan-ports" placeholder="22,23,80,443,8080,3389,5555"></label>
+    </div>
+    <div class="dlg-actions">
+      <button id="btn-scan-start" class="primary">扫描</button>
+      <button id="btn-scan-close">关闭</button>
+    </div>
+    <div id="scan-result"></div>
   </div>
 </div>
 

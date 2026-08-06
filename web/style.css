@@ -186,6 +186,21 @@ button.mini { padding: 2px 8px; font-size: 11px; }
 #sftp-progress-fill.done { background: #22c55e; }
 #sftp-progress-text { color: #a9b1d6; white-space: nowrap; min-width: 120px; text-align: right; }
 
+/* 端口扫描对话框 */
+#dlg-scan-mask {
+  position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 110;
+  display: flex; align-items: center; justify-content: center;
+}
+#dlg-scan-mask.hidden { display: none; }
+#dlg-scan {
+  background: #1f2030; border: 1px solid #3a3b4d; border-radius: 8px;
+  padding: 18px 22px; width: 400px; max-height: 80vh; overflow-y: auto;
+}
+#dlg-scan h3 { color: #e0e2f0; margin-bottom: 12px; }
+#scan-result { margin-top: 12px; font: 12px/1.8 Consolas, monospace; }
+.scan-open { color: #22c55e; }
+.scan-closed { color: #565f89; }
+
 /* 定时发送对话框 (复用 dlg 样式) */
 #dlg-timer-mask {
   position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 110;
