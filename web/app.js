@@ -952,18 +952,62 @@ function saveBlob(blob, name) {
   setTimeout(() => URL.revokeObjectURL(url), 3000);
 }
 
-// SFTP 上传: 选择本地文件 → XHR 上传到当前目录 (带进度条)
+// SFTP 上传: 断点续传 + 大文件分块并行
+// 查询远端文件已存在大小 (HEAD)
+function remoteSize(url) {
+  return new Promise((resolve) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('HEAD', url);
+    xhr.onload = () => {
+      const sz = xhr.getResponseHeader('X-Remote-Size');
+      resolve(sz ? parseInt(sz, 10) : 0);
+    };
+    xhr.onerror = () => resolve(0);
+    xhr.send();
+  });
+}
+// 上传单个文件: 断点续传 (HEAD 检查远端已有大小 → 从 offset 续传)
+// 大文件(>8MB)分块并行 (PARALLEL 块)
+const UPLOAD_PARALLEL = 4;
+const UPLOAD_CHUNK = 8 * 1024 * 1024;
+async function uploadFileSmart(tabId, dirPath, name, file, onProg) {
+  const base = `/api/sftp/upload?conn=${tabId}&path=${encodeURIComponent(dirPath)}&name=${encodeURIComponent(name)}`;
+  const remote = await remoteSize(base);
+  let offset = remote;
+  if (offset >= file.size) { onProg(1); return 200; }   // 已完整存在
+
+  const work = [];
+  if (file.size - offset > UPLOAD_CHUNK * 2) {
+    // 多线程: 从 offset 起分块并行
+    const starts = [];
+    for (let s = offset; s < file.size; s += UPLOAD_CHUNK) starts.push(s);
+    let done = 0;
+    const totalBytes = file.size - offset;
+    const pool = starts.map((s, i) => {
+      const end = Math.min(s + UPLOAD_CHUNK, file.size);
+      const blob = file.slice(s, end);
+      return xhrUpload(`${base}&offset=${s}`, blob, (loaded, t) => {
+        onProg((offset + (done + (i === 0 ? loaded : 0))) / file.size);
+      }).then((st) => { done += end - s; onProg((offset + done) / file.size); return st; });
+    });
+    const results = await Promise.all(pool);
+    return results.every(s => s === 200) ? 200 : 500;
+  }
+  // 单线程续传: 从 offset 继续
+  const blob = file.slice(offset);
+  return xhrUpload(`${base}&offset=${offset}`, blob, (loaded, t) => {
+    onProg((offset + loaded) / file.size);
+  });
+}
+// 文件上传 (带断点续传/多线程 + 进度条)
 $('sftp-upload').onclick = () => $('sftp-file-input').click();
 $('sftp-file-input').onchange = async (e) => {
   const file = e.target.files && e.target.files[0];
   if (!file) return;
-  const url = `/api/sftp/upload?conn=${sftpConnId}` +
-    `&path=${encodeURIComponent(sftpPath)}&name=${encodeURIComponent(file.name)}`;
   showProgress(`上传: ${file.name} 0%`, 0);
   try {
-    const status = await xhrUpload(url, file, (loaded, total) => {
-      showProgress(`上传: ${file.name} ${(loaded / total * 100).toFixed(0)}%`, loaded / total * 100);
-    });
+    const status = await uploadFileSmart(sftpConnId, sftpPath, file.name, file,
+      (p) => showProgress(`上传: ${file.name} ${(p * 100).toFixed(0)}%`, p * 100));
     if (status !== 200) throw new Error('服务端返回 ' + status);
     doneProgress(`✅ 已上传: ${file.name}`);
     sftpLoad();

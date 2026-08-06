@@ -49,20 +49,36 @@ const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css
 const server = http.createServer((req, res) => {
   let url = decodeURIComponent(req.url.split('?')[0]);
 
-  // SFTP 上传 (流式): PUT /api/sftp/upload?conn=<id>&path=<远端目录>&name=<文件名>
-  // 支持多层路径 (文件夹上传): 自动递归创建父目录
+  // SFTP 上传: HEAD 查询远端文件已存在大小 (断点续传判断)
+  // PUT /api/sftp/upload?conn=<id>&path=<dir>&name=<file>&offset=N → 从 N 偏移续写
+  if (req.method === 'HEAD' && url.startsWith('/api/sftp/upload')) {
+    const qs = new URLSearchParams(req.url.split('?')[1] || '');
+    const conn = connections.get(parseInt(qs.get('conn'), 10));
+    const dir = qs.get('path') || '.';
+    const name = qs.get('name') || '';
+    if (!conn || !conn.getSftpInst() || !name) { res.writeHead(400); return res.end(); }
+    const remotePath = dir.endsWith('/') ? dir + name : `${dir}/${name}`;
+    const sftp = conn.getSftpInst();
+    sftp.stat(remotePath, (err, st) => {
+      if (err) { res.writeHead(404); return res.end(); }
+      res.writeHead(200, { 'Content-Type': 'application/json', 'X-Remote-Size': String(st.size) });
+      res.end(JSON.stringify({ size: st.size }));
+    });
+    return;
+  }
   if (req.method === 'PUT' && url.startsWith('/api/sftp/upload')) {
     const qs = new URLSearchParams(req.url.split('?')[1] || '');
     const conn = connections.get(parseInt(qs.get('conn'), 10));
     const dir = qs.get('path') || '.';
     const name = qs.get('name') || '';
+    const offset = parseInt(qs.get('offset'), 10) || 0;
     if (!conn || !conn.getSftpInst() || !name) {
       res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
       return res.end('上传参数错误(连接或文件名无效)');
     }
     const remotePath = dir.endsWith('/') ? dir + name : `${dir}/${name}`;
     const sftp = conn.getSftpInst();
-    console.log(`[sftp-upload] ${remotePath}`);
+    console.log(`[sftp-upload] ${remotePath} offset=${offset}`);
     // 递归创建父目录 (文件夹上传的子目录可能不存在)
     const parent = remotePath.slice(0, remotePath.lastIndexOf('/'));
     const mkdirs = (p) => new Promise((resolve) => {
@@ -76,7 +92,11 @@ const server = http.createServer((req, res) => {
       next(0);
     });
     mkdirs(parent).then(() => {
-      const ws = sftp.createWriteStream(remotePath);
+      // offset>0 用 r+ 模式续写, offset=0 用 w 新建
+      const ws = sftp.createWriteStream(remotePath, {
+        flags: offset > 0 ? 'r+' : 'w',
+        start: offset,
+      });
       req.pipe(ws);
       ws.on('close', () => { res.writeHead(200); res.end('ok'); });
       ws.on('error', (e) => {

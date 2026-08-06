@@ -17,6 +17,7 @@ const tests = [
   { name: 'SFTP 文件浏览+下载', cmd: 'node', args: ['tests/e2e_sftp.js', `ws://127.0.0.1:${PORT}`] },
   { name: 'SFTP 文件上传', cmd: 'node', args: ['tests/e2e_sftp_upload.js', `ws://127.0.0.1:${PORT}`] },
   { name: 'SFTP 文件夹上传', cmd: 'node', args: ['tests/e2e_sftp_dir_upload.js', `ws://127.0.0.1:${PORT}`] },
+  { name: 'SFTP 断点续传/分块', cmd: 'node', args: ['tests/e2e_sftp_resume.js', `ws://127.0.0.1:${PORT}`] },
   { name: 'SFTP 目录打包下载', cmd: 'node', args: ['tests/e2e_sftp_dir.js', `ws://127.0.0.1:${PORT}`] },
   { name: 'UI SFTP 面板 (连点防错)', cmd: 'node', args: ['tests/ui_sftp.js', `http://127.0.0.1:${PORT}/`] },
   { name: 'UI 刷新 (会话保留)', cmd: 'node', args: ['tests/ui_refresh.js', `http://127.0.0.1:${PORT}/`] },
