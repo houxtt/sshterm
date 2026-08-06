@@ -60,12 +60,12 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   });
   console.log('    pane1 收到回显:', paneHas);
 
-  // 3. 关闭 pane
-  console.log('[3] 关闭分屏 pane...');
-  await page.click('.term-host.pane1 .pane-close');
+  // 3. 再点分屏按钮 = 关闭分屏 (切换式)
+  console.log('[3] 再点"⊞ 分屏"按钮关闭...');
+  await page.click('#btn-split');
   await sleep(500);
   const paneAfter = await page.$$eval('.term-host.pane1', els => els.length);
-  console.log('    关闭后 pane 数:', paneAfter);
+  console.log('    再点后 pane 数:', paneAfter);
 
   const ok1 = paneCount === 1;
   const ok2 = mainHas && paneHas;

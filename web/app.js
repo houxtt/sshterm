@@ -879,11 +879,16 @@ function renderScan(m) {
     m.open.map(p => `<div class="scan-open">● ${p} ${PORT_NAMES[p] ? ' (' + PORT_NAMES[p] + ')' : ''}</div>`).join('');
 }
 
-// ---------- 分屏 (标签内左右第二 pane) ----------
+// ---------- 分屏 (标签内左右第二 pane, 再点按钮=关闭) ----------
 $('btn-split').onclick = () => {
   const tab = tabs.find(t => t.id === activeTabId);
   if (!tab) return setStatus('没有激活的会话');
-  if (tab.extraPanes.length) return setStatus('最多分 2 屏');
+  if (tab.extraPanes.length) {
+    // 已分屏 → 再点 = 关闭分屏 (切换式)
+    closePane(tab, tab.extraPanes[0]);
+    setStatus('分屏已关闭');
+    return;
+  }
   const host = document.createElement('div');
   host.className = 'term-host pane1';
   const closeBtn = document.createElement('button');
