@@ -158,6 +158,22 @@ button.mini { padding: 2px 8px; font-size: 11px; }
 .sftp-item .sftp-dl { padding: 0 6px; font-size: 12px; }
 .sftp-status { padding: 5px 10px; border-top: 1px solid #2a2b3a; color: #565f89; font-size: 11px; }
 
+/* SFTP 传输进度条 */
+#sftp-progress {
+  display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+  border-bottom: 1px solid #2a2b3a; font-size: 11px;
+}
+#sftp-progress.hidden { display: none; }
+#sftp-progress-bar {
+  flex: 1; height: 8px; background: #1a1b26; border: 1px solid #3a3b4d;
+  border-radius: 4px; overflow: hidden;
+}
+#sftp-progress-fill {
+  height: 100%; width: 0%; background: #3b82f6; transition: width .1s;
+}
+#sftp-progress-fill.done { background: #22c55e; }
+#sftp-progress-text { color: #a9b1d6; white-space: nowrap; min-width: 120px; text-align: right; }
+
 /* 关闭确认对话框 (复用 dlg 基础样式) */
 #dlg-close-mask {
   position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 110;

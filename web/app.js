@@ -611,20 +611,33 @@ function renderSftpList(entries) {
       sftpPath = sftpJoin(sftpPath, e.name);
       sftpLoad();
     };
-    row.querySelector('.sftp-dl')?.addEventListener('click', (ev) => {
+    row.querySelector('.sftp-dl')?.addEventListener('click', async (ev) => {
       ev.stopPropagation();
       const full = sftpJoin(sftpPath, e.name);
-      const a = document.createElement('a');
-      a.href = e.isDir
+      const url = e.isDir
         ? `/api/sftp/download-dir?conn=${sftpConnId}&path=${encodeURIComponent(full)}`
         : `/api/sftp/download?conn=${sftpConnId}&path=${encodeURIComponent(full)}`;
-      a.download = e.isDir ? e.name + '.zip' : e.name;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      $('sftp-status').textContent = e.isDir
-        ? `打包中: ${e.name}/ (大目录需耐心等待)`
-        : `下载中: ${e.name}`;
+      const dlName = e.isDir ? e.name + '.zip' : e.name;
+      showProgress(`下载: ${dlName} 准备中...`, 0);
+      try {
+        const blob = await xhrDownload(url, (loaded, total) => {
+          if (total > 0) {
+            showProgress(`下载: ${dlName} ${(loaded / total * 100).toFixed(0)}% (${fmtSize(loaded)}/${fmtSize(total)})`,
+              loaded / total * 100);
+          } else {
+            showProgress(`下载: ${dlName} ${fmtSize(loaded)}`, undefined);
+          }
+        });
+        if (blob && blob.size > 0) {
+          saveBlob(blob, dlName);
+          doneProgress(`✅ 已下载: ${dlName} (${fmtSize(blob.size)})`);
+        } else {
+          throw new Error('响应为空');
+        }
+      } catch (err) {
+        $('sftp-progress').classList.add('hidden');
+        $('sftp-status').textContent = `下载失败: ${err.message}`;
+      }
     });
     el.appendChild(row);
   }
@@ -672,46 +685,111 @@ $('sftp-up').onclick = () => {
   sftpLoad();
 };
 $('sftp-refresh').onclick = sftpLoad;
-// SFTP 上传: 选择本地文件 → PUT 流式上传到当前目录
+// ---------- SFTP 传输 (XHR + 进度条, 大文件不卡页面) ----------
+let _progLast = 0;
+function showProgress(text, pct) {
+  const now = Date.now();
+  if (now - _progLast < 80 && pct !== undefined && pct < 100) return;  // 节流 80ms
+  _progLast = now;
+  $('sftp-progress').classList.remove('hidden');
+  $('sftp-progress-text').textContent = text;
+  if (pct !== undefined) {
+    $('sftp-progress-fill').style.width = Math.min(100, Math.round(pct)) + '%';
+  }
+}
+function doneProgress(text) {
+  _progLast = 0;
+  $('sftp-progress-fill').classList.add('done');
+  $('sftp-progress-fill').style.width = '100%';
+  $('sftp-progress-text').textContent = text;
+  setTimeout(() => {
+    $('sftp-progress').classList.add('hidden');
+    $('sftp-progress-fill').classList.remove('done');
+    $('sftp-progress-fill').style.width = '0%';
+  }, 2500);
+}
+// XHR 上传 (带进度) → resolve(status)
+function xhrUpload(url, file, onProg) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', url);
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProg) onProg(e.loaded, e.total);
+    };
+    xhr.onload = () => resolve(xhr.status);
+    xhr.onerror = () => reject(new Error('网络错误'));
+    xhr.send(file);
+  });
+}
+// XHR 下载 (带进度) → resolve(blob)
+function xhrDownload(url, onProg) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', url);
+    xhr.responseType = 'blob';
+    xhr.onprogress = (e) => {
+      if (onProg) onProg(e.loaded, e.lengthComputable ? e.total : 0);
+    };
+    xhr.onload = () => resolve(xhr.response);
+    xhr.onerror = () => reject(new Error('网络错误'));
+    xhr.send();
+  });
+}
+// Blob 触发浏览器保存
+function saveBlob(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 3000);
+}
+
+// SFTP 上传: 选择本地文件 → XHR 上传到当前目录 (带进度条)
 $('sftp-upload').onclick = () => $('sftp-file-input').click();
 $('sftp-file-input').onchange = async (e) => {
   const file = e.target.files && e.target.files[0];
   if (!file) return;
-  $('sftp-status').textContent = `上传中: ${file.name} (${fmtSize(file.size)})...`;
+  const url = `/api/sftp/upload?conn=${sftpConnId}` +
+    `&path=${encodeURIComponent(sftpPath)}&name=${encodeURIComponent(file.name)}`;
+  showProgress(`上传: ${file.name} 0%`, 0);
   try {
-    const url = `/api/sftp/upload?conn=${sftpConnId}` +
-      `&path=${encodeURIComponent(sftpPath)}&name=${encodeURIComponent(file.name)}`;
-    const res = await fetch(url, { method: 'PUT', body: file });
-    if (!res.ok) throw new Error(await res.text());
-    $('sftp-status').textContent = `✅ 已上传: ${file.name}`;
-    sftpLoad();                        // 刷新列表显示新文件
+    const status = await xhrUpload(url, file, (loaded, total) => {
+      showProgress(`上传: ${file.name} ${(loaded / total * 100).toFixed(0)}%`, loaded / total * 100);
+    });
+    if (status !== 200) throw new Error('服务端返回 ' + status);
+    doneProgress(`✅ 已上传: ${file.name}`);
+    sftpLoad();
   } catch (err) {
+    $('sftp-progress').classList.add('hidden');
     $('sftp-status').textContent = `上传失败: ${err.message}`;
   }
-  e.target.value = '';                 // 允许重复选择同一文件
+  e.target.value = '';
 };
 
-// SFTP 文件夹上传: 选择本地文件夹 → 递归上传所有文件(保留目录结构)
+// SFTP 文件夹上传: XHR 逐个上传 (每个文件进度 + 总计)
 $('sftp-upload-dir').onclick = () => $('sftp-dir-input').click();
 $('sftp-dir-input').onchange = async (e) => {
   const files = [...(e.target.files || [])];
   if (!files.length) return;
   const total = files.length;
   let ok = 0, fail = 0;
-  $('sftp-status').textContent = `文件夹上传: 0/${total}...`;
   for (let i = 0; i < files.length; i++) {
     const f = files[i];
-    // webkitRelativePath: "顶层文件夹/sub/file.txt" → 保留顶层文件夹名
     const rel = f.webkitRelativePath || f.name;
-    $('sftp-status').textContent = `文件夹上传 ${i + 1}/${total}: ${rel}`;
+    const url = `/api/sftp/upload?conn=${sftpConnId}` +
+      `&path=${encodeURIComponent(sftpPath)}&name=${encodeURIComponent(rel)}`;
     try {
-      const url = `/api/sftp/upload?conn=${sftpConnId}` +
-        `&path=${encodeURIComponent(sftpPath)}&name=${encodeURIComponent(rel)}`;
-      const res = await fetch(url, { method: 'PUT', body: f });
-      if (res.ok) ok++; else fail++;
+      const status = await xhrUpload(url, f, (loaded, ftotal) => {
+        const pct = (i + loaded / ftotal) / total * 100;
+        showProgress(`上传 ${i + 1}/${total}: ${rel} ${(loaded / ftotal * 100).toFixed(0)}%`, pct);
+      });
+      if (status === 200) ok++; else fail++;
     } catch (err) { fail++; }
   }
-  $('sftp-status').textContent = `✅ 文件夹上传完成: ${ok}/${total} 成功${fail ? `, ${fail} 失败` : ''}`;
+  doneProgress(`✅ 文件夹上传完成: ${ok}/${total} 成功${fail ? `, ${fail} 失败` : ''}`);
   sftpLoad();
   e.target.value = '';
 };
