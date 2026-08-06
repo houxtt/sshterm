@@ -62,12 +62,6 @@ ws.onmessage = (ev) => {
   const payload = buf.subarray(2);
   if ((pane ? pane.hex : tab.hex)) term.write(hexOf(payload) + ' ');
   else term.write(payload);
-  // 串口日志 (开启时带时间戳累积)
-  try {
-    const text = new TextDecoder('utf-8', { fatal: false }).decode(payload);
-    const target = pane || tab;
-    if (target.logging) logToTab(target, text);
-  } catch (e) { /* 忽略 */ }
   // 累积终端内容 (数组 push, 避免高频输出时的字符串拼接卡顿)
   try {
     const text = new TextDecoder('utf-8', { fatal: false }).decode(payload);
@@ -828,38 +822,7 @@ $('search-next').onclick = () => doSearch(1);
 $('search-prev').onclick = () => doSearch(-1);
 $('search-close').onclick = closeSearch;
 
-// ---------- 串口日志 (带时间戳) + 定时发送 ----------
-function tsNow() {
-  const d = new Date();
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}.${String(d.getMilliseconds()).padStart(3, '0')}`;
-}
-// 数据到达时: 如果标签开启日志, 累积带时间戳的日志 (在 ws.onmessage 数据分支调用)
-function logToTab(tab, text) {
-  if (tab.logging && text) {
-    tab.logBuf = (tab.logBuf || '') + `[${tsNow()}] RX: ${text}\n`;
-    if (tab.logBuf.length > 1024 * 1024) tab.logBuf = tab.logBuf.slice(-1024 * 1024);
-  }
-}
-// 日志开关: 仅串口会话
-$('btn-logging').onclick = () => {
-  const tab = tabs.find(t => t.id === activeTabId);
-  if (!tab) return setStatus('没有激活的会话');
-  if (tab.cfg.type !== 'serial') return setStatus('日志功能仅串口会话可用');
-  tab.logging = !tab.logging;
-  $('btn-logging').style.background = tab.logging ? '#3b82f6' : '';
-  $('btn-logging').textContent = tab.logging ? '📝 日志开' : '📝 日志';
-  setStatus(tab.logging ? `日志已开启 (${tsNow()})` : '日志已关闭');
-};
-// 保存日志 (下载 .log)
-$('btn-logging').addEventListener('contextmenu', (e) => {
-  e.preventDefault();
-  const tab = tabs.find(t => t.id === activeTabId);
-  if (!tab || !tab.logBuf) return setStatus('无日志可保存');
-  const blob = new Blob([tab.logBuf], { type: 'text/plain' });
-  saveBlob(blob, `${tab.cfg.name || 'serial'}_${tsNow().replace(/[:.]/g, '')}.log`);
-  setStatus(`日志已保存 (${fmtSize(tab.logBuf.length)})`);
-});
-// 定时发送
+// ---------- 定时发送 ----------
 let _timerHandle = null;
 $('btn-timer').onclick = () => {
   const tab = tabs.find(t => t.id === activeTabId);

@@ -24,17 +24,8 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   await page.click('#btn-dlg-conn');
   await sleep(1500);
 
-  // 1. 日志开关
-  console.log('[2] 点"📝 日志"...');
-  await page.click('#btn-logging');
-  await sleep(300);
-  const logBtn = await page.$eval('#btn-logging', el => el.textContent);
-  const status = await page.$eval('#sb-left', el => el.textContent);
-  console.log('    按钮:', JSON.stringify(logBtn), '| 状态:', JSON.stringify(status));
-  const loggingOn = logBtn.includes('开');
-
-  // 2. 定时发送
-  console.log('[3] 点"⏱ 定时"...');
+  // 1. 定时发送
+  console.log('[1] 点"⏱ 定时"...');
   await page.click('#btn-timer');
   await sleep(300);
   const dlgVisible = await page.$eval('#dlg-timer-mask', el => !el.classList.contains('hidden'));
@@ -47,8 +38,8 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   console.log('    开始后状态:', JSON.stringify(status2));
   const timerOn = status2.includes('定时发送已开始');
 
-  // 3. 停止
-  console.log('[4] 停止...');
+  // 2. 停止
+  console.log('[2] 停止...');
   await page.click('#btn-timer');
   await sleep(300);
   await page.click('#btn-tm-stop');
@@ -57,8 +48,8 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   console.log('    停止后状态:', JSON.stringify(status3));
   const timerOff = status3.includes('已停止');
 
-  const ok = loggingOn && dlgVisible && timerOn && timerOff;
-  console.log(`\n=== 汇总: ${ok ? '✅ 串口日志/定时发送正常' : '❌'} ===`);
+  const ok = dlgVisible && timerOn && timerOff;
+  console.log(`\n=== 汇总: ${ok ? '✅ 定时发送正常' : '❌'} ===`);
 
   // 清理
   try {

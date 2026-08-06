@@ -32,9 +32,10 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   const paneCount = await page.$$eval('.term-host.pane1', els => els.length);
   console.log('    分屏 pane 数:', paneCount);
 
-  // 2. 主 pane 输入命令 → 主 pane 回显 (主动 focus 主 pane)
-  console.log('[2] focus 主 pane 后输入 echo SPLIT_MAIN...');
-  await page.evaluate(() => { const t = tabs.find(x => x.id === activeTabId); if (t) t.term.focus(); });
+  // 2. 主 pane 输入命令 → 主 pane 回显 (真实点击)
+  console.log('[2] 点击主 pane 输入 echo SPLIT_MAIN...');
+  const mainBox = await page.$eval('.term-host:not(.pane1)', el => el.getBoundingClientRect().toJSON());
+  await page.mouse.click(mainBox.x + 60, mainBox.y + 40);
   await sleep(300);
   await page.keyboard.type('echo SPLIT_MAIN\n');
   await sleep(1500);
@@ -47,6 +48,18 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   });
   console.log('    主 pane 收到回显:', mainHas);
 
+  // 2.5 pane1 输入 → pane1 回显 (真实点击右半)
+  const pane1Box = await page.$eval('.term-host.pane1', el => el.getBoundingClientRect().toJSON());
+  await page.mouse.click(pane1Box.x + 40, pane1Box.y + 40);
+  await sleep(300);
+  await page.keyboard.type('echo SPLIT_PANE\n');
+  await sleep(1500);
+  const paneHas = await page.evaluate(() => {
+    const h = document.querySelector('.term-host.pane1');
+    return h ? h.querySelector('.xterm-rows')?.textContent.includes('SPLIT_PANE') : false;
+  });
+  console.log('    pane1 收到回显:', paneHas);
+
   // 3. 关闭 pane
   console.log('[3] 关闭分屏 pane...');
   await page.click('.term-host.pane1 .pane-close');
@@ -55,9 +68,9 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   console.log('    关闭后 pane 数:', paneAfter);
 
   const ok1 = paneCount === 1;
-  const ok2 = mainHas;
+  const ok2 = mainHas && paneHas;
   const ok3 = paneAfter === 0 && errors.length === 0;
-  console.log(`\n=== 汇总: ${ok1 && ok2 && ok3 ? '✅ 分屏正常' : '❌'} | JS错误: ${errors.length ? errors.join('|') : '(无)'}`);
+  console.log(`\n=== 汇总: ${ok1 && ok2 && ok3 ? '✅ 分屏正常(双pane独立输入)' : '❌'} | JS错误: ${errors.length ? errors.join('|') : '(无)'}`);
 
   // 清理
   try {
