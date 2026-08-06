@@ -16,6 +16,8 @@
     <button id="btn-sftp" title="SSH 文件浏览/下载 (SFTP)">📁 文件</button>
     <button id="btn-killall" title="断开所有会话" class="danger">⏹ 全部断开</button>
     <button id="btn-lang" title="切换语言">🌐 EN</button>
+    <button id="btn-logging" title="开启/关闭接收日志(带时间戳)">📝 日志</button>
+    <button id="btn-timer" title="定时发送(串口)">⏱ 定时</button>
     <span class="sep"></span>
     <span id="conn-status" class="status-dot idle" title="服务器连接状态"></span>
     <span id="conn-status-text">未连接服务器</span>
@@ -173,6 +175,24 @@
     <div class="dlg-actions">
       <button id="btn-close-ok" class="danger">确认关闭</button>
       <button id="btn-close-cancel">取消</button>
+    </div>
+  </div>
+</div>
+
+<!-- 定时发送对话框 -->
+<div id="dlg-timer-mask" class="hidden">
+  <div id="dlg-timer">
+    <h3>⏱ 定时发送</h3>
+    <div class="form">
+      <label>发送内容 <input id="tm-content" placeholder="要定时发送的内容"></label>
+      <label>周期(毫秒) <input id="tm-interval" type="number" value="1000" min="100"></label>
+      <label><input type="checkbox" id="tm-hex"> 按 HEX 发送</label>
+      <label><input type="checkbox" id="tm-auto"> 立即开始</label>
+    </div>
+    <div class="dlg-actions">
+      <button id="btn-tm-start" class="primary">开始</button>
+      <button id="btn-tm-stop">停止</button>
+      <button id="btn-tm-cancel">取消</button>
     </div>
   </div>
 </div>

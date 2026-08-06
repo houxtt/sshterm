@@ -1,0 +1,70 @@
+// UI 测试: 串口日志开关 + 定时发送
+const puppeteer = require('puppeteer-core');
+const EDGE = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
+const URL = process.argv[2] || 'http://127.0.0.1:8787/';
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+(async () => {
+  const browser = await puppeteer.launch({ executablePath: EDGE, headless: 'new' });
+  const page = await browser.newPage();
+  await page.setViewport({ width: 1280, height: 800 });
+  page.on('dialog', (d) => d.accept());
+  page.on('pageerror', (e) => console.log('pageerror:', e.message));
+
+  await page.goto(URL, { waitUntil: 'networkidle0' });
+  await sleep(1000);
+
+  // 打开串口会话 (COM1)
+  console.log('[1] 打开串口 COM1...');
+  await page.click('#btn-new');
+  await sleep(300);
+  await page.type('#f-name', '串口工具测试');
+  await page.select('#f-type', 'serial');
+  await page.select('#s-port', 'COM1');
+  await page.click('#btn-dlg-conn');
+  await sleep(1500);
+
+  // 1. 日志开关
+  console.log('[2] 点"📝 日志"...');
+  await page.click('#btn-logging');
+  await sleep(300);
+  const logBtn = await page.$eval('#btn-logging', el => el.textContent);
+  const status = await page.$eval('#sb-left', el => el.textContent);
+  console.log('    按钮:', JSON.stringify(logBtn), '| 状态:', JSON.stringify(status));
+  const loggingOn = logBtn.includes('开');
+
+  // 2. 定时发送
+  console.log('[3] 点"⏱ 定时"...');
+  await page.click('#btn-timer');
+  await sleep(300);
+  const dlgVisible = await page.$eval('#dlg-timer-mask', el => !el.classList.contains('hidden'));
+  console.log('    定时对话框:', dlgVisible);
+  await page.type('#tm-content', 'AT');
+  await page.type('#tm-interval', '500');
+  await page.click('#btn-tm-start');
+  await sleep(300);
+  const status2 = await page.$eval('#sb-left', el => el.textContent);
+  console.log('    开始后状态:', JSON.stringify(status2));
+  const timerOn = status2.includes('定时发送已开始');
+
+  // 3. 停止
+  console.log('[4] 停止...');
+  await page.click('#btn-timer');
+  await sleep(300);
+  await page.click('#btn-tm-stop');
+  await sleep(300);
+  const status3 = await page.$eval('#sb-left', el => el.textContent);
+  console.log('    停止后状态:', JSON.stringify(status3));
+  const timerOff = status3.includes('已停止');
+
+  const ok = loggingOn && dlgVisible && timerOn && timerOff;
+  console.log(`\n=== 汇总: ${ok ? '✅ 串口日志/定时发送正常' : '❌'} ===`);
+
+  // 清理
+  try {
+    await page.click('#btn-killall');
+    await sleep(500);
+  } catch (e) { /* 忽略 */ }
+  try { browser.process() && browser.process().kill(); } catch (e) {}
+  process.exit(ok ? 0 : 1);
+})().catch(e => { console.error('❌ 测试崩溃:', e.message); process.exit(1); });
