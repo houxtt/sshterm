@@ -690,6 +690,31 @@ $('sftp-file-input').onchange = async (e) => {
   }
   e.target.value = '';                 // 允许重复选择同一文件
 };
+
+// SFTP 文件夹上传: 选择本地文件夹 → 递归上传所有文件(保留目录结构)
+$('sftp-upload-dir').onclick = () => $('sftp-dir-input').click();
+$('sftp-dir-input').onchange = async (e) => {
+  const files = [...(e.target.files || [])];
+  if (!files.length) return;
+  const total = files.length;
+  let ok = 0, fail = 0;
+  $('sftp-status').textContent = `文件夹上传: 0/${total}...`;
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i];
+    // webkitRelativePath: "顶层文件夹/sub/file.txt" → 保留顶层文件夹名
+    const rel = f.webkitRelativePath || f.name;
+    $('sftp-status').textContent = `文件夹上传 ${i + 1}/${total}: ${rel}`;
+    try {
+      const url = `/api/sftp/upload?conn=${sftpConnId}` +
+        `&path=${encodeURIComponent(sftpPath)}&name=${encodeURIComponent(rel)}`;
+      const res = await fetch(url, { method: 'PUT', body: f });
+      if (res.ok) ok++; else fail++;
+    } catch (err) { fail++; }
+  }
+  $('sftp-status').textContent = `✅ 文件夹上传完成: ${ok}/${total} 成功${fail ? `, ${fail} 失败` : ''}`;
+  sftpLoad();
+  e.target.value = '';
+};
 $('btn-refresh').onclick = () => { send({ type: 'list' }); send({ type: 'serialports' }); };
 $('s-refresh').onclick = () => send({ type: 'serialports' });
 $('f-type').onchange = updateDlgFields;

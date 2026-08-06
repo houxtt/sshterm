@@ -52,10 +52,12 @@
           <button id="sftp-up" class="mini" title="上级目录">⬆</button>
           <input id="sftp-path" readonly title="当前目录">
           <button id="sftp-upload" class="mini" title="上传文件到当前目录">⬆️传</button>
+          <button id="sftp-upload-dir" class="mini" title="上传整个文件夹(含子目录)">📂传</button>
           <button id="sftp-refresh" class="mini" title="刷新">⟳</button>
           <button id="sftp-close" class="mini" title="关闭面板">✕</button>
         </div>
         <input type="file" id="sftp-file-input" class="hidden">
+        <input type="file" id="sftp-dir-input" class="hidden" webkitdirectory>
         <div id="sftp-list"></div>
         <div class="sftp-status" id="sftp-status"></div>
       </div>

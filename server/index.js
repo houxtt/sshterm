@@ -50,6 +50,7 @@ const server = http.createServer((req, res) => {
   let url = decodeURIComponent(req.url.split('?')[0]);
 
   // SFTP 上传 (流式): PUT /api/sftp/upload?conn=<id>&path=<远端目录>&name=<文件名>
+  // 支持多层路径 (文件夹上传): 自动递归创建父目录
   if (req.method === 'PUT' && url.startsWith('/api/sftp/upload')) {
     const qs = new URLSearchParams(req.url.split('?')[1] || '');
     const conn = connections.get(parseInt(qs.get('conn'), 10));
@@ -60,15 +61,30 @@ const server = http.createServer((req, res) => {
       return res.end('上传参数错误(连接或文件名无效)');
     }
     const remotePath = dir.endsWith('/') ? dir + name : `${dir}/${name}`;
+    const sftp = conn.getSftpInst();
     console.log(`[sftp-upload] ${remotePath}`);
-    const ws = conn.getSftpInst().createWriteStream(remotePath);
-    req.pipe(ws);
-    ws.on('close', () => { res.writeHead(200); res.end('ok'); });
-    ws.on('error', (e) => {
-      console.log('[sftp-upload] 错误:', e.message);
-      try { res.writeHead(500); res.end(e.message); } catch (err) { /* 忽略 */ }
+    // 递归创建父目录 (文件夹上传的子目录可能不存在)
+    const parent = remotePath.slice(0, remotePath.lastIndexOf('/'));
+    const mkdirs = (p) => new Promise((resolve) => {
+      const parts = p.split('/').filter(Boolean);
+      let cur = '';
+      const next = (i) => {
+        if (i >= parts.length) return resolve();
+        cur += '/' + parts[i];
+        sftp.mkdir(cur, () => next(i + 1));   // 已存在则忽略错误
+      };
+      next(0);
     });
-    req.on('error', () => { try { ws.destroy(); } catch (e) { /* 忽略 */ } });
+    mkdirs(parent).then(() => {
+      const ws = sftp.createWriteStream(remotePath);
+      req.pipe(ws);
+      ws.on('close', () => { res.writeHead(200); res.end('ok'); });
+      ws.on('error', (e) => {
+        console.log('[sftp-upload] 错误:', e.message);
+        try { res.writeHead(500); res.end(e.message); } catch (err) { /* 忽略 */ }
+      });
+      req.on('error', () => { try { ws.destroy(); } catch (e) { /* 忽略 */ } });
+    });
     return;
   }
 

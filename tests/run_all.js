@@ -15,6 +15,7 @@ const tests = [
   { name: 'WS 全链路 (SSH 真实连接)', cmd: 'node', args: ['tests/e2e_ws_chain.js', `ws://127.0.0.1:${PORT}`] },
   { name: 'SFTP 文件浏览+下载', cmd: 'node', args: ['tests/e2e_sftp.js', `ws://127.0.0.1:${PORT}`] },
   { name: 'SFTP 文件上传', cmd: 'node', args: ['tests/e2e_sftp_upload.js', `ws://127.0.0.1:${PORT}`] },
+  { name: 'SFTP 文件夹上传', cmd: 'node', args: ['tests/e2e_sftp_dir_upload.js', `ws://127.0.0.1:${PORT}`] },
   { name: 'SFTP 目录打包下载', cmd: 'node', args: ['tests/e2e_sftp_dir.js', `ws://127.0.0.1:${PORT}`] },
   { name: 'UI SFTP 面板 (连点防错)', cmd: 'node', args: ['tests/ui_sftp.js', `http://127.0.0.1:${PORT}/`] },
   { name: 'UI 刷新 (会话保留)', cmd: 'node', args: ['tests/ui_refresh.js', `http://127.0.0.1:${PORT}/`] },
