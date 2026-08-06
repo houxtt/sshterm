@@ -672,6 +672,24 @@ $('sftp-up').onclick = () => {
   sftpLoad();
 };
 $('sftp-refresh').onclick = sftpLoad;
+// SFTP 上传: 选择本地文件 → PUT 流式上传到当前目录
+$('sftp-upload').onclick = () => $('sftp-file-input').click();
+$('sftp-file-input').onchange = async (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  $('sftp-status').textContent = `上传中: ${file.name} (${fmtSize(file.size)})...`;
+  try {
+    const url = `/api/sftp/upload?conn=${sftpConnId}` +
+      `&path=${encodeURIComponent(sftpPath)}&name=${encodeURIComponent(file.name)}`;
+    const res = await fetch(url, { method: 'PUT', body: file });
+    if (!res.ok) throw new Error(await res.text());
+    $('sftp-status').textContent = `✅ 已上传: ${file.name}`;
+    sftpLoad();                        // 刷新列表显示新文件
+  } catch (err) {
+    $('sftp-status').textContent = `上传失败: ${err.message}`;
+  }
+  e.target.value = '';                 // 允许重复选择同一文件
+};
 $('btn-refresh').onclick = () => { send({ type: 'list' }); send({ type: 'serialports' }); };
 $('s-refresh').onclick = () => send({ type: 'serialports' });
 $('f-type').onchange = updateDlgFields;

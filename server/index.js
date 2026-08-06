@@ -49,6 +49,29 @@ const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css
 const server = http.createServer((req, res) => {
   let url = decodeURIComponent(req.url.split('?')[0]);
 
+  // SFTP 上传 (流式): PUT /api/sftp/upload?conn=<id>&path=<远端目录>&name=<文件名>
+  if (req.method === 'PUT' && url.startsWith('/api/sftp/upload')) {
+    const qs = new URLSearchParams(req.url.split('?')[1] || '');
+    const conn = connections.get(parseInt(qs.get('conn'), 10));
+    const dir = qs.get('path') || '.';
+    const name = qs.get('name') || '';
+    if (!conn || !conn.getSftpInst() || !name) {
+      res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+      return res.end('上传参数错误(连接或文件名无效)');
+    }
+    const remotePath = dir.endsWith('/') ? dir + name : `${dir}/${name}`;
+    console.log(`[sftp-upload] ${remotePath}`);
+    const ws = conn.getSftpInst().createWriteStream(remotePath);
+    req.pipe(ws);
+    ws.on('close', () => { res.writeHead(200); res.end('ok'); });
+    ws.on('error', (e) => {
+      console.log('[sftp-upload] 错误:', e.message);
+      try { res.writeHead(500); res.end(e.message); } catch (err) { /* 忽略 */ }
+    });
+    req.on('error', () => { try { ws.destroy(); } catch (e) { /* 忽略 */ } });
+    return;
+  }
+
   // SFTP 目录下载 (递归打包 zip, 流式): /api/sftp/download-dir?conn=<id>&path=<远端目录>
   if (url.startsWith('/api/sftp/download-dir')) {
     const qs = new URLSearchParams(req.url.split('?')[1] || '');
