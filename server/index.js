@@ -15,16 +15,28 @@ const CONN_FILE = path.join(CONN_DIR, 'sessions.json');
 const connections = new Map();   // connId -> BaseConnection
 const liveByConfig = new Map();  // 配置指纹 -> connId (去重: 同一配置只开一个)
 
-// ---------- 操作日志 (内存环形 + 落盘) ----------
+// ---------- 操作日志 (内存环形 + 每次启动新日志文件落盘) ----------
 const MAX_LOGS = 1000;
 const logs = [];
-const LOG_FILE = path.join(CONN_DIR, 'sshterm.log');
+// 每次启动生成新的日志文件: ~/.sshterm/logs/sshterm-YYYYMMDD-HHMMSS.log (关闭后保留)
+const LOG_DIR = path.join(CONN_DIR, 'logs');
+function newLogFile() {
+  const d = new Date();
+  const ts = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}-${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}${String(d.getSeconds()).padStart(2, '0')}`;
+  return path.join(LOG_DIR, `sshterm-${ts}.log`);
+}
+let LOG_FILE = newLogFile();
 function log(level, msg) {
-  const entry = { t: new Date().toISOString().replace('T', ' ').slice(0, 19), level, msg };
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const entry = {
+    t: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`,
+    level, msg,
+  };
   logs.push(entry);
   if (logs.length > MAX_LOGS) logs.shift();
   try {
-    fs.mkdirSync(CONN_DIR, { recursive: true });
+    fs.mkdirSync(LOG_DIR, { recursive: true });
     fs.appendFileSync(LOG_FILE, `[${entry.t}] [${level}] ${msg}\n`);
   } catch (e) { /* 日志写入失败不影响功能 */ }
   return entry;
@@ -327,7 +339,7 @@ async function handle(ws, m) {
       break;
     }
     case 'logs': {
-      send(ws, { type: 'logs', list: logs.slice(-300) });
+      send(ws, { type: 'logs', list: logs.slice(-300), file: LOG_FILE });
       break;
     }
     case 'serial-force-free': {
@@ -574,6 +586,8 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log('└──────────────────────────────────────────────┘');
   console.log(`  地址: http://127.0.0.1:${PORT}`);
   console.log(`  会话: ${CONN_FILE}`);
+  console.log(`  日志: ${LOG_FILE}`);
+  log('info', `sshterm 服务启动 (端口 ${PORT})`);   // 每次启动新建日志文件并写首行
   scheduleIdleExit();   // auto-exit 模式: 浏览器未连上则 10 秒后退出
   const open = !process.argv.includes('--no-open');
   if (open) {

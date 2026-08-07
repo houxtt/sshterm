@@ -158,7 +158,7 @@ function handleMsg(m) {
       break;
     }
     case 'logs': {
-      renderLogs(m.list || []);
+      renderLogs(m.list || [], m.file);
       break;
     }
     case 'scan': {
@@ -1117,12 +1117,13 @@ function closePane(tab, pane) {
   if (i >= 0) tab.extraPanes.splice(i, 1);
 }
 
-// ---------- 操作日志面板 ----------
+// ---------- 操作日志面板 (日志文件持久化: 每次启动新文件) ----------
 function openLogPanel() {
   $('dlg-log-mask').classList.remove('hidden');
   send({ type: 'logs' });
 }
-function renderLogs(list) {
+function renderLogs(list, file) {
+  if (file) $('log-file').textContent = `日志文件: ${file}`;
   const el = $('log-list');
   el.innerHTML = list.length
     ? list.map(l => `<div class="log-line ${l.level === 'error' ? 'log-err' : ''}">

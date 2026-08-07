@@ -6,6 +6,7 @@ const PORT = 8799;
 
 const tests = [
   { name: 'Telnet (mock: IAC+自动登录)', cmd: 'node', args: ['tests/e2e_telnet.js'] },
+  { name: '日志文件持久化', cmd: 'node', args: ['tests/e2e_log_file.js', `ws://127.0.0.1:${PORT}`] },
   { name: '串口 (COM27/COM1 打开写入)', cmd: 'node', args: ['tests/e2e_serial.js'] },
   { name: '串口占用检测 (occupied标记)', cmd: 'node', args: ['tests/e2e_serial_occupied.js', `ws://127.0.0.1:${PORT}`] },
   { name: 'UI 功能 (新建→连接→shell→保存)', cmd: 'node', args: ['tests/ui_connect.js', `http://127.0.0.1:${PORT}/`] },
