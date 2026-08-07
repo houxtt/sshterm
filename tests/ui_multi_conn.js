@@ -1,6 +1,6 @@
 // UI 测试: 同 IP 开多个 SSH/Telnet 会话 (去重已移除)
 const puppeteer = require('puppeteer-core');
-const EDGE = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
+const EDGE = 'C:\\Users\\Administrator\\sshterm\\vendor\\chrome-headless-shell\\chrome-headless-shell.exe';
 const URL = process.argv[2] || 'http://127.0.0.1:8787/';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 

@@ -7,6 +7,7 @@ const PORT = 8799;
 const tests = [
   { name: 'Telnet (mock: IAC+自动登录)', cmd: 'node', args: ['tests/e2e_telnet.js'] },
   { name: '串口 (COM27/COM1 打开写入)', cmd: 'node', args: ['tests/e2e_serial.js'] },
+  { name: '串口占用检测 (occupied标记)', cmd: 'node', args: ['tests/e2e_serial_occupied.js', `ws://127.0.0.1:${PORT}`] },
   { name: 'UI 功能 (新建→连接→shell→保存)', cmd: 'node', args: ['tests/ui_connect.js', `http://127.0.0.1:${PORT}/`] },
   { name: 'UI 关闭确认 (取消/确认/断开)', cmd: 'node', args: ['tests/ui_close_confirm.js', `http://127.0.0.1:${PORT}/`] },
   { name: 'UI 新功能 (日志/批量删除/复制)', cmd: 'node', args: ['tests/ui_features.js', `http://127.0.0.1:${PORT}/`] },
@@ -34,6 +35,7 @@ const tests = [
   { name: 'UI 语言切换 (中英)', cmd: 'node', args: ['tests/ui_i18n.js', `http://127.0.0.1:${PORT}/`] },
   { name: 'UI 终端搜索高亮', cmd: 'node', args: ['tests/ui_search.js', `http://127.0.0.1:${PORT}/`] },
   { name: 'UI 串口日志/定时发送', cmd: 'node', args: ['tests/ui_serial_tools.js', `http://127.0.0.1:${PORT}/`] },
+  { name: 'UI 串口占用弹窗', cmd: 'node', args: ['tests/ui_serial_occupied.js', `http://127.0.0.1:${PORT}/`] },
   { name: 'UI 分屏', cmd: 'node', args: ['tests/ui_split.js', `http://127.0.0.1:${PORT}/`] },
   { name: 'UI 快捷命令/自动脚本', cmd: 'node', args: ['tests/ui_commands.js', `http://127.0.0.1:${PORT}/`] },
   { name: 'SSH 真实连接层 (192.168.1.216)', cmd: 'node', args: ['tests/e2e_ssh.js'] },

@@ -1,6 +1,6 @@
 // 剪贴板冒烟: 连接后选中文本 → mouseup → 应复制 (状态栏提示 / 剪贴板内容)
 const puppeteer = require('puppeteer-core');
-const EDGE = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
+const EDGE = 'C:\\Users\\Administrator\\sshterm\\vendor\\chrome-headless-shell\\chrome-headless-shell.exe';
 const URL = process.argv[2] || 'http://127.0.0.1:8787/';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 

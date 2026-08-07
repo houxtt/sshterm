@@ -205,6 +205,20 @@
   </div>
 </div>
 
+<!-- 串口占用对话框 -->
+<div id="dlg-occ-mask" class="hidden">
+  <div id="dlg-occ">
+    <h3>🔌 串口被占用</h3>
+    <p id="occ-msg" class="muted"></p>
+    <p class="muted" style="font-size:11px">等待重试: 占用方释放后自动连接;强制释放: 重启该串口设备(需管理员确认 UAC),其他程序将断开</p>
+    <div class="dlg-actions">
+      <button id="btn-occ-wait" class="primary">⏳ 等待重试</button>
+      <button id="btn-occ-force">⚡ 强制释放</button>
+      <button id="btn-occ-cancel">取消</button>
+    </div>
+  </div>
+</div>
+
 <!-- 端口扫描对话框 -->
 <div id="dlg-scan-mask" class="hidden">
   <div id="dlg-scan">

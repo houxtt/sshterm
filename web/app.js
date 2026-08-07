@@ -118,6 +118,8 @@ function handleMsg(m) {
     }
     case 'error': {
       sftpBusy = false;                 // SFTP 加载失败也释放锁
+      // 串口被占用 → 弹窗 (等待重试/强制释放/取消)
+      if (m.occupied) { showOccDlg(m); break; }
       let tab = tabs.find(t => t.id === m.id);
       let pane = null;
       if (!tab) for (const t of tabs) {
@@ -127,6 +129,22 @@ function handleMsg(m) {
       const term = pane ? pane.term : (tab ? tab.term : null);
       if (term) { term.writeln(`\r\n\x1b[31m[错误] ${m.msg}\x1b[0m`); if (!pane) setTabState(tab.id, 'closed', '出错'); }
       else setStatus(`错误: ${m.msg}`);
+      break;
+    }
+    case 'serial-free': {
+      // 强制释放结果: 成功则自动重连
+      stopOccRetry();
+      if (m.ok) {
+        setStatus(m.msg);
+        const tab = _occTab;
+        _occTab = null;
+        if (tab && tabs.includes(tab)) {
+          setTimeout(() => send({ type: 'connect', session: tab.cfg, id: tab.id }), 800);
+        }
+      } else {
+        setStatus(m.msg);
+        if (_occTab) showOccDlg({ id: _occTab.id, msg: m.msg });
+      }
       break;
     }
     case 'reuse': {
@@ -970,6 +988,37 @@ $('btn-cmd-runall').onclick = () => {
   cmdSet.items.forEach((c, i) => setTimeout(() => runCommand(c.cmd), 600 * i));
   setStatus(`执行 ${cmdSet.items.length} 条命令...`);
 };
+
+// ---------- 串口占用处理 (等待重试/强制释放) ----------
+let _occTab = null;        // 占用弹窗关联的标签
+let _occRetryTimer = null;
+function showOccDlg(m) {
+  const tab = tabs.find(t => t.id === m.id);
+  if (!tab) return;
+  _occTab = tab;
+  $('occ-msg').textContent = m.msg || `串口被占用`;
+  $('dlg-occ-mask').classList.remove('hidden');
+}
+function startOccRetry() {
+  if (_occRetryTimer) return;
+  setStatus('等待端口释放, 每 1.5 秒自动重试…');
+  $('dlg-occ-mask').classList.add('hidden');
+  _occRetryTimer = setInterval(() => {
+    if (!_occTab || !tabs.includes(_occTab)) { stopOccRetry(); return; }
+    send({ type: 'connect', session: _occTab.cfg, id: _occTab.id });
+  }, 1500);
+}
+function stopOccRetry() {
+  if (_occRetryTimer) { clearInterval(_occRetryTimer); _occRetryTimer = null; }
+}
+$('btn-occ-wait').onclick = startOccRetry;
+$('btn-occ-force').onclick = () => {
+  if (!_occTab) return;
+  $('dlg-occ-mask').classList.add('hidden');
+  setStatus('强制释放中… 请在 UAC 弹窗确认');
+  send({ type: 'serial-force-free', path: _occTab.cfg.port || _occTab.cfg.port2 });
+};
+$('btn-occ-cancel').onclick = () => { stopOccRetry(); $('dlg-occ-mask').classList.add('hidden'); _occTab = null; };
 
 // ---------- 端口扫描 (设备发现, 只需输入 IP) ----------
 const SCAN_PORTS = [21, 22, 23, 80, 443, 2000, 3389, 5555, 5900, 6379, 8080, 3306, 5432, 27017, 11211];

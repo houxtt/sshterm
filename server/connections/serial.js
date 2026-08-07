@@ -15,11 +15,15 @@ class SerialConnection extends BaseConnection {
       this.sp = sp;
       sp.open((err) => {
         if (err) {
-          const msg = /access denied/i.test(err.message)
-            ? `串口 ${port} 被其他程序占用(如 MobaXterm/串口助手), 请关闭占用程序后重试`
-            : err.message;
-          this._emitError(`串口打开失败: ${msg}`);
-          return reject(err);
+          const isBusy = /access denied|resource busy|in use/i.test(err.message);
+          const isNotFound = /not found|enoent/i.test(err.message);
+          const msg = isBusy
+            ? `串口 ${port} 被其他程序占用(如 MobaXterm/串口助手), 可等待重试或强制释放`
+            : isNotFound
+              ? `串口 ${port} 不存在(设备未连接或驱动异常)`
+              : err.message;
+          this._emitError(`串口打开失败: ${msg}`, { occupied: isBusy });
+          return reject(Object.assign(err, { sshtermOccupied: isBusy }));
         }
         this.state = 'connected';
         this.emit('open');

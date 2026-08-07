@@ -21,8 +21,8 @@ class BaseConnection extends EventEmitter {
     this.emit('close', reason);
   }
 
-  _emitError(msg) {
-    this.emit('error', msg);
+  _emitError(msg, meta) {
+    this.emit('error', msg, meta);
   }
 
   // 子类实现

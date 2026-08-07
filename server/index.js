@@ -253,7 +253,10 @@ wss.on('connection', (ws) => {
     }
     let m;
     try { m = JSON.parse(msg.toString()); } catch { return; }
-    handle(ws, m).catch((e) => send(ws, { type: 'error', id: m.id, msg: String(e.message || e) }));
+    handle(ws, m).catch((e) => send(ws, {
+      type: 'error', id: m.id, msg: String(e.message || e),
+      occupied: !!e.sshtermOccupied,   // 串口被占用标记 (前端弹窗: 等待重试/强制释放)
+    }));
   });
 });
 
@@ -325,6 +328,26 @@ async function handle(ws, m) {
     }
     case 'logs': {
       send(ws, { type: 'logs', list: logs.slice(-300) });
+      break;
+    }
+    case 'serial-force-free': {
+      // 强制释放被占串口: 提权重启设备 (弹 UAC, 用户确认后 Disable/Enable)
+      const { path: comPort } = m;
+      if (!comPort) return send(ws, { type: 'error', msg: '缺少端口号' });
+      const ps1 = path.join(__dirname, 'free-serial.ps1');
+      const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass',
+        '-File', `"${ps1}"`, '-ComPort', comPort];
+      // Start-Process -Verb RunAs 触发 UAC; 非管理员环境会抛错
+      const cp = require('child_process');
+      cp.exec(`powershell.exe -Command "Start-Process powershell -Verb RunAs -ArgumentList '${args.join("','")}' -Wait"`,
+        { timeout: 120000 }, (err, stdout, stderr) => {
+          const ok = !err;
+          send(ws, {
+            type: 'serial-free', path, ok,
+            msg: ok ? `设备 ${path} 已强制重启, 占用已释放` : `强制释放失败(需管理员确认 UAC): ${err ? err.message : ''}`,
+          });
+          if (!ok) console.log('[serial-force-free] 失败:', err && err.message, stderr);
+        });
       break;
     }
     case 'scan': {
@@ -428,10 +451,10 @@ async function doConnect(ws, cfg, tabId) {
   log('info', `连接 ${cfg.name || cfg.type}:${cfg.host || cfg.port || cfg.port} (${cfg.type})`);
 
   conn.on('data', (d) => sendBinary(connId, d));
-  conn.on('error', (msg) => {
+  conn.on('error', (msg, meta) => {
     console.log(`[conn] ${cfg.type} ${tabId} error:`, msg);
     log('error', `[${cfg.name || cfg.type}] ${msg}`);
-    send(ws, { type: 'error', id: connId, msg });
+    send(ws, { type: 'error', id: connId, msg, occupied: !!(meta && meta.occupied) });
   });
   conn.on('close', (reason) => {
     console.log(`[conn] ${cfg.type} ${tabId} close:`, reason);

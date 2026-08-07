@@ -1,7 +1,7 @@
 // 卡死回归测试: 左键拖选 → 右键 (曾导致浏览器卡死)
 // 验证: 右键 mouseup 不复制; 右键有选中→复制; 页面全程响应正常
 const puppeteer = require('puppeteer-core');
-const EDGE = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
+const EDGE = 'C:\\Users\\Administrator\\sshterm\\vendor\\chrome-headless-shell\\chrome-headless-shell.exe';
 const URL = process.argv[2] || 'http://127.0.0.1:8787/';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
