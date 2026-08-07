@@ -34,7 +34,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   console.log('[3] 切回中文:', JSON.stringify(zhBack));
 
   const ok1 = zhNew.includes('新建连接');
-  const ok2 = enNew.includes('New') && enKill.includes('Disconnect');
+  const ok2 = enNew.includes('New') && enKill.includes('Close');
   const ok3 = zhBack.includes('新建连接');
   console.log(`\n=== 汇总: ${ok1 && ok2 && ok3 ? '✅ 语言切换正常' : '❌'} ===`);
   try { browser.process() && browser.process().kill(); } catch (e) {}
