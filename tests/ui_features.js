@@ -34,7 +34,9 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
   // ===== 功能1: 日志面板 (此时服务端已有"新建会话"日志) =====
   console.log('[2] 打开日志面板...');
-  await page.click('#btn-log');
+  await page.click('#btn-more');
+  await sleep(200);
+  await page.click('#mi-log');
   await sleep(500);
   const logVisible = await page.$eval('#dlg-log-mask', el => !el.classList.contains('hidden'));
   const logCount = await page.$$eval('#log-list .log-line', els => els.length);

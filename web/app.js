@@ -233,8 +233,8 @@ let LANG = localStorage.getItem('sshterm.lang') || 'zh';
 function t(key) { return (I18N[LANG] && I18N[LANG][key]) || I18N.zh[key] || key; }
 function applyI18n() {
   const map = {
-    'btn-new': 'btn_new', 'btn-save': 'btn_save', 'btn-log': 'btn_log',
-    'btn-sftp': 'btn_sftp', 'btn-killall': 'btn_killall', 'btn-lang': 'btn_lang',
+    'btn-new': 'btn_new', 'btn-save': 'btn_save',
+    'btn-sftp': 'btn_sftp', 'btn-killall': 'btn_killall',
     'btn-batch': 'side_batch',
   };
   for (const [id, key] of Object.entries(map)) {
@@ -848,13 +848,8 @@ $('search-next').onclick = () => doSearch(1);
 $('search-prev').onclick = () => doSearch(-1);
 $('search-close').onclick = closeSearch;
 
-// ---------- 定时发送 (串口/SSH/Telnet 通用) ----------
+// ---------- 定时发送 (串口/SSH/Telnet 通用, 入口在下拉菜单 ☰) ----------
 let _timerHandle = null;
-$('btn-timer').onclick = () => {
-  const tab = tabs.find(t => t.id === activeTabId);
-  if (!tab) return setStatus('没有激活的会话');
-  $('dlg-timer-mask').classList.remove('hidden');
-};
 $('btn-tm-cancel').onclick = () => $('dlg-timer-mask').classList.add('hidden');
 $('btn-tm-start').onclick = () => {
   const tab = tabs.find(t => t.id === activeTabId);
@@ -1020,12 +1015,11 @@ $('btn-occ-force').onclick = () => {
 };
 $('btn-occ-cancel').onclick = () => { stopOccRetry(); $('dlg-occ-mask').classList.add('hidden'); _occTab = null; };
 
-// ---------- 端口扫描 (设备发现, 只需输入 IP) ----------
+// ---------- 端口扫描 (设备发现, 只需输入 IP, 入口在下拉菜单 ☰) ----------
 const SCAN_PORTS = [21, 22, 23, 80, 443, 2000, 3389, 5555, 5900, 6379, 8080, 3306, 5432, 27017, 11211];
 const PORT_NAMES = { 22: 'SSH', 23: 'Telnet', 21: 'FTP', 80: 'HTTP', 443: 'HTTPS',
   8080: 'HTTP-Proxy', 3389: 'RDP', 5900: 'VNC', 6379: 'Redis', 3306: 'MySQL',
   5432: 'PostgreSQL', 27017: 'MongoDB', 5555: 'ADB', 11211: 'Memcache', 2000: 'telnetd' };
-$('btn-scan').onclick = () => $('dlg-scan-mask').classList.remove('hidden');
 $('btn-scan-close').onclick = () => $('dlg-scan-mask').classList.add('hidden');
 $('btn-scan-start').onclick = () => {
   const host = $('scan-host').value.trim();
@@ -1116,9 +1110,22 @@ $('btn-save').onclick = () => {
   if (!tab) return setStatus('没有激活的连接可保存');
   openDlg(tab.cfg);
 };
-$('btn-log').onclick = openLogPanel;
+// ---------- 更多工具下拉 (日志/语言/定时/扫描) ----------
+$('btn-more').onclick = (e) => {
+  e.stopPropagation();
+  $('menu-more').classList.toggle('hidden');
+};
+document.addEventListener('click', () => $('menu-more').classList.add('hidden'));
+$('mi-log').onclick = () => { $('menu-more').classList.add('hidden'); openLogPanel(); };
+$('mi-lang').onclick = () => { $('menu-more').classList.add('hidden'); toggleLang(); };
+$('mi-timer').onclick = () => {
+  $('menu-more').classList.add('hidden');
+  const tab = tabs.find(t => t.id === activeTabId);
+  if (!tab) return setStatus('没有激活的会话');
+  $('dlg-timer-mask').classList.remove('hidden');
+};
+$('mi-scan').onclick = () => { $('menu-more').classList.add('hidden'); $('dlg-scan-mask').classList.remove('hidden'); };
 $('log-close').onclick = () => $('dlg-log-mask').classList.add('hidden');
-$('btn-lang').onclick = toggleLang;
 $('btn-sftp').onclick = toggleSftpPanel;
 $('btn-killall').onclick = () => {
   if (!tabs.length) return setStatus('没有打开的会话');

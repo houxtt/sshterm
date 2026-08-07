@@ -12,12 +12,17 @@
   <div id="toolbar">
     <button id="btn-new" title="新建连接 (Ctrl+N)">＋ 新建连接</button>
     <button id="btn-save" title="保存当前会话配置">💾 保存会话</button>
-    <button id="btn-log" title="操作日志">📋 日志</button>
     <button id="btn-sftp" title="SSH 文件浏览/下载 (SFTP)">📁 文件</button>
     <button id="btn-killall" title="断开并关闭全部会话标签" class="danger">⏹ 全部关闭</button>
-    <button id="btn-lang" title="切换语言">🌐 EN</button>
-    <button id="btn-timer" title="定时发送(串口)">⏱ 定时</button>
-    <button id="btn-scan" title="端口扫描/设备发现">🔍 扫描</button>
+    <div class="dropdown" id="wrap-more">
+      <button id="btn-more" title="更多工具">☰ 工具</button>
+      <div id="menu-more" class="hidden">
+        <button id="mi-log">📋 操作日志</button>
+        <button id="mi-lang">🌐 切换语言</button>
+        <button id="mi-timer">⏱ 定时发送</button>
+        <button id="mi-scan">🔍 端口扫描</button>
+      </div>
+    </div>
     <button id="btn-split" title="分屏(当前标签左右分屏)">⊞ 分屏</button>
     <button id="btn-cmds" title="快捷命令(保存/执行/脚本)">⚡ 命令</button>
     <span class="sep"></span>

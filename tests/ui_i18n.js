@@ -17,7 +17,9 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   console.log('[1] 初始按钮:', JSON.stringify(zhNew));
 
   // 2. 切英文
-  await page.click('#btn-lang');
+  await page.click('#btn-more');
+  await sleep(200);
+  await page.click('#mi-lang');
   await sleep(300);
   const enNew = await page.$eval('#btn-new', el => el.textContent);
   const enSide = await page.$eval('#side-title', el => el.textContent).catch(() => '');
@@ -28,7 +30,9 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   console.log('    侧栏标题:', JSON.stringify(sideText));
 
   // 3. 切回中文
-  await page.click('#btn-lang');
+  await page.click('#btn-more');
+  await sleep(200);
+  await page.click('#mi-lang');
   await sleep(300);
   const zhBack = await page.$eval('#btn-new', el => el.textContent);
   console.log('[3] 切回中文:', JSON.stringify(zhBack));

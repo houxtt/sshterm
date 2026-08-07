@@ -128,7 +128,23 @@ button.mini { padding: 2px 8px; font-size: 11px; }
 .log-msg { color: #c0caf5; }
 .log-foot { margin-top: 8px; }
 
-/* SFTP 文件面板 */
+/* 更多工具下拉菜单 */
+.dropdown { position: relative; display: inline-block; }
+#menu-more {
+  position: absolute; top: calc(100% + 4px); right: 0; z-index: 130;
+  background: #1f2030; border: 1px solid #3a3b4d; border-radius: 6px;
+  min-width: 140px; box-shadow: 0 6px 20px rgba(0,0,0,.5);
+}
+#menu-more.hidden { display: none; }
+#menu-more button {
+  display: block; width: 100%; text-align: left; padding: 9px 14px;
+  background: none; border: none; color: #c0caf5; font-size: 13px; cursor: pointer;
+  border-bottom: 1px solid #2a2b3a;
+}
+#menu-more button:last-child { border-bottom: none; }
+#menu-more button:hover { background: #2a2b3a; color: #e0e2f0; }
+
+/* SFTP 面板 */
 #sftp-panel {
   position: absolute; top: 0; right: 0; bottom: 0; width: 360px;
   background: #16161e; border-left: 1px solid #2a2b3a; z-index: 5;

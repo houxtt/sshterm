@@ -26,7 +26,9 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
   // 1. 定时发送
   console.log('[1] 点"⏱ 定时"...');
-  await page.click('#btn-timer');
+  await page.click('#btn-more');
+  await sleep(200);
+  await page.click('#mi-timer');
   await sleep(300);
   const dlgVisible = await page.$eval('#dlg-timer-mask', el => !el.classList.contains('hidden'));
   console.log('    定时对话框:', dlgVisible);
@@ -40,7 +42,9 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
   // 2. 停止
   console.log('[2] 停止...');
-  await page.click('#btn-timer');
+  await page.click('#btn-more');
+  await sleep(200);
+  await page.click('#mi-timer');
   await sleep(300);
   await page.click('#btn-tm-stop');
   await sleep(300);

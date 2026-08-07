@@ -58,7 +58,9 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   console.log('    标签数(应=0):', tabCountAfterOk, '| 欢迎页显示:', welcomeShown);
 
   // 5. 服务端连接已断开验证 (通过日志面板确认"关闭会话"已记录)
-  await page.click('#btn-log');
+  await page.click('#btn-more');
+  await sleep(200);
+  await page.click('#mi-log');
   await sleep(400);
   const logHasClose = await page.evaluate(() =>
     document.getElementById('log-list').textContent.includes('关闭会话「关闭确认测试」'));

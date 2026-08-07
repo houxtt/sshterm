@@ -13,7 +13,9 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   await sleep(1000);
 
   // 1. 打开扫描对话框
-  await page.click('#btn-scan');
+  await page.click('#btn-more');
+  await sleep(200);
+  await page.click('#mi-scan');
   await sleep(300);
   const hasPortInput = await page.evaluate(() => !!document.getElementById('scan-ports'));
   console.log('[1] 端口输入框已移除:', !hasPortInput);
