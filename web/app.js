@@ -198,7 +198,7 @@ function handleMsg(m) {
 const I18N = {
   zh: {
     btn_new: '＋ 新建连接', btn_save: '💾 保存会话', btn_log: '📋 日志',
-    btn_sftp: '📁 文件', btn_killall: '⏹ 全部断开', btn_lang: '🌐 EN',
+    btn_sftp: '📁 文件', btn_killall: '⏹ 全部关闭', btn_lang: '🌐 EN',
     dl_title_new: '新建连接', dl_title_edit: '编辑会话',
     dl_conn: '连接', dl_save_conn: '保存并连接', dl_cancel: '取消',
     f_name: '会话名称', f_type: '类型', f_host: '主机', f_port: '端口',
@@ -214,7 +214,7 @@ const I18N = {
   },
   en: {
     btn_new: '＋ New', btn_save: '💾 Save', btn_log: '📋 Log',
-    btn_sftp: '📁 Files', btn_killall: '⏹ Disconnect All', btn_lang: '🌐 中文',
+    btn_sftp: '📁 Files', btn_killall: '⏹ Close All', btn_lang: '🌐 中文',
     dl_title_new: 'New Connection', dl_title_edit: 'Edit Session',
     dl_conn: 'Connect', dl_save_conn: 'Save & Connect', dl_cancel: 'Cancel',
     f_name: 'Name', f_type: 'Type', f_host: 'Host', f_port: 'Port',
@@ -1122,10 +1122,10 @@ $('btn-lang').onclick = toggleLang;
 $('btn-sftp').onclick = toggleSftpPanel;
 $('btn-killall').onclick = () => {
   if (!tabs.length) return setStatus('没有打开的会话');
-  if (!confirm(`断开全部 ${tabs.length} 个会话?`)) return;
+  if (!confirm(`关闭全部 ${tabs.length} 个会话? (将断开所有连接)`)) return;
   const n = tabs.length;
   for (const t of [...tabs]) doCloseTab(t.id);
-  setStatus(`已断开 ${n} 个会话`);
+  setStatus(`已关闭 ${n} 个会话`);
 };
 $('sftp-close').onclick = () => { sftpOpen = false; $('sftp-panel').classList.add('hidden'); $('terms').classList.remove('sftp-open'); };
 $('sftp-up').onclick = () => {
