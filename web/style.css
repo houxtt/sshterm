@@ -241,6 +241,8 @@ button.mini { padding: 2px 8px; font-size: 11px; }
 }
 #dlg-scan h3 { color: #e0e2f0; margin-bottom: 12px; }
 #scan-result { margin-top: 12px; font: 12px/1.8 Consolas, monospace; }
+.scan-host { padding: 5px 0; border-bottom: 1px solid #2a2b3a; font-size: 12px; }
+.scan-ip { color: #7dcfff; font-weight: bold; margin-right: 8px; font-family: Consolas, monospace; }
 .scan-open { color: #22c55e; }
 .scan-closed { color: #565f89; }
 

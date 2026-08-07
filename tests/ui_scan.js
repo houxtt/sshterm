@@ -28,9 +28,19 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   const result = await page.$eval('#scan-result', el => el.textContent);
   console.log('    结果:', JSON.stringify(result.slice(0, 100)));
 
+  // 3. 网段 → 网络扫描 (设备发现)
+  console.log('[3] 输入网段 192.168.1.210-220 网络扫描...');
+  await page.$eval('#scan-host', el => { el.value = '192.168.1.210-220'; });
+  await page.click('#btn-scan-start');
+  await sleep(5000);
+  const netResult = await page.$eval('#scan-result', el => el.textContent);
+  console.log('    网络扫描结果:', JSON.stringify(netResult.slice(0, 120)));
+  const hasDevice = netResult.includes('192.168.1.216');
+
   const ok1 = !hasPortInput;
   const ok2 = result.includes('192.168.1.216') && result.includes('22');
-  console.log(`\n=== 汇总: ${ok1 && ok2 ? '✅ 扫描只需 IP' : '❌'} ===`);
+  const ok3 = hasDevice;
+  console.log(`\n=== 汇总: ${ok1 && ok2 && ok3 ? '✅ 扫描正常(单IP+网段)' : '❌'} ===`);
   try { browser.process() && browser.process().kill(); } catch (e) {}
-  process.exit(ok1 && ok2 ? 0 : 1);
+  process.exit(ok1 && ok2 && ok3 ? 0 : 1);
 })().catch(e => { console.error('❌ 测试崩溃:', e.message); process.exit(1); });

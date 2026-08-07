@@ -229,8 +229,8 @@
   <div id="dlg-scan">
     <h3>🔍 端口扫描</h3>
     <div class="form">
-      <label>目标主机 <input id="scan-host" placeholder="192.168.1.100"></label>
-      <div class="muted">将扫描常用端口: 22, 23, 21, 80, 443, 8080, 3389, 5900, 5555, 2000 等</div>
+      <label>目标 <input id="scan-host" placeholder="192.168.1.216 或 192.168.1.0/24 或 192.168.1.1-254"></label>
+      <div class="muted">单 IP → 全端口扫描;网段(含 / 或 -) → 网络扫描, 发现整个子网设备</div>
     </div>
     <div class="dlg-actions">
       <button id="btn-scan-start" class="primary">扫描</button>

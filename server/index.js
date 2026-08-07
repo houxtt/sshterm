@@ -350,6 +350,47 @@ async function handle(ws, m) {
         });
       break;
     }
+    case 'scan-net': {
+      // 网络扫描: 输入 IP/网段 → 发现存活主机 + 开放端口
+      // 支持: 192.168.1.216 | 192.168.1.0/24 | 192.168.1.1-192.168.1.254 | 192.168.1.100-200
+      const { target } = m;
+      if (!target) return send(ws, { type: 'error', msg: '缺少扫描目标' });
+      const ips = expandTarget(String(target).trim());
+      if (!ips.length) return send(ws, { type: 'error', msg: '目标格式无法解析: ' + target });
+      const probePorts = [22, 23, 21, 80, 443, 3389, 5555, 8080];
+      const net = require('net');
+      const hosts = [];
+      const ipOpen = new Map();
+      let idx = 0;
+      const test = (ip, port) => new Promise((resolve) => {
+        const s = net.connect({ host: ip, port, timeout: 450 });
+        s.on('connect', () => {
+          const list = ipOpen.get(ip) || (ipOpen.set(ip, []), ipOpen.get(ip));
+          list.push(port);
+          s.destroy();
+          resolve(true);
+        });
+        s.on('error', () => resolve(false));
+        s.on('timeout', () => { s.destroy(); resolve(false); });
+      });
+      const worker = async () => {
+        while (idx < ips.length * probePorts.length) {
+          const i = idx++;
+          const ip = ips[Math.floor(i / probePorts.length)];
+          const port = probePorts[i % probePorts.length];
+          await test(ip, port);
+        }
+      };
+      console.log(`[scan-net] 目标 ${target} → ${ips.length} 个 IP 探测中...`);
+      await Promise.all(Array.from({ length: 60 }, worker));   // 60 并发
+      for (const ip of ips) {
+        const open = (ipOpen.get(ip) || []).sort((a, b) => a - b);
+        if (open.length) hosts.push({ ip, open });
+      }
+      console.log(`[scan-net] 完成: 发现 ${hosts.length} 台设备`);
+      send(ws, { type: 'scan-net', target, hosts });
+      break;
+    }
     case 'scan': {
       // 端口扫描: TCP 探测 (并发 20, 单端口 800ms 超时)
       const { host, ports } = m;
@@ -485,6 +526,47 @@ async function doConnect(ws, cfg, tabId) {
 }
 
 // ---------- 启动 ----------
+// 网段解析: '192.168.1.216' | '192.168.1.0/24' | '192.168.1.1-192.168.1.254' | '192.168.1.100-200'
+function expandTarget(t) {
+  t = t.trim();
+  const ipRe = /^(\d{1,3}\.\d{1,3}\.\d{1,3}\.)(\d{1,3})$/;
+  // 单 IP
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(t)) {
+    return /^(\d{1,3}\.){3}\d{1,3}$/.test(t) ? [t] : [];
+  }
+  // CIDR: 192.168.1.0/24
+  const cidr = t.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3})\.(\d{1,3})\/(\d{1,2})$/);
+  if (cidr) {
+    const base = cidr[1], start = parseInt(cidr[2], 10), bits = parseInt(cidr[3], 10);
+    const size = Math.max(1, 2 ** (32 - bits));
+    const ips = [];
+    for (let i = 0; i < size; i++) {
+      const last = (start + i) % 256;
+      ips.push(`${base}.${last}`);
+      if (last === 255 && start + i > 255) break;
+    }
+    return ips;
+  }
+  // 范围: 192.168.1.1-192.168.1.254 或 192.168.1.100-200
+  const range = t.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3})\.(\d{1,3})\s*-\s*(\d{1,3}\.\d{1,3}\.\d{1,3})\.(\d{1,3})$/);
+  if (range) {
+    const ips = [];
+    for (let i = parseInt(range[2], 10); i <= parseInt(range[4], 10) && i < 256; i++) {
+      ips.push(`${range[1]}.${i}`);
+    }
+    return ips;
+  }
+  const range2 = t.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3})\.(\d{1,3})\s*-\s*(\d{1,3})$/);
+  if (range2) {
+    const ips = [];
+    for (let i = parseInt(range2[2], 10); i <= parseInt(range2[3], 10) && i < 256; i++) {
+      ips.push(`${range2[1]}.${i}`);
+    }
+    return ips;
+  }
+  return [];
+}
+
 const PORT = parseInt(process.argv[process.argv.indexOf('--port') + 1], 10) || 8787;
 server.listen(PORT, '127.0.0.1', () => {
   console.log('┌──────────────────────────────────────────────┐');

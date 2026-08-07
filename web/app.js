@@ -165,6 +165,10 @@ function handleMsg(m) {
       renderScan(m);
       break;
     }
+    case 'scan-net': {
+      renderScanNet(m);
+      break;
+    }
     case 'zmodem': {
       // Zmodem 文件接收完成: 终端提示 + 状态栏
       const tab = tabs.find(t => t.id === m.id);
@@ -1022,11 +1026,38 @@ const PORT_NAMES = { 22: 'SSH', 23: 'Telnet', 21: 'FTP', 80: 'HTTP', 443: 'HTTPS
   5432: 'PostgreSQL', 27017: 'MongoDB', 5555: 'ADB', 11211: 'Memcache', 2000: 'telnetd' };
 $('btn-scan-close').onclick = () => $('dlg-scan-mask').classList.add('hidden');
 $('btn-scan-start').onclick = () => {
-  const host = $('scan-host').value.trim();
-  if (!host) return setStatus('请输入目标主机');
+  const target = $('scan-host').value.trim();
+  if (!target) return setStatus('请输入目标 IP 或网段');
   $('scan-result').innerHTML = '<div class="muted">扫描中…</div>';
-  send({ type: 'scan', host, ports: SCAN_PORTS });
+  // 含 / 或 - 视为网段 → 网络扫描 (设备发现); 单 IP → 全端口扫描
+  if (target.includes('/') || target.includes('-')) {
+    setStatus(`网络扫描: ${target}`);
+    send({ type: 'scan-net', target });
+  } else {
+    send({ type: 'scan', host: target, ports: SCAN_PORTS });
+  }
 };
+function renderScanNet(m) {
+  const el = $('scan-result');
+  if (!m.hosts.length) {
+    el.innerHTML = `<div class="muted">未发现存活设备 (目标: ${esc(m.target)})</div>`;
+    return;
+  }
+  const rows = m.hosts.map(h => {
+    const ports = h.open.map(p => `<span class="scan-open" data-ip="${h.ip}" data-port="${p}">● ${p}${PORT_NAMES[p] ? ' (' + PORT_NAMES[p] + ')' : ''}</span>`).join(' ');
+    return `<div class="scan-host"><span class="scan-ip">${h.ip}</span> ${ports}</div>`;
+  }).join('');
+  el.innerHTML = `<div class="muted">发现 ${m.hosts.length} 台设备 (目标: ${esc(m.target)}):</div>${rows}`;
+  // 点击开放端口 → 自动填连接对话框
+  el.querySelectorAll('.scan-open').forEach(span => {
+    span.onclick = () => {
+      const ip = span.dataset.ip, port = parseInt(span.dataset.port, 10);
+      const type = port === 22 ? 'ssh' : port === 23 ? 'telnet' : 'ssh';
+      openDlg({ type, name: `${ip}:${port}`, host: ip, port: port === 22 ? 22 : port });
+      setStatus(`已填充连接: ${ip}:${port}`);
+    };
+  });
+}
 function renderScan(m) {
   if (!m.open.length) {
     $('scan-result').innerHTML = `<div class="muted">${esc(m.host)}: 未发现开放端口</div>`;
