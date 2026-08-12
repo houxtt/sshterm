@@ -463,22 +463,11 @@ function bindClipboard(tab) {
     const mod = e.ctrlKey || e.metaKey;
     const k = e.key.toLowerCase();
     if (mod && !e.shiftKey && k === 'c') {
-      if (term.getSelection()) { copySelection(term); return false; }  // 有选中→复制
-      return true;                                                     // 无选中→SIGINT 照常
+      if (term.getSelection()) { copySelection(term); return false; }
+      return true;
     }
-    if (mod && !e.shiftKey && k === 'v') {
-      e.preventDefault();
-      e.stopPropagation();
-      pasteClipboard(term);
-      return false;
-    }
+    // Ctrl+V / Shift+Ctrl+V: 不拦截, 交给 xterm.js 原生粘贴 (可靠且不耦合剪贴板权限)
     if (mod && e.shiftKey && k === 'c') { copySelection(term); return false; }
-    if (mod && e.shiftKey && k === 'v') {
-      e.preventDefault();
-      e.stopPropagation();
-      pasteClipboard(term);
-      return false;
-    }
     if (mod && k === 'f') { openSearch(); return false; }
     return true;
   });
