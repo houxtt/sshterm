@@ -465,9 +465,19 @@ function bindClipboard(tab) {
       if (term.getSelection()) { copySelection(term); return false; }  // 有选中→复制
       return true;                                                     // 无选中→SIGINT 照常
     }
-    if (mod && !e.shiftKey && k === 'v') { pasteClipboard(term); return false; }
+    if (mod && !e.shiftKey && k === 'v') {
+      e.preventDefault();
+      e.stopPropagation();
+      pasteClipboard(term);
+      return false;
+    }
     if (mod && e.shiftKey && k === 'c') { copySelection(term); return false; }
-    if (mod && e.shiftKey && k === 'v') { pasteClipboard(term); return false; }
+    if (mod && e.shiftKey && k === 'v') {
+      e.preventDefault();
+      e.stopPropagation();
+      pasteClipboard(term);
+      return false;
+    }
     if (mod && k === 'f') { openSearch(); return false; }
     return true;
   });
