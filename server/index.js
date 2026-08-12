@@ -78,6 +78,39 @@ function saveSessions(data) {
 }
 let sessions = loadSessions();
 
+// ---------- SSH config 解析 ----------
+// 支持: Host 别名 → Hostname IP/Port/User/IdentityFile
+const SSH_CONFIG_PATH = path.join(os.homedir(), '.ssh', 'config');
+let sshConfig = null;
+function loadSSHConfig() {
+  try {
+    const raw = fs.readFileSync(SSH_CONFIG_PATH, 'utf8');
+    const hosts = {};
+    let current = null;
+    for (const line of raw.split('\n')) {
+      const m = line.match(/^\s*(Host|Hostname|Port|User|IdentityFile|ProxyJump)\s+(.+)$/i);
+      if (!m) continue;
+      const [, key, val] = m;
+      const k = key.toLowerCase();
+      if (k === 'host') {
+        current = val.replace(/['"]/g, '').trim();
+        hosts[current] = { hostname: '', port: 22, user: 'root', identity: '' };
+      } else if (current) {
+        if (k === 'hostname') hosts[current].hostname = val.replace(/['"]/g, '').trim();
+        else if (k === 'port') hosts[current].port = parseInt(val, 10);
+        else if (k === 'user') hosts[current].user = val.replace(/['"]/g, '').trim();
+        else if (k === 'identityfile') hosts[current].identity = val.replace(/['"]/g, '').trim();
+      }
+    }
+    sshConfig = hosts;
+    console.log('[ssh-config] 加载', Object.keys(hosts).length, '个 Host 条目');
+  } catch (e) {
+    if (e.code !== 'ENOENT') console.log('[ssh-config] 加载失败:', e.message);
+    sshConfig = {};
+  }
+}
+loadSSHConfig();
+
 // ---------- HTTP 静态服务 ----------
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css',
                '.json': 'application/json', '.png': 'image/png', '.woff2': 'font/woff2' };
@@ -470,6 +503,19 @@ async function handle(ws, m) {
       for (const [id, conn] of connections) conn.close();
       connections.clear();
       liveByConfig.clear();
+      break;
+    }
+    case 'ssh-hosts': {
+      // 返回本机 SSH config 中的 Host 列表供前端解析
+      const hosts = sshConfig || {};
+      const list = Object.entries(hosts).map(([name, cfg]) => ({
+        name,
+        host: cfg.hostname || '',
+        port: cfg.port || 22,
+        user: cfg.user || 'root',
+        key: cfg.identity || ''
+      }));
+      send(ws, { type: 'ssh-hosts', list });
       break;
     }
     case 'connect': {

@@ -44,6 +44,7 @@
         <span>
           <button id="btn-batch" title="批量管理" class="mini">☑ 批量</button>
           <button id="btn-refresh" title="刷新">⟳</button>
+          <button id="btn-sshcfg" title="解析 SSH config" class="mini">🔑 SSH 配置</button>
         </span>
       </div>
       <ul id="session-list"></ul>
@@ -201,6 +202,19 @@
       <button id="btn-dlg-save">保存并连接</button>
       <button id="btn-dlg-cancel">取消</button>
     </div>
+  </div>
+</div>
+
+<!-- SSH 配置解析弹窗 -->
+<div id="sshcfg-dialog-mask" class="hidden">
+  <div id="sshcfg-dialog">
+    <h3>SSH 配置 (SSH config)</h3>
+    <p class="muted">发现以下 Host 条目 (点击填充表单):</p>
+    <table id="sshcfg-list" style="width:100%;border-collapse:collapse;font-size:13px;">
+      <thead><tr style="background:#2a2b3a;"><th>Host</th><th>Host</th><th>Port</th><th>User</th><th>Key</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <button id="sshcfg-close" class="mini danger" style="margin-top:8px;">关闭</button>
   </div>
 </div>
 

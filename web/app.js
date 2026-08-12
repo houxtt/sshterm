@@ -105,6 +105,31 @@ function sendInput(tabId, str) {
 
 function handleMsg(m) {
   switch (m.type) {
+    case 'ssh-hosts': {
+      const list = m.list || [];
+      const tbody = $('sshcfg-list').querySelector('tbody');
+      tbody.innerHTML = list.map(h => `
+        <tr style="cursor:pointer" data-name="${h.name}">
+          <td>${h.name}</td><td>${h.host}</td><td>${h.port}</td><td>${h.user}</td><td>${h.key ? '✅' : ''}</td>
+        </tr>`).join('');
+      tbody.querySelectorAll('tr').forEach(tr => {
+        tr.onclick = () => {
+          const n = tr.dataset.name;
+          const cfg = list.find(h => h.name === n);
+          $('f-type').value = 'ssh';
+          $('f-host').value = cfg.host;
+          $('f-port').value = cfg.port;
+          $('f-user').value = cfg.user;
+          $('f-key').value = cfg.key;
+          $('f-name').value = n;
+          $('dlg-mask').classList.add('hidden');
+          $('sshcfg-dialog-mask').classList.add('hidden');
+          $('f-type').focus();
+        };
+      });
+      $('sshcfg-dialog-mask').classList.remove('hidden');
+      break;
+    }
     case 'sessions': {
       sessions = m.list || [];
       renderSessionList();
@@ -1281,6 +1306,11 @@ $('mi-timer').onclick = () => {
   $('dlg-timer-mask').classList.remove('hidden');
 };
 $('mi-scan').onclick = () => { $('menu-more').classList.add('hidden'); $('dlg-scan-mask').classList.remove('hidden'); };
+$('btn-sshcfg').onclick = () => {
+  send({ type: 'ssh-hosts' });
+  $('sshcfg-list').querySelector('tbody').innerHTML = '';
+};
+$('sshcfg-close').onclick = () => { $('sshcfg-dialog-mask').classList.add('hidden'); };
 $('mi-capture').onclick = () => {
   $('menu-more').classList.add('hidden');
   const tab = tabs.find(t => t.id === activeTabId);
