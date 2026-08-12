@@ -4,6 +4,14 @@
 // ---------- 工具 ----------
 const $ = (id) => document.getElementById(id);
 const hexOf = (u8) => Array.from(u8).map(b => b.toString(16).padStart(2, '0')).join(' ').toUpperCase();
+
+// 原始抓包格式: HEX + 右侧 ASCII 对照 (可打印字符显示原文, 不可打印显示 .)
+function hexdumpLine(data) {
+  const bytes = new Uint8Array(data);
+  const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(' ').toUpperCase();
+  const ascii = Array.from(bytes).map(b => (b >= 0x20 && b < 0x7f) ? String.fromCharCode(b) : '.').join('');
+  return `${hex.padEnd(48, ' ')} │ ${ascii}`;
+}
 const esc = (s) => s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 // FitAddon/SearchAddon 兼容: UMD 可能是 { Xxx: class } 命名空间
@@ -65,7 +73,7 @@ ws.onmessage = (ev) => {
   if (tab.logging) {
     const dir = pane ? pane : tab;
     if (!dir.captureParts) dir.captureParts = [];
-    dir.captureParts.push(`${new Date().toISOString()} RX ${hexOf(payload)}\n`);
+    dir.captureParts.push(`${new Date().toISOString()} RX ${hexdumpLine(payload)}\n`);
   }
   // 累积终端内容 (数组 push, 避免高频输出时的字符串拼接卡顿)
   try {
@@ -90,7 +98,7 @@ function sendInput(tabId, str) {
   const tab = tabs.find(t => t.id === tabId);
   if (tab && tab.logging) {
     if (!tab.captureParts) tab.captureParts = [];
-    tab.captureParts.push(`${new Date().toISOString()} TX ${hexOf(bytes)}\n`);
+    tab.captureParts.push(`${new Date().toISOString()} TX ${hexdumpLine(bytes)}\n`);
   }
 }
 
