@@ -78,33 +78,30 @@ class ZmodemReceiver {
   // 二进制帧: ZPAD ZDLE <type> <fcs2> <data...> (ZDLE 转义, 子包结束 ZDLE <ZCRC?>)
   _parseBinary() {
     const b = this.buf;
-    if (b.length < 4) return;
+    if (b.length < 5) return;
     const type = b[2];
-    // fcs 2 字节 (b[3], b[4]) 校验忽略
+    this._fcs = (b[3] | (b[4] << 8));   // 帧头 CRC-16
+    this._hexMode = false;
     let i = 5;
     const data = [];
-    // 读取数据直到帧尾: ZDLE <结束符> 或子包结束 ZDLE <ZCRCE/ZCRCW...>
-    // 简化: 按 ZDLE 分隔, 帧尾 = ZDLE 后跟 ZCRC* 或非转义
     while (i < b.length) {
       const c = b[i];
       if (c === ZDLE) {
-        if (i + 1 >= b.length) { this.buf = b.slice(i); return; }  // 等更多
+        if (i + 1 >= b.length) { this.buf = b.slice(i); return; }
         const d = b[i + 1];
-        if (d === ZDLE) { data.push(ZDLE); i += 2; continue; }      // 转义 ZDLE
+        if (d === ZDLE) { data.push(ZDLE); i += 2; continue; }
         if (d === ZCRCW || d === ZCRCE || d === ZCRCQ || d === ZCRCZ || d === ZCRCG) {
-          // 子包结束 (ZDATA 数据段结束)
           this._frameDone(type, Buffer.from(data), d);
           this.buf = b.slice(i + 2);
           return this._parse();
         }
-        // 其他 ZDLE 序列: 跳过 (控制)
         i += 2;
         continue;
       }
       data.push(c);
       i++;
     }
-    this.buf = b;   // 不完整, 等更多
+    this.buf = b;
   }
 
   // HEX 帧: ZPAD ZDLE ZDLE <type> <fcs4hex> <data hex> <ZDLE CR LF?>
@@ -112,7 +109,8 @@ class ZmodemReceiver {
     const b = this.buf;
     if (b.length < 5) return;
     const type = b[3];
-    // fcs 4 hex 字符 (b[4..7]) 忽略
+    this._fcs = undefined;   // hex 帧暂不校验 CRC
+    this._hexMode = true;
     let i = 8;
     const hexs = [];
     while (i < b.length) {
@@ -138,6 +136,17 @@ class ZmodemReceiver {
 
   // 帧完成处理
   _frameDone(type, data, subType) {
+    // 帧头 CRC 校验 (二进制帧, 非 hex 模式)
+    if (!this._hexMode && this._fcs !== undefined) {
+      const body = Buffer.concat([Buffer.from([type]), data]);
+      const calc = crc16(body);
+      if (calc !== this._fcs) {
+        console.log(`[zmodem] CRC 错误: type=${type} calc=${calc.toString(16)} fcs=${this._fcs.toString(16)}`);
+        this.send(Buffer.from([ZPAD, ZDLE, ZNAK, 0x00, 0x00]));
+        return;
+      }
+    }
+    this._fcs = undefined;
     console.log(`[zmodem] 帧 type=${type} len=${data.length} sub=${subType} state=${this.state}`);
     if (type === ZRQINIT) {
       // 回 ZRINIT (二进制, flags=0): ZPAD ZDLE 01 <fcs> 00 00 00 00
