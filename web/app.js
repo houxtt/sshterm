@@ -77,7 +77,8 @@ ws.onmessage = (ev) => {
   }
   // 累积终端内容 (数组 push, 避免高频输出时的字符串拼接卡顿)
   try {
-    const text = new TextDecoder('utf-8', { fatal: false }).decode(payload);
+    const enc = tab.cfg.encoding || 'utf-8';
+    const text = new TextDecoder(enc, { fatal: false }).decode(payload);
     const target = pane || tab;
     if (!target.recParts) target.recParts = [];
     target.recLen = (target.recLen || 0) + text.length;
@@ -686,6 +687,7 @@ function openDlg(existing = null) {
   $('s-data').value = String(existing?.dataBits || 8);
   $('s-stop').value = String(existing?.stopBits || 1);
   $('s-parity').value = existing?.parity || 'none';
+  $('s-encoding').value = existing?.encoding || 'utf-8';
   $('s-rtscts').checked = !!existing?.rtscts;
   $('s-reconnect').checked = existing?.reconnect !== false;
   $('s-hex').checked = !!existing?.hexMode;
@@ -741,6 +743,7 @@ function collectDlg() {
       dataBits: parseInt($('s-data').value, 10) || 8,
       stopBits: parseInt($('s-stop').value, 10) || 1,
       parity: $('s-parity').value,
+      encoding: $('s-encoding').value || 'utf-8',
       rtscts: $('s-rtscts').checked,
       reconnect: $('s-reconnect').checked,
       hexMode: $('s-hex').checked,

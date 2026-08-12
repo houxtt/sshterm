@@ -169,6 +169,13 @@
         <label>数据位 <select id="s-data"><option>8</option><option>7</option><option>6</option><option>5</option></select></label>
         <label>停止位 <select id="s-stop"><option>1</option><option>2</option></select></label>
         <label>校验位 <select id="s-parity"><option value="none">None</option><option value="even">Even</option><option value="odd">Odd</option></select></label>
+        <label>编码
+          <select id="s-encoding">
+            <option value="utf-8" selected>UTF-8</option>
+            <option value="gbk">GBK (嵌入式常见)</option>
+            <option value="latin1">Latin-1 (ISO-8859-1)</option>
+          </select>
+        </label>
         <label><input type="checkbox" id="s-rtscts"> RTS/CTS 硬件流控</label>
         <label><input type="checkbox" id="s-reconnect" checked> 断线自动重连</label>
         <label><input type="checkbox" id="s-hex"> HEX 显示/发送</label>
