@@ -6,10 +6,12 @@ class SerialConnection extends BaseConnection {
   async connect() {
     this.state = 'connecting';
     const { port, baudRate = 115200, dataBits = 8, stopBits = 1,
-            parity = 'none' } = this.config;
+            parity = 'none', rtscts = false } = this.config;
+    this._writeQueue = [];
+    this._writing = false;
     return new Promise((resolve, reject) => {
       const sp = new SerialPort({
-        path: port, baudRate, dataBits, stopBits, parity,
+        path: port, baudRate, dataBits, stopBits, parity, rtscts,
         autoOpen: false, highWaterMark: 64 * 1024,
       });
       this.sp = sp;
@@ -36,12 +38,43 @@ class SerialConnection extends BaseConnection {
   }
 
   write(data) {
-    if (this.sp && this.state === 'connected') this.sp.write(data);
+    if (!this.sp || this.state !== 'connected') return false;
+    this._writeQueue.push(Buffer.from(data));
+    this._drainWrites();
+    return true;
+  }
+
+  _drainWrites() {
+    if (this._writing || !this.sp || !this.sp.isOpen || this.state !== 'connected') return;
+    const data = this._writeQueue.shift();
+    if (!data) return;
+    this._writing = true;
+    this.sp.write(data, (err) => {
+      this._writing = false;
+      if (err) {
+        this._emitError(`串口写入失败: ${err.message}`);
+        this._drainWrites();
+      } else this.sp.drain(() => this._drainWrites());
+    });
+  }
+
+  setSignals(signals) {
+    if (!this.sp || !this.sp.isOpen) throw new Error('串口未连接');
+    return new Promise((resolve, reject) => this.sp.set(signals, (err) => err ? reject(err) : resolve()));
+  }
+
+  sendBreak(duration = 250) {
+    if (!this.sp || !this.sp.isOpen) throw new Error('串口未连接');
+    return new Promise((resolve, reject) => this.sp.set({ brk: true }, (err) => {
+      if (err) return reject(err);
+      setTimeout(() => this.sp.set({ brk: false }, (e) => e ? reject(e) : resolve()), duration);
+    }));
   }
 
   close() {
     if (this.state === 'closed') return;
     this.state = 'closing';
+    this._writeQueue = [];
     try {
       if (this.sp && this.sp.isOpen) this.sp.close();
     } catch (e) { /* 忽略 */ }

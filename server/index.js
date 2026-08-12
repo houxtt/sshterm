@@ -44,13 +44,36 @@ function log(level, msg) {
 
 // ---------- 会话持久化 ----------
 function loadSessions() {
-  try { return JSON.parse(fs.readFileSync(CONN_FILE, 'utf8')); }
+  try {
+    const raw = JSON.parse(fs.readFileSync(CONN_FILE, 'utf8'));
+    // Migrate older versions that persisted credentials. Credentials are
+    // intentionally process-memory-only and must not survive a restart.
+    let migrated = false;
+    const clean = Object.fromEntries(Object.entries(raw).map(([id, s]) => {
+      const { password, passphrase, loginPass, ...safe } = s || {};
+      if ([password, passphrase, loginPass].some(v => v !== undefined)) migrated = true;
+      return [id, safe];
+    }));
+    if (migrated) {
+      fs.mkdirSync(CONN_DIR, { recursive: true });
+      fs.writeFileSync(CONN_FILE, JSON.stringify(clean, null, 2));
+    }
+    return clean;
+  }
   catch { return {}; }
 }
 function saveSessions(data) {
   try {
     fs.mkdirSync(CONN_DIR, { recursive: true });
-    fs.writeFileSync(CONN_FILE, JSON.stringify(data, null, 2));
+    // Never write reusable credentials to disk. Secrets remain in memory only
+    // for the lifetime of this server process; after restart the user must
+    // enter them again. This avoids plaintext passwords in sessions.json.
+    const diskData = Object.fromEntries(Object.entries(data).map(([id, s]) => {
+      // privateKey is a local file path, not private-key material; preserve it.
+      const { password, passphrase, loginPass, ...safe } = s;
+      return [id, safe];
+    }));
+    fs.writeFileSync(CONN_FILE, JSON.stringify(diskData, null, 2));
   } catch (e) { console.error('[会话] 保存失败:', e.message); }
 }
 let sessions = loadSessions();
@@ -241,7 +264,22 @@ function scheduleIdleExit() {
 }
 
 // ---------- WebSocket 协议 ----------
-const wss = new WebSocketServer({ server });
+// The HTTP server is loopback-only; additionally cap a single WebSocket frame
+// so a malformed local client cannot allocate unbounded memory.
+const wss = new WebSocketServer({
+  server,
+  maxPayload: 8 * 1024 * 1024,
+  verifyClient: ({ origin }) => {
+    // Only the local sshterm UI may use this local service. Node-based e2e
+    // clients have no Origin header and are allowed for automation.
+    if (!origin) return true;
+    try {
+      const u = new URL(origin);
+      return (u.hostname === '127.0.0.1' || u.hostname === 'localhost') &&
+        (u.protocol === 'http:' || u.protocol === 'https:');
+    } catch { return false; }
+  },
+});
 wss.on('connection', (ws) => {
   wsCount++;
   clearTimeout(idleExitTimer);
@@ -258,6 +296,7 @@ wss.on('connection', (ws) => {
   ws.on('message', (msg, isBinary) => {
     if (isBinary) {
       // binary: [connId: 2B LE][data...] → 路由到连接的 write
+      if (msg.length < 2) return;
       const id = msg.readUInt16LE(0);
       const conn = connections.get(id);
       if (conn && conn.state === 'connected') conn.write(msg.subarray(2));
@@ -355,8 +394,8 @@ async function handle(ws, m) {
         { timeout: 120000 }, (err, stdout, stderr) => {
           const ok = !err;
           send(ws, {
-            type: 'serial-free', path, ok,
-            msg: ok ? `设备 ${path} 已强制重启, 占用已释放` : `强制释放失败(需管理员确认 UAC): ${err ? err.message : ''}`,
+            type: 'serial-free', path: comPort, ok,
+            msg: ok ? `设备 ${comPort} 已强制重启, 占用已释放` : `强制释放失败(需管理员确认 UAC): ${err ? err.message : ''}`,
           });
           if (!ok) console.log('[serial-force-free] 失败:', err && err.message, stderr);
         });
@@ -368,6 +407,7 @@ async function handle(ws, m) {
       const { target } = m;
       if (!target) return send(ws, { type: 'error', msg: '缺少扫描目标' });
       const ips = expandTarget(String(target).trim());
+      if (ips.error) return send(ws, { type: 'error', msg: ips.error });
       if (!ips.length) return send(ws, { type: 'error', msg: '目标格式无法解析: ' + target });
       const probePorts = [22, 23, 21, 80, 443, 3389, 5555, 8080];
       const net = require('net');
@@ -460,6 +500,25 @@ async function handle(ws, m) {
       if (conn && conn.resize) conn.resize(m.cols, m.rows);
       break;
     }
+    case 'serial-control': {
+      const conn = connections.get(m.id);
+      if (!conn || conn.config.type !== 'serial') {
+        return send(ws, { type: 'error', id: m.id, msg: '不是串口连接' });
+      }
+      try {
+        if (m.action === 'signals') {
+          await conn.setSignals({ dtr: !!m.dtr, rts: !!m.rts });
+        } else if (m.action === 'break') {
+          await conn.sendBreak(Math.min(Math.max(Number(m.duration) || 250, 20), 2000));
+        } else {
+          throw new Error('未知串口控制操作');
+        }
+        send(ws, { type: 'serial-control', id: m.id, ok: true, action: m.action });
+      } catch (e) {
+        send(ws, { type: 'error', id: m.id, msg: `串口控制失败: ${e.message}` });
+      }
+      break;
+    }
     case 'sftp': {
       const conn = connections.get(m.id);
       if (!conn || conn.config.type !== 'ssh') {
@@ -538,43 +597,45 @@ async function doConnect(ws, cfg, tabId) {
 }
 
 // ---------- 启动 ----------
-// 网段解析: '192.168.1.216' | '192.168.1.0/24' | '192.168.1.1-192.168.1.254' | '192.168.1.100-200'
+// 网段解析: correct IPv4 integer expansion with a safe workload limit.
+const MAX_SCAN_HOSTS = 4096;
+function parseIPv4(s) {
+  const p = String(s).split('.').map(Number);
+  if (p.length !== 4 || p.some(n => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+  return (((p[0] * 256 + p[1]) * 256 + p[2]) * 256 + p[3]) >>> 0;
+}
+function formatIPv4(n) {
+  return [n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join('.');
+}
 function expandTarget(t) {
   t = t.trim();
-  const ipRe = /^(\d{1,3}\.\d{1,3}\.\d{1,3}\.)(\d{1,3})$/;
-  // 单 IP
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(t)) {
-    return /^(\d{1,3}\.){3}\d{1,3}$/.test(t) ? [t] : [];
-  }
-  // CIDR: 192.168.1.0/24
-  const cidr = t.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3})\.(\d{1,3})\/(\d{1,2})$/);
+  const single = parseIPv4(t);
+  if (single !== null) return [formatIPv4(single)];
+
+  const cidr = t.match(/^([^/]+)\/(\d{1,2})$/);
   if (cidr) {
-    const base = cidr[1], start = parseInt(cidr[2], 10), bits = parseInt(cidr[3], 10);
-    const size = Math.max(1, 2 ** (32 - bits));
-    const ips = [];
-    for (let i = 0; i < size; i++) {
-      const last = (start + i) % 256;
-      ips.push(`${base}.${last}`);
-      if (last === 255 && start + i > 255) break;
-    }
-    return ips;
+    const ip = parseIPv4(cidr[1]);
+    const bits = Number(cidr[2]);
+    if (ip === null || bits < 0 || bits > 32) return [];
+    const size = 2 ** (32 - bits);
+    if (size > MAX_SCAN_HOSTS) return { error: `网段过大: ${size} 台, 请缩小到不超过 ${MAX_SCAN_HOSTS} 台` };
+    const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+    const network = ip & mask;
+    return Array.from({ length: size }, (_, i) => formatIPv4((network + i) >>> 0));
   }
-  // 范围: 192.168.1.1-192.168.1.254 或 192.168.1.100-200
-  const range = t.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3})\.(\d{1,3})\s*-\s*(\d{1,3}\.\d{1,3}\.\d{1,3})\.(\d{1,3})$/);
+
+  const range = t.match(/^([^\-]+)\s*-\s*(.+)$/);
   if (range) {
-    const ips = [];
-    for (let i = parseInt(range[2], 10); i <= parseInt(range[4], 10) && i < 256; i++) {
-      ips.push(`${range[1]}.${i}`);
-    }
-    return ips;
-  }
-  const range2 = t.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3})\.(\d{1,3})\s*-\s*(\d{1,3})$/);
-  if (range2) {
-    const ips = [];
-    for (let i = parseInt(range2[2], 10); i <= parseInt(range2[3], 10) && i < 256; i++) {
-      ips.push(`${range2[1]}.${i}`);
-    }
-    return ips;
+    const start = parseIPv4(range[1]);
+    const end = parseIPv4(range[2]) ?? (() => {
+      const prefix = range[1].trim().split('.').slice(0, 3).join('.');
+      const last = Number(range[2].trim());
+      return parseIPv4(`${prefix}.${last}`);
+    })();
+    if (start === null || end === null || end < start) return [];
+    const size = end - start + 1;
+    if (size > MAX_SCAN_HOSTS) return { error: `扫描范围过大: ${size} 台, 请缩小到不超过 ${MAX_SCAN_HOSTS} 台` };
+    return Array.from({ length: size }, (_, i) => formatIPv4((start + i) >>> 0));
   }
   return [];
 }

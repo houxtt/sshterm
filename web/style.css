@@ -239,6 +239,8 @@ button.mini { padding: 2px 8px; font-size: 11px; }
   background: #1f2030; border: 1px solid #3a3b4d; border-radius: 8px;
   padding: 18px 22px; width: 400px; max-height: 80vh; overflow-y: auto;
 }
+.serial-controls { display: flex; gap: 6px; margin-top: 4px; }
+.serial-controls .active { background: #2563eb; color: #fff; }
 #dlg-scan h3 { color: #e0e2f0; margin-bottom: 12px; }
 #scan-result { margin-top: 12px; font: 12px/1.8 Consolas, monospace; }
 .scan-host { padding: 5px 0; border-bottom: 1px solid #2a2b3a; font-size: 12px; }

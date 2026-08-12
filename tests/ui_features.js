@@ -19,7 +19,10 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   await sleep(1000);
 
   // ===== 功能2: 批量删除 (先保存会话, 产生日志) =====
+  // 测试只保护启动时已有的会话, 不依赖特定用户环境(例如 gk1221/logic/1)
+  const baselineSessions = await page.$$eval('#session-list .s-name', els => els.map(e => e.textContent));
   console.log('[1] 保存 3 个测试会话...');
+  
   for (let i = 1; i <= 3; i++) {
     await page.evaluate(() => document.getElementById('btn-new').click());
     await sleep(250);
@@ -97,15 +100,15 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   await sleep(500);
 
   // ===== 会话保护断言 =====
-  const userSessions = await page.evaluate(() =>
+  const finalSessions = await page.evaluate(() =>
     [...document.querySelectorAll('#session-list .s-name')].map(e => e.textContent));
-  const protected = ['gk1221', 'logic', '1'].filter(n => !userSessions.includes(n));
-  console.log('    用户会话缺失:', protected.length ? protected.join(',') : '(全部保留 ✅)');
+  const missingBaseline = baselineSessions.filter(n => !finalSessions.includes(n));
+  console.log('    启动前会话缺失:', missingBaseline.length ? missingBaseline.join(',') : '(全部保留 ✅)');
 
   const ok1 = logVisible && logCount > 0 && logHasSave;
   const ok2 = before > 0 && cbs > 0 && selN === '2' && after === before - 2 && batchBarHidden;
   const ok3 = alive && errors.length === 0;
-  const ok4 = protected.length === 0;
+  const ok4 = missingBaseline.length === 0;
   console.log('\n=== 汇总 ===');
   console.log(`日志面板: ${ok1 ? '✅' : '❌'}  批量删除: ${ok2 ? '✅' : '❌'}  复制不崩: ${ok3 ? '✅' : '❌'}  会话保护: ${ok4 ? '✅' : '❌'}`);
   try { browser.process() && browser.process().kill(); } catch (e) {}

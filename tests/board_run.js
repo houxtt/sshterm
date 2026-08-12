@@ -24,8 +24,9 @@ sock.on('data', (d) => {
     shellReady = true;
     setTimeout(() => send(CMD + '\r\n'), 300);
     cmdSent = true;
-    // 启动输出采集: 从命令回显后开始
-    setTimeout(() => { done = true; finish(); }, 4000);
+    // 输出采集: 默认 4s 后结束; 可用 WAIT_MS 环境变量延长 (长拷贝/合并用)
+    const waitMs = parseInt(process.env.WAIT_MS || '4000', 10);
+    setTimeout(() => { done = true; finish(); }, waitMs);
     return;
   }
 });
@@ -37,4 +38,5 @@ function finish() {
   sock.end(); process.exit(0);
 }
 sock.on('close', () => { if (!done) { console.error('\n连接关闭(未完成)'); process.exit(1); } });
-setTimeout(() => { if (!done) { console.error('\n超时'); process.exit(1); } }, 20000);
+// 总超时: 默认 20s; 与 WAIT_MS 联动 (等待时长 + 20s 余量)
+setTimeout(() => { if (!done) { console.error('\n超时'); process.exit(1); } }, (parseInt(process.env.WAIT_MS || '4000', 10)) + 20000);

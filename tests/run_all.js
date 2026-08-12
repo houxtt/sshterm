@@ -1,14 +1,41 @@
 // 测试编排: 起临时服务端 → 跑全部 e2e → 汇总 → 清理
 // 用法: node tests/run_all.js   (或 npm test)
 const { spawn } = require('child_process');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const PORT = 8799;
+const ROOT = path.join(__dirname, '..');
+
+// Tests intentionally use the real protocol/device fixtures, but must not
+// permanently modify the user's sessions or generated progress fixture.
+const protectedFiles = [
+  path.join(os.homedir(), '.sshterm', 'sessions.json'),
+  path.join(ROOT, 'tests', 'tmp_progress.txt'),
+];
+const backups = protectedFiles.map(file => ({
+  file,
+  exists: fs.existsSync(file),
+  data: fs.existsSync(file) ? fs.readFileSync(file) : null,
+}));
+function restoreProtectedFiles() {
+  for (const b of backups) {
+    try {
+      if (b.exists) {
+        fs.mkdirSync(path.dirname(b.file), { recursive: true });
+        fs.writeFileSync(b.file, b.data);
+      } else if (fs.existsSync(b.file)) fs.unlinkSync(b.file);
+    } catch (e) { console.error(`[测试清理] ${b.file}: ${e.message}`); }
+  }
+}
 
 const tests = [
   { name: 'Telnet (mock: IAC+自动登录)', cmd: 'node', args: ['tests/e2e_telnet.js'] },
   { name: '日志文件持久化', cmd: 'node', args: ['tests/e2e_log_file.js', `ws://127.0.0.1:${PORT}`] },
+  { name: '凭据不落盘安全回归', cmd: 'node', args: ['tests/e2e_security.js', `ws://127.0.0.1:${PORT}`] },
   { name: '串口 (COM27/COM1 打开写入)', cmd: 'node', args: ['tests/e2e_serial.js'] },
   { name: '串口占用检测 (occupied标记)', cmd: 'node', args: ['tests/e2e_serial_occupied.js', `ws://127.0.0.1:${PORT}`] },
+  { name: '串口控制(Break/DTR/RTS)路由', cmd: 'node', args: ['tests/e2e_serial_controls.js', `ws://127.0.0.1:${PORT}`] },
   { name: 'UI 功能 (新建→连接→shell→保存)', cmd: 'node', args: ['tests/ui_connect.js', `http://127.0.0.1:${PORT}/`] },
   { name: 'UI 关闭确认 (取消/确认/断开)', cmd: 'node', args: ['tests/ui_close_confirm.js', `http://127.0.0.1:${PORT}/`] },
   { name: 'UI 新功能 (日志/批量删除/复制)', cmd: 'node', args: ['tests/ui_features.js', `http://127.0.0.1:${PORT}/`] },
@@ -22,6 +49,7 @@ const tests = [
   { name: 'SFTP 断点续传/分块', cmd: 'node', args: ['tests/e2e_sftp_resume.js', `ws://127.0.0.1:${PORT}`] },
   { name: '端口扫描 (设备发现)', cmd: 'node', args: ['tests/e2e_scan.js', `ws://127.0.0.1:${PORT}`] },
   { name: '网络扫描 (网段设备发现)', cmd: 'node', args: ['tests/e2e_scan_net.js', `ws://127.0.0.1:${PORT}`] },
+  { name: '网络扫描边界(CIDR/范围/上限)', cmd: 'node', args: ['tests/e2e_scan_boundaries.js', `ws://127.0.0.1:${PORT}`] },
   { name: 'UI 扫描只需IP', cmd: 'node', args: ['tests/ui_scan.js', `http://127.0.0.1:${PORT}/`] },
   { name: 'SFTP 目录打包下载', cmd: 'node', args: ['tests/e2e_sftp_dir.js', `ws://127.0.0.1:${PORT}`] },
   { name: 'UI SFTP 面板 (连点防错)', cmd: 'node', args: ['tests/ui_sftp.js', `http://127.0.0.1:${PORT}/`] },
@@ -45,7 +73,7 @@ const tests = [
 
 function run(cmd, args, opts = {}) {
   return new Promise((resolve) => {
-    const p = spawn(cmd, args, { cwd: path.join(__dirname, '..'), ...opts });
+    const p = spawn(cmd, args, { cwd: ROOT, ...opts });
     let out = '';
     p.stdout.on('data', (d) => { out += d; process.stdout.write(d); });
     p.stderr.on('data', (d) => { out += d; process.stdout.write(d); });
@@ -58,7 +86,7 @@ async function main() {
   console.log('══════════ sshterm 测试套件 ══════════\n');
   // 起临时服务端 (--no-open 避免弹浏览器)
   const srv = spawn('node', ['server/index.js', '--port', String(PORT), '--no-open'],
-    { cwd: path.join(__dirname, '..') });
+    { cwd: ROOT });
   srv.stdout.on('data', () => {});
   srv.stderr.on('data', () => {});
   await new Promise((r) => setTimeout(r, 1200));
@@ -71,6 +99,7 @@ async function main() {
   }
 
   srv.kill();
+  restoreProtectedFiles();
   console.log('\n══════════ 汇总 ══════════');
   let ok = 0;
   for (const r of results) {

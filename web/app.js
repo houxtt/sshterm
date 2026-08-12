@@ -62,6 +62,11 @@ ws.onmessage = (ev) => {
   const payload = buf.subarray(2);
   if ((pane ? pane.hex : tab.hex)) term.write(hexOf(payload) + ' ');
   else term.write(payload);
+  if (tab.logging) {
+    const dir = pane ? pane : tab;
+    if (!dir.captureParts) dir.captureParts = [];
+    dir.captureParts.push(`${new Date().toISOString()} RX ${hexOf(payload)}\n`);
+  }
   // 累积终端内容 (数组 push, 避免高频输出时的字符串拼接卡顿)
   try {
     const text = new TextDecoder('utf-8', { fatal: false }).decode(payload);
@@ -82,6 +87,11 @@ function sendInput(tabId, str) {
   frame[0] = tabId & 0xff; frame[1] = (tabId >> 8) & 0xff;
   frame.set(bytes, 2);
   if (ws.readyState === 1) ws.send(frame);
+  const tab = tabs.find(t => t.id === tabId);
+  if (tab && tab.logging) {
+    if (!tab.captureParts) tab.captureParts = [];
+    tab.captureParts.push(`${new Date().toISOString()} TX ${hexOf(bytes)}\n`);
+  }
 }
 
 function handleMsg(m) {
@@ -105,9 +115,15 @@ function handleMsg(m) {
         } else {
           setTabState(m.id, m.state, m.msg);
         }
+        if (!pane && m.state === 'closed' && tab.everConnected) scheduleReconnect(tab, m.msg);
+        if (!pane && m.state === 'connected') {
+          cancelReconnect(tab);
+          tab.reconnectAttempts = 0;
+        }
         if (m.state === 'connected') {
           tab.cfg._serverCfg = m.cfg;
           if (!pane) {
+            tab.everConnected = true;
             fitTerm(tab);
             // 连接后自动执行 (Xshell 登录脚本风格): IP 命令集 auto + 会话 autoCmds
             setTimeout(() => runAutoCmds(tab.cfg), 300);
@@ -472,6 +488,8 @@ function doCloseTab(id) {
   const idx = tabs.findIndex(t => t.id === id);
   if (idx < 0) return;
   const tab = tabs[idx];
+  tab.intentionalClose = true;
+  cancelReconnect(tab);
   for (const p of tab.extraPanes) {
     send({ type: 'disconnect', id: p.connId });
     try { p.term.dispose(); } catch (e) {}
@@ -510,6 +528,31 @@ function setTabState(id, state, msg) {
   renderTabbar();
   updateSftpBtn();
   if (state === 'closed' && msg) setStatus(msg);
+}
+
+// 统一断线重连策略: 仅对非用户主动关闭的主标签生效。
+// 退避 1/2/5/10/20 秒, 最多 5 次; reconnect=false 可关闭。
+function cancelReconnect(tab) {
+  if (tab && tab.reconnectTimer) {
+    clearTimeout(tab.reconnectTimer);
+    tab.reconnectTimer = null;
+  }
+}
+function scheduleReconnect(tab, reason) {
+  if (!tab || tab.intentionalClose || tab.cfg.reconnect === false || tab.reconnectTimer) return;
+  if (tab.cfg.type === 'serial' && _occTab === tab) return;
+  tab.reconnectAttempts = (tab.reconnectAttempts || 0) + 1;
+  if (tab.reconnectAttempts > 5) {
+    setTabState(tab.id, 'closed', '连接失败, 已停止自动重连');
+    return;
+  }
+  const delays = [1000, 2000, 5000, 10000, 20000];
+  const delay = delays[tab.reconnectAttempts - 1];
+  setTabState(tab.id, 'connecting', `断线, ${delay / 1000} 秒后第 ${tab.reconnectAttempts} 次重连…`);
+  tab.reconnectTimer = setTimeout(() => {
+    tab.reconnectTimer = null;
+    if (!tab.intentionalClose && tabs.includes(tab)) send({ type: 'connect', session: tab.cfg, id: tab.id });
+  }, delay);
 }
 
 function renderTabbar() {
@@ -625,6 +668,8 @@ function openDlg(existing = null) {
   $('s-data').value = String(existing?.dataBits || 8);
   $('s-stop').value = String(existing?.stopBits || 1);
   $('s-parity').value = existing?.parity || 'none';
+  $('s-rtscts').checked = !!existing?.rtscts;
+  $('s-reconnect').checked = existing?.reconnect !== false;
   $('s-hex').checked = !!existing?.hexMode;
   updateDlgFields();
   $('dlg-mask').classList.remove('hidden');
@@ -677,7 +722,10 @@ function collectDlg() {
       baudRate: parseInt($('s-baud').value, 10) || 115200,
       dataBits: parseInt($('s-data').value, 10) || 8,
       stopBits: parseInt($('s-stop').value, 10) || 1,
-      parity: $('s-parity').value, hexMode: $('s-hex').checked,
+      parity: $('s-parity').value,
+      rtscts: $('s-rtscts').checked,
+      reconnect: $('s-reconnect').checked,
+      hexMode: $('s-hex').checked,
     });
   }
   // 连接后自动执行脚本 (所有协议通用)
@@ -934,8 +982,50 @@ function runCommand(cmd) {
   const tab = tabs.find(t => t.id === activeTabId);
   if (!tab) return setStatus('没有激活的会话');
   if (tab.state !== 'connected') return setStatus('会话未连接');
-  sendInput(tab.id, cmd + '\n');
-  setStatus(`已发送: ${cmd}`);
+  sendInput(tab.id, expandCommand(cmd, tab.cfg) + '\n');
+  setStatus(`已发送: ${expandCommand(cmd, tab.cfg)}`);
+}
+function expandCommand(cmd, cfg) {
+  const vars = { IP: cfg.host || '', HOST: cfg.host || '', PORT: cfg.port || '', NAME: cfg.name || '', SERIAL: cfg.port2 || cfg.port || '' };
+  return String(cmd).replace(/\{(IP|HOST|PORT|NAME|SERIAL)\}/g, (_, k) => vars[k]);
+}
+let _scriptRun = null;
+function stopCommandScript() {
+  if (_scriptRun) _scriptRun.cancelled = true;
+  _scriptRun = null;
+}
+async function runCommandScript(tab, commands, options = {}) {
+  stopCommandScript();
+  const run = { cancelled: false };
+  _scriptRun = run;
+  const delay = options.delay ?? 800;
+  const timeout = options.timeout ?? 10000;
+  for (const entry of commands) {
+    if (run.cancelled || !tabs.includes(tab) || tab.state !== 'connected') break;
+    const item = typeof entry === 'string' ? { cmd: entry } : entry;
+    const cmd = expandCommand(item.cmd || '', tab.cfg);
+    if (!cmd) continue;
+    let attempts = 0;
+    let done = false;
+    while (!done && attempts++ <= (item.retries || 0)) {
+      if (run.cancelled) break;
+      sendInput(tab.id, cmd + (item.newline || '\n'));
+      if (!item.waitFor) { await new Promise(r => setTimeout(r, item.delay ?? delay)); done = true; continue; }
+      const re = new RegExp(item.waitFor, item.flags || '');
+      const start = Date.now();
+      while (!run.cancelled && Date.now() - start < (item.timeout || timeout)) {
+        const text = (tab.recParts || []).join('');
+        if (re.test(text)) { done = true; break; }
+        await new Promise(r => setTimeout(r, 100));
+      }
+      if (!done && attempts <= (item.retries || 0)) setStatus(`等待响应超时, 重试 ${attempts}/${item.retries}`);
+    }
+    if (!done && item.stopOnTimeout !== false) {
+      setStatus(`自动脚本停止: 未等到 ${item.waitFor || '响应'}`);
+      break;
+    }
+  }
+  if (_scriptRun === run) _scriptRun = null;
 }
 // 连接后自动执行: Xshell 风格 = 该 IP 命令集(auto=true) + 会话 autoCmds 合并执行
 function runAutoCmds(cfg) {
@@ -954,12 +1044,7 @@ function runAutoCmds(cfg) {
   const all = [...ipCmds, ...cfgCmds];
   if (!all.length) return;
   setStatus(`自动执行 ${all.length} 条命令...`);
-  all.forEach((cmd, i) => {
-    setTimeout(() => {
-      const t = tabs.find(x => x.id === id);
-      if (t && t.state === 'connected') sendInput(id, cmd + '\n');
-    }, 800 * (i + 1));
-  });
+  runCommandScript(tab, all);
 }
 
 $('btn-cmds').onclick = () => {
@@ -984,7 +1069,9 @@ $('btn-cmd-add').onclick = () => {
 };
 $('btn-cmd-runall').onclick = () => {
   if (!cmdSet.items.length) return setStatus('该 IP 没有命令可执行');
-  cmdSet.items.forEach((c, i) => setTimeout(() => runCommand(c.cmd), 600 * i));
+  const tab = tabs.find(t => t.id === activeTabId);
+  if (!tab || tab.state !== 'connected') return setStatus('会话未连接');
+  runCommandScript(tab, cmdSet.items, { delay: 600 });
   setStatus(`执行 ${cmdSet.items.length} 条命令...`);
 };
 
@@ -1157,6 +1244,26 @@ $('mi-timer').onclick = () => {
   $('dlg-timer-mask').classList.remove('hidden');
 };
 $('mi-scan').onclick = () => { $('menu-more').classList.add('hidden'); $('dlg-scan-mask').classList.remove('hidden'); };
+$('mi-capture').onclick = () => {
+  $('menu-more').classList.add('hidden');
+  const tab = tabs.find(t => t.id === activeTabId);
+  if (!tab) return setStatus('没有激活的会话');
+  tab.logging = !tab.logging;
+  if (tab.logging) {
+    tab.captureParts = [];
+    $('mi-capture').textContent = '⏹ 停止并保存抓包';
+    setStatus('原始抓包已开始 (RX/TX HEX)');
+  } else {
+    const blob = new Blob([tab.captureParts || []], { type: 'text/plain;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `sshterm-${tab.cfg.name || tab.id}-capture-${Date.now()}.log`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    $('mi-capture').textContent = '⏺ 开始原始抓包';
+    setStatus('原始抓包已保存 (RX/TX HEX)');
+  }
+};
 $('log-close').onclick = () => $('dlg-log-mask').classList.add('hidden');
 $('btn-sftp').onclick = toggleSftpPanel;
 $('btn-killall').onclick = () => {
@@ -1328,6 +1435,16 @@ $('sftp-dir-input').onchange = async (e) => {
 };
 $('btn-refresh').onclick = () => { send({ type: 'list' }); send({ type: 'serialports' }); };
 $('s-refresh').onclick = () => send({ type: 'serialports' });
+let serialDtr = false;
+let serialRts = false;
+function serialControl(action, extra = {}) {
+  const tab = tabs.find(t => t.id === activeTabId);
+  if (!tab || tab.cfg.type !== 'serial' || tab.state !== 'connected') return setStatus('请先连接串口');
+  send({ type: 'serial-control', id: tab.id, action, ...extra });
+}
+$('s-dtr').onclick = () => { serialDtr = !serialDtr; $('s-dtr').classList.toggle('active', serialDtr); serialControl('signals', { dtr: serialDtr, rts: serialRts }); };
+$('s-rts').onclick = () => { serialRts = !serialRts; $('s-rts').classList.toggle('active', serialRts); serialControl('signals', { dtr: serialDtr, rts: serialRts }); };
+$('s-break').onclick = () => serialControl('break', { duration: 250 });
 $('f-type').onchange = updateDlgFields;
 $('f-auth').onchange = updateDlgFields;
 $('f-proxy-type').onchange = updateDlgFields;
