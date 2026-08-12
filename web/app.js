@@ -444,17 +444,17 @@ function bindClipboard(tab) {
     }, 300);
   });
 
-  // 2. 右键: 有选中文本 → 复制; 无选中 → 不碰剪贴板 (readText 权限气泡模态会阻塞页面)
+  // 2. 右键: 有选中文本 → 复制; 无选中 → 粘贴 (Xshell 习惯)
   host.addEventListener('contextmenu', (e) => {
     e.preventDefault();
-    if (inStorm()) return;              // 风暴中: 右键也不碰选择/剪贴板
-    // 清掉 xterm 右键时灌入隐藏 textarea 的选中文本, 消除 DOM 选择与剪贴板操作竞争
+    if (inStorm()) return;
     try { if (term.textarea) term.textarea.value = ''; } catch (err) { /* 忽略 */ }
     if (term.getSelection()) {
       copySelection(term);
-      term.clearSelection();        // 复制后清空选择, 避免重复触发
+      term.clearSelection();
+    } else {
+      pasteClipboard(term);
     }
-    // 无选中时不做任何剪贴板操作 (粘贴请用 Ctrl+Shift+V / Ctrl+V)
   });
 
   // 3. 快捷键 (Ctrl/⌘ + C/V, Ctrl+Shift+C/V)
@@ -1482,6 +1482,21 @@ $('sftp-dir-input').onchange = async (e) => {
   e.target.value = '';
 };
 $('btn-refresh').onclick = () => { send({ type: 'list' }); send({ type: 'serialports' }); };
+// 快速连接: 工具栏输入 IP[:端口], 回车直接连接
+$('quick-connect').onkeydown = (e) => {
+  if (e.key !== 'Enter') return;
+  const raw = $('quick-connect').value.trim();
+  if (!raw) return;
+  const m = raw.match(/^(.+?)(?::(\d+))?$/);
+  if (!m) return;
+  const host = m[1];
+  const port = parseInt(m[2], 10) || 22;
+  const type = port === 23 ? 'telnet' : 'ssh';
+  newTab({ type, name: `${host}:${port}`, host, port, reconnect: true });
+  $('quick-connect').value = '';
+  $('quick-connect').blur();
+  setStatus(`快速连接: ${host}:${port}`);
+};
 $('s-refresh').onclick = () => send({ type: 'serialports' });
 let serialDtr = false;
 let serialRts = false;

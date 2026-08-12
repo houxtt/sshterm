@@ -562,7 +562,26 @@ async function doConnect(ws, cfg, tabId) {
   send(ws, { type: 'status', id: tabId, state: 'connecting', msg: '连接中…' });
   log('info', `连接 ${cfg.name || cfg.type}:${cfg.host || cfg.port || cfg.port} (${cfg.type})`);
 
-  conn.on('data', (d) => sendBinary(connId, d));
+  // 终端输出自动落盘: ~/.sshterm/session-logs/<会话名>-<时间戳>.log
+  const SESSION_LOG_DIR = path.join(CONN_DIR, 'session-logs');
+  const enc = cfg.encoding || 'utf-8';
+  const safeName = (cfg.name || cfg.type).replace(/[\\/:*?"<>|]/g, '_');
+  const sts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const sessionLogFile = path.join(SESSION_LOG_DIR, `${safeName}-${sts}.log`);
+  try { fs.mkdirSync(SESSION_LOG_DIR, { recursive: true }); } catch (e) {}
+  let sessionLogStream = null;
+  try { sessionLogStream = fs.createWriteStream(sessionLogFile, { flags: 'a' }); }
+  catch (e) { console.log('[session-log] 创建失败:', e.message); }
+
+  conn.on('data', (d) => {
+    sendBinary(connId, d);
+    if (sessionLogStream) {
+      try {
+        const text = Buffer.isBuffer(d) ? d.toString(enc) : String(d);
+        sessionLogStream.write(text);
+      } catch (e) { /* 忽略解码失败 */ }
+    }
+  });
   conn.on('error', (msg, meta) => {
     console.log(`[conn] ${cfg.type} ${tabId} error:`, msg);
     log('error', `[${cfg.name || cfg.type}] ${msg}`);
