@@ -75,8 +75,8 @@ async function main() {
   const s2 = await page.evaluate(() => ({
     dlgHidden: document.getElementById('dlg-mask').classList.contains('hidden'),
     tabCount: document.querySelectorAll('.tab').length,
-    sessionCount: document.querySelectorAll('#session-list li').length,
-    listHas: Array.from(document.querySelectorAll('#session-list li')).some(li => li.textContent.includes('UI测试-SSH')),
+    sessionCount: document.querySelectorAll('#session-list .s-row').length,
+    listHas: Array.from(document.querySelectorAll('#session-list .s-row')).some(li => li.textContent.includes('UI测试-SSH')),
     termText: document.querySelector('.term-host:not(.hidden) .xterm-rows')?.textContent.slice(-150) || '(无)',
   }));
   console.log('    对话框关闭:', s2.dlgHidden, '| 标签数:', s2.tabCount, '| 会话列表项:', s2.sessionCount, '| 含保存项:', s2.listHas);
@@ -89,7 +89,7 @@ async function main() {
   console.log(`路径1(连接): ${pass ? '✅' : '❌'}  路径2(保存并连接): ${pass2 ? '✅' : '❌'}  JS错误: ${errors.length}`);
   // 清理测试会话
   await page.evaluate(() => {
-    const li = Array.from(document.querySelectorAll('#session-list li')).find(l => l.textContent.includes('UI测试-SSH'));
+    const li = Array.from(document.querySelectorAll('#session-list .s-row')).find(l => l.textContent.includes('UI测试-SSH'));
     if (li) li.querySelector('[data-act=del]').click();
   });
   await sleep(500);

@@ -606,35 +606,61 @@ function renderSessionList() {
     ul.innerHTML = '<li class="muted" style="cursor:default">(还没有保存的会话)</li>';
     return;
   }
+  // 按分组归类; 未分组归入 "默认"
+  const groups = new Map();
   for (const s of sessions) {
+    const g = s.group || '默认';
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g).push(s);
+  }
+  const sorted = [...groups.keys()].sort((a, b) => a === '默认' ? 1 : b === '默认' ? -1 : a.localeCompare(b));
+  for (const g of sorted) {
+    const items = groups.get(g);
     const li = document.createElement('li');
-    const sub = s.type === 'serial' ? `${s.port} @ ${s.baudRate}` : `${s.host}:${s.port}`;
-    const checked = batchSel.has(s.id) ? 'checked' : '';
-    li.innerHTML = `
-      ${batchMode ? `<input type="checkbox" class="b-cb" data-id="${esc(s.id)}" ${checked}>` : ''}
-      <span class="type-icon">${TYPE_ICON[s.type] || '❔'}</span>
-      <span class="s-name">${esc(s.name)}</span>
-      <span class="s-sub">${esc(sub)}</span>
-      <span class="s-ops">
-        <button title="编辑" data-act="edit">✏️</button>
-        <button title="删除" data-act="del" class="danger">🗑</button>
-      </span>`;
-    li.ondblclick = () => { if (!batchMode) connectTo(s); };
-    li.querySelector('.b-cb')?.addEventListener('change', (e) => {
-      if (e.target.checked) batchSel.add(s.id); else batchSel.delete(s.id);
-      updateBatchBar();
-    });
-    li.querySelector('[data-act=edit]').onclick = (e) => {
-      e.stopPropagation();
-      if (batchMode) return;
-      openDlg(s);
-    };
-    li.querySelector('[data-act=del]').onclick = (e) => {
-      e.stopPropagation();
-      if (batchMode) return;
-      if (confirm(`删除会话「${s.name}」?`)) send({ type: 'delete', id: s.id });
+    li.className = 'group-head';
+    li.innerHTML = `<span class="group-caret">▼</span> ${esc(g)} <span class="muted">(${items.length})</span>`;
+    li.onclick = () => {
+      const body = li.nextElementSibling;
+      if (body) {
+        const hidden = body.classList.toggle('hidden');
+        li.querySelector('.group-caret').textContent = hidden ? '▶' : '▼';
+      }
     };
     ul.appendChild(li);
+    const body = document.createElement('div');
+    body.className = 'group-body';
+    for (const s of items) {
+      const row = document.createElement('div');
+      row.className = 's-row';
+      const sub = s.type === 'serial' ? `${s.port} @ ${s.baudRate}` : `${s.host}:${s.port}`;
+      const checked = batchSel.has(s.id) ? 'checked' : '';
+      row.innerHTML = `
+        ${batchMode ? `<input type="checkbox" class="b-cb" data-id="${esc(s.id)}" ${checked}>` : ''}
+        <span class="type-icon">${TYPE_ICON[s.type] || '❔'}</span>
+        <span class="s-name">${esc(s.name)}</span>
+        <span class="s-sub">${esc(sub)}</span>
+        <span class="s-ops">
+          <button title="编辑" data-act="edit">✏️</button>
+          <button title="删除" data-act="del" class="danger">🗑</button>
+        </span>`;
+      row.ondblclick = () => { if (!batchMode) connectTo(s); };
+      row.querySelector('.b-cb')?.addEventListener('change', (e) => {
+        if (e.target.checked) batchSel.add(s.id); else batchSel.delete(s.id);
+        updateBatchBar();
+      });
+      row.querySelector('[data-act=edit]').onclick = (e) => {
+        e.stopPropagation();
+        if (batchMode) return;
+        openDlg(s);
+      };
+      row.querySelector('[data-act=del]').onclick = (e) => {
+        e.stopPropagation();
+        if (batchMode) return;
+        if (confirm(`删除会话「${s.name}」?`)) send({ type: 'delete', id: s.id });
+      };
+      body.appendChild(row);
+    }
+    ul.appendChild(body);
   }
 }
 
@@ -665,6 +691,7 @@ function openDlg(existing = null) {
   editingId = existing ? existing.id : null;
   $('dlg-title').textContent = existing ? '编辑会话' : '新建连接';
   $('f-name').value = existing?.name || '';
+  $('f-group').value = existing?.group || '';
   $('f-type').value = existing?.type || 'ssh';
   $('f-host').value = existing?.host || '';
   $('f-port').value = existing?.port || (existing?.type === 'telnet' ? 23 : 22);
@@ -714,7 +741,7 @@ function updateDlgFields() {
 
 function collectDlg() {
   const type = $('f-type').value;
-  const base = { id: editingId || undefined, name: $('f-name').value.trim(), type };
+  const base = { id: editingId || undefined, name: $('f-name').value.trim(), group: $('f-group').value.trim() || undefined, type };
   if (type === 'ssh') {
     const ptype = $('f-proxy-type').value;
     Object.assign(base, {

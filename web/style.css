@@ -54,6 +54,18 @@ button.mini { padding: 2px 8px; font-size: 11px; }
 #session-list .s-ops { display: none; gap: 2px; }
 #session-list li:hover .s-ops { display: flex; }
 #session-list .s-ops button { padding: 1px 6px; font-size: 11px; }
+.group-head { font-size: 11px; color: #7dcfff; padding: 6px 10px !important; font-weight: bold; cursor: pointer; user-select: none; display: flex !important; }
+.group-head:hover { background: #16162e !important; }
+.group-caret { display: inline-block; width: 12px; }
+.group-body.hidden { display: none; }
+.s-row { display: flex; align-items: center; gap: 4px; padding: 3px 10px 3px 22px; border-bottom: 1px solid #1f2030; cursor: pointer; }
+.s-row:hover { background: #1f2030; }
+.s-row .s-ops { display: none !important; }
+.s-row:hover .s-ops { display: flex !important; }
+.s-row .s-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.s-row .s-sub { color: #565f89; font-size: 11px; }
+.s-row .type-icon { font-size: 14px; }
+.s-row input.b-cb { margin: 0 4px 0 0; accent-color: #3b82f6; }
 .side-foot { padding: 6px 10px; border-top: 1px solid #2a2b3a; }
 
 /* 工作区 */

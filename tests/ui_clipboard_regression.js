@@ -84,7 +84,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
       document.getElementById('btn-batch').click();
       const boxes = [...document.querySelectorAll('#session-list .b-cb')]
         .filter(b => /^(卡死回归|批量测试|复制验证|UI测试)/.test(
-          b.closest('li').querySelector('.s-name').textContent));
+          b.closest('.s-row').querySelector('.s-name').textContent));
       boxes.forEach(b => b.click());
       if (boxes.length) document.getElementById('batch-del').click();
     });

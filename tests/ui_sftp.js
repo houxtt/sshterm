@@ -82,7 +82,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     await page.evaluate(() => {
       document.getElementById('btn-batch').click();
       const boxes = [...document.querySelectorAll('#session-list .b-cb')]
-        .filter(b => /^SFTP UI 测试/.test(b.closest('li').querySelector('.s-name').textContent));
+        .filter(b => /^SFTP UI 测试/.test(b.closest('.s-row').querySelector('.s-name').textContent));
       boxes.forEach(b => b.click());
       if (boxes.length) document.getElementById('batch-del').click();
     });

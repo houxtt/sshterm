@@ -21,7 +21,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   // 1. 连续派发 dblclick (模拟连续双击/连点) 8 次 → 防抖应只开 1 个
   console.log('[1] 连续触发双击 8 次...');
   await page.evaluate(() => {
-    const li = document.querySelector('#session-list li');
+    const li = document.querySelector('#session-list .s-row');
     for (let i = 0; i < 8; i++) {
       li.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
     }
@@ -42,7 +42,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   console.log('[2] 等 1.5s 后正常双击...');
   await sleep(1500);
   await page.evaluate(() => {
-    const li = document.querySelector('#session-list li');
+    const li = document.querySelector('#session-list .s-row');
     li.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
   });
   await sleep(2000);

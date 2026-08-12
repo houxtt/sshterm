@@ -32,8 +32,8 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     await page.click('#btn-dlg-save');
     await sleep(400);
   }
-  const before = await page.$$eval('#session-list li', els => els.length);
-  console.log('    会话总数(含原有):', before);
+  const before = await page.evaluate(() => sessions.length);
+  console.log('    会话总数:', before);
 
   // ===== 功能1: 日志面板 (此时服务端已有"新建会话"日志) =====
   console.log('[2] 打开日志面板...');
@@ -57,7 +57,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   // 只勾选"批量测试"前缀的会话 (绝不按位置, 避免误删用户会话)
   await page.evaluate(() => {
     const boxes = [...document.querySelectorAll('#session-list .b-cb')]
-      .filter(b => /^批量测试/.test(b.closest('li').querySelector('.s-name').textContent));
+      .filter(b => /^批量测试/.test(b.closest('.s-row').querySelector('.s-name').textContent));
     boxes.slice(0, 2).forEach(b => b.click());
   });
   await sleep(200);
@@ -65,7 +65,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   console.log('    已选数量:', selN);
   await page.click('#batch-del');
   await sleep(500);
-  const after = await page.$$eval('#session-list li', els => els.length);
+  const after = await page.evaluate(() => sessions.length);
   const batchBarHidden = await page.$eval('#batch-bar', el => el.classList.contains('hidden'));
   console.log('    删除后会话数:', after, '| 批量栏已收起:', batchBarHidden);
 
@@ -93,7 +93,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     document.getElementById('btn-batch').click();
     const boxes = [...document.querySelectorAll('#session-list .b-cb')]
       .filter(b => /^(批量测试|复制验证|UI测试)/.test(
-        b.closest('li').querySelector('.s-name').textContent));
+        b.closest('.s-row').querySelector('.s-name').textContent));
     boxes.forEach(b => b.click());
     if (boxes.length) document.getElementById('batch-del').click();
   });
