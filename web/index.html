@@ -129,7 +129,14 @@
           </select>
         </label>
         <label id="f-pwd-wrap">密码 <input id="f-password" type="password" placeholder="密码"></label>
-        <label id="f-key-wrap" class="hidden">私钥路径 <input id="f-key" placeholder="C:\Users\xxx\.ssh\id_rsa"></label>
+        <label id="f-key-wrap" class="hidden">私钥路径
+          <select id="f-key-sel" style="width:100%;margin-bottom:4px" onchange="document.getElementById('f-key').value=this.value; this.value=''">
+            <option value="">— 常用路径 —</option>
+            <option value="C:\Users\Administrator\.ssh\id_rsa">~/.ssh/id_rsa</option>
+            <option value="C:\Users\Administrator\.ssh\id_ed25519">~/.ssh/id_ed25519</option>
+          </select>
+          <input id="f-key" placeholder="或手动输入私钥路径">
+        </label>
         <label id="f-pass-wrap" class="hidden">密钥口令 <input id="f-passphrase" type="password" placeholder="可选"></label>
         <label>代理
           <select id="f-proxy-type">
