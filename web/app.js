@@ -1497,6 +1497,38 @@ function serialControl(action, extra = {}) {
 $('s-dtr').onclick = () => { serialDtr = !serialDtr; $('s-dtr').classList.toggle('active', serialDtr); serialControl('signals', { dtr: serialDtr, rts: serialRts }); };
 $('s-rts').onclick = () => { serialRts = !serialRts; $('s-rts').classList.toggle('active', serialRts); serialControl('signals', { dtr: serialDtr, rts: serialRts }); };
 $('s-break').onclick = () => serialControl('break', { duration: 250 });
+
+// ---------- 拖拽文件上传 (拖文件到终端 → SFTP 上传) ----------
+let _dragCounter = 0;
+$('terms').addEventListener('dragenter', (e) => { e.preventDefault(); _dragCounter++; $('terms').classList.add('drag-over'); });
+$('terms').addEventListener('dragleave', () => { _dragCounter--; if (_dragCounter <= 0) { _dragCounter = 0; $('terms').classList.remove('drag-over'); } });
+$('terms').addEventListener('dragover', (e) => e.preventDefault());
+$('terms').addEventListener('drop', async (e) => {
+  e.preventDefault();
+  _dragCounter = 0;
+  $('terms').classList.remove('drag-over');
+  const tab = tabs.find(t => t.id === activeTabId);
+  if (!tab || tab.cfg.type !== 'ssh' || tab.state !== 'connected') return setStatus('拖拽上传仅支持 SSH 已连接时');
+  const files = [...(e.dataTransfer.files || [])];
+  if (!files.length) return;
+  // 确保 SFTP 路径已加载
+  if (sftpPath === '.') {
+    send({ type: 'sftp', id: tab.id, action: 'cwd' });
+    await new Promise(r => setTimeout(r, 800));
+  }
+  const dir = sftpPath || '.';
+  for (const f of files) {
+    const buf = await f.arrayBuffer();
+    setStatus(`上传: ${f.name} (${fmtSize(buf.byteLength)})...`);
+    try {
+      const url = `/api/sftp/upload?conn=${tab.id}&path=${encodeURIComponent(dir)}&name=${encodeURIComponent(f.name)}`;
+      const resp = await fetch(url, { method: 'PUT', body: buf });
+      if (!resp.ok) throw new Error(await resp.text());
+      setStatus(`✅ 已上传: ${f.name}`);
+      setTimeout(() => { if (sftpOpen) sftpLoad(); }, 500);
+    } catch (err) { setStatus(`上传失败: ${f.name} — ${err.message}`); }
+  }
+});
 $('f-type').onchange = updateDlgFields;
 $('f-auth').onchange = updateDlgFields;
 $('f-proxy-type').onchange = updateDlgFields;
@@ -1563,3 +1595,42 @@ $('srv-addr').textContent = `localhost${location.port ? ':' + location.port : ''
 updateWelcome();
 updateSftpBtn();
 applyI18n();
+
+// ---------- 全局快捷键 (Ctrl+N/Tab, Alt+1~9, 不干扰终端内按键) ----------
+document.addEventListener('keydown', (e) => {
+  const mod = e.ctrlKey || e.metaKey;
+  const k = e.key.toLowerCase();
+  if (mod && !e.shiftKey && k === 'n') { e.preventDefault(); openDlg(); return; }
+  if (mod && !e.shiftKey && k === 'tab' && tabs.length) {
+    e.preventDefault();
+    const idx = tabs.findIndex(t => t.id === activeTabId);
+    activateTab(tabs[(idx + 1) % tabs.length].id);
+    return;
+  }
+  if (mod && e.shiftKey && k === 'tab' && tabs.length) {
+    e.preventDefault();
+    const idx = tabs.findIndex(t => t.id === activeTabId);
+    activateTab(tabs[(idx - 1 + tabs.length) % tabs.length].id);
+    return;
+  }
+  if (e.altKey && !mod && /^[1-9]$/.test(k) && tabs.length) {
+    e.preventDefault();
+    const tab = tabs[parseInt(k, 10) - 1];
+    if (tab) activateTab(tab.id);
+  }
+  // Ctrl+= / Ctrl+- : 全局字体缩放
+  if (mod && !e.shiftKey && (k === '=' || k === '+')) {
+    e.preventDefault();
+    const sz = Math.min(24, (parseInt(document.body.style.fontSize || '13')) + 1);
+    document.body.style.fontSize = sz + 'px';
+    tabs.forEach(t => { try { t.term.options.fontSize = sz; t.fitAddon.fit(); } catch (e) {} });
+    return;
+  }
+  if (mod && !e.shiftKey && k === '-') {
+    e.preventDefault();
+    const sz = Math.max(8, (parseInt(document.body.style.fontSize || '13')) - 1);
+    document.body.style.fontSize = sz + 'px';
+    tabs.forEach(t => { try { t.term.options.fontSize = sz; t.fitAddon.fit(); } catch (e) {} });
+    return;
+  }
+});

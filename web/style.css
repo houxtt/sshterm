@@ -66,6 +66,7 @@ button.mini { padding: 2px 8px; font-size: 11px; }
 .s-row .s-sub { color: #565f89; font-size: 11px; }
 .s-row .type-icon { font-size: 14px; }
 .s-row input.b-cb { margin: 0 4px 0 0; accent-color: #3b82f6; }
+.drag-over { outline: 2px dashed #3b82f6; outline-offset: -4px; }
 .side-foot { padding: 6px 10px; border-top: 1px solid #2a2b3a; }
 
 /* 工作区 */
