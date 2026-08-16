@@ -13,6 +13,7 @@
     <button id="btn-new" title="新建连接 (Ctrl+N)">＋ 新建连接</button>
     <button id="btn-save" title="保存当前会话配置">💾 保存会话</button>
     <button id="btn-sftp" title="SSH 文件浏览/下载 (SFTP)">📁 文件</button>
+    <button id="btn-tunnel" title="SSH 隧道管理" class="hidden">🔗 隧道</button>
     <button id="btn-killall" title="断开并关闭全部会话标签" class="danger">⏹ 全部关闭</button>
     <div class="dropdown" id="wrap-more">
       <button id="btn-more" title="更多工具">☰ 工具</button>
@@ -276,6 +277,31 @@
       <button id="btn-scan-close">关闭</button>
     </div>
     <div id="scan-result"></div>
+  </div>
+</div>
+
+<!-- SSH 隧道管理抽屉 -->
+<div id="dlg-tunnel-mask" class="hidden">
+  <div id="dlg-tunnel">
+    <h3>🔗 SSH 隧道 <button id="tunnel-close" class="mini" style="float:right">✕</button></h3>
+    <p class="muted" style="margin-bottom:8px">为当前 SSH 会话创建端口转发/跳板隧道</p>
+    <div id="tunnel-list" style="margin-bottom:10px"></div>
+    <div class="form">
+      <label>类型
+        <select id="tn-type">
+          <option value="local">本地转发 Local (本地端口 → 远端:端口)</option>
+          <option value="remote">远端转发 Remote (远端端口 → 本地:端口)</option>
+          <option value="dynamic">动态转发 Dynamic (SOCKS5 代理)</option>
+        </select>
+      </label>
+      <label>本地监听端口 <input id="tn-local" placeholder="1080" style="width:120px"></label>
+      <label>远端目标 <input id="tn-remote" placeholder="127.0.0.1:80" style="width:220px"></label>
+      <div class="dlg-actions">
+        <button id="btn-tunnel-add" class="primary">新建隧道</button>
+        <button id="btn-tunnel-refresh">刷新</button>
+      </div>
+    </div>
+    <p class="muted cmd-foot">单会话最多 8 条隧道;端口冲突时会提示失败</p>
   </div>
 </div>
 

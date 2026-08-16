@@ -187,14 +187,17 @@ button.mini { padding: 2px 8px; font-size: 11px; }
 .sftp-item .sftp-dl { padding: 0 6px; font-size: 12px; }
 .sftp-status { padding: 5px 10px; border-top: 1px solid #2a2b3a; color: #565f89; font-size: 11px; }
 
-/* 分屏 pane: 特定性必须高于 #terms .term-host (110), 否则 left 被覆盖 */
-#terms .term-host.pane1 {
-  position: absolute; top: 0; right: 0; bottom: 0; left: 50%;
-  padding: 4px; border-left: 1px solid #2a2b3a; background: #1a1b26;
-}
+/* 分屏 pane */
 #terms .split-container { display: flex; flex-direction: row; }
-#terms .split-container .term-host { position: relative; flex: 1; padding: 4px; }
+#terms .split-container.hidden { display: none !important; }
+#terms .split-container .term-host { position: relative; flex: 1; padding: 4px; min-width: 0; min-height: 0; }
 #terms .split-container .term-host.pane-split { flex: 1; }
+#terms .term-host.main-pane { position: relative; flex: 1; padding: 4px; min-width: 0; min-height: 0; }
+.split-divider {
+  width: 5px; background: #2a2b3a; cursor: col-resize; flex-shrink: 0;
+  border-left: 1px solid #1f2030; border-right: 1px solid #1f2030;
+}
+.split-divider.col { cursor: row-resize; width: auto; height: 5px; border-left: none; border-right: none; border-top: 1px solid #1f2030; border-bottom: 1px solid #1f2030; }
 .pane-close {
   position: absolute; top: 4px; right: 8px; z-index: 9;
   background: rgba(0,0,0,.5); color: #ef4444; border: none;

@@ -29,7 +29,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   console.log('[1] 点"⊞ 分屏"...');
   await page.click('#btn-split');
   await sleep(2500);
-  const paneCount = await page.$$eval('.term-host.pane1', els => els.length);
+  const paneCount = await page.$$eval('.term-host.pane-split', els => els.length);
   console.log('    分屏 pane 数:', paneCount);
 
   // 2. 主 pane 输入命令 → 主 pane 回显 (真实点击)
@@ -64,7 +64,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   console.log('[3] 再点"⊞ 分屏"按钮关闭...');
   await page.click('#btn-split');
   await sleep(500);
-  const paneAfter = await page.$$eval('.term-host.pane1', els => els.length);
+  const paneAfter = await page.$$eval('.term-host.pane-split', els => els.length);
   console.log('    再点后 pane 数:', paneAfter);
 
   const ok1 = paneCount === 1;

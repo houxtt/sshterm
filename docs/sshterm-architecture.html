@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>sshterm 架构图</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet" />
+<style>
+  :root { --bg:#020617; --card:#0f172a; --cyan:#22d3ee; --emerald:#34d399; --rose:#fb7185; --amber:#fbbf24; --slate:#94a3b8; }
+  * { box-sizing: border-box; }
+  body { margin:0; background: radial-gradient(circle at 10% 20%,#0b1220,#020617 55%); font-family:'JetBrains Mono',monospace; color:#e2e8f0; min-height:100vh; padding:24px; }
+  h1 { font-size:18px; letter-spacing:1px; margin:0 0 4px; }
+  .sub { color:#94a3b8; font-size:12px; margin-bottom:18px; }
+  .card { background:#0f172a; border:1px solid #1e293b; border-radius:10px; padding:16px; }
+  .legend { display:flex; gap:14px; flex-wrap:wrap; margin-top:14px; font-size:12px; color:#cbd5e1; }
+  .dot { width:10px; height:10px; border-radius:50%; display:inline-block; margin-right:6px; box-shadow:0 0 8px currentColor; }
+  svg { display:block; width:100%; height:auto; }
+</style>
+</head>
+<body>
+<h1>sshterm — 系统架构图</h1>
+<div class="sub">Windows 本地多协议连接工具 · Node 服务端 + 浏览器 xterm.js · WebSocket binary 数据面 + JSON 控制面</div>
+
+<div class="card">
+<svg viewBox="0 0 1200 760" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+    </pattern>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#94a3b8"/>
+    </marker>
+    <marker id="arrow-data" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#22d3ee"/>
+    </marker>
+    <marker id="arrow-ctrl" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#34d399"/>
+    </marker>
+    <marker id="arrow-sec" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#fb7185"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="760" fill="url(#grid)"/>
+
+  <!-- Boundaries -->
+  <rect x="40" y="40" width="560" height="300" rx="14" fill="rgba(8,51,68,0.25)" stroke="#22d3ee" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <text x="56" y="64" fill="#22d3ee" font-size="12" font-weight="700">Browser UI（渲染进程）</text>
+
+  <rect x="620" y="40" width="540" height="300" rx="14" fill="rgba(6,78,59,0.25)" stroke="#34d399" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <text x="636" y="64" fill="#34d399" font-size="12" font-weight="700">Node Server（主进程） 127.0.0.1:8787</text>
+
+  <rect x="620" y="380" width="540" height="320" rx="14" fill="rgba(30,41,59,0.35)" stroke="#94a3b8" stroke-width="1.2" stroke-dasharray="8,4"/>
+  <text x="636" y="404" fill="#94a3b8" font-size="12" font-weight="700">External Devices / Remote Hosts</text>
+
+  <rect x="40" y="380" width="560" height="320" rx="14" fill="rgba(136,19,55,0.18)" stroke="#fb7185" stroke-width="1.2" stroke-dasharray="8,4"/>
+  <text x="56" y="404" fill="#fb7185" font-size="12" font-weight="700">Security & Persistence Boundaries</text>
+
+  <!-- Browser components -->
+  <rect x="60" y="90" width="520" height="84" rx="8" fill="#0f172a" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="80" y="118" fill="#e2e8f0" font-size="12" font-weight="700">xterm.js 6 + FitAddon + SearchAddon</text>
+  <text x="80" y="138" fill="#94a3b8" font-size="11">Terminal 渲染：256 色 / 滚动缓冲 / HEX / 搜索高亮</text>
+  <text x="80" y="156" fill="#94a3b8" font-size="11">binary 数据帧写入 + 解码（UTF-8 / GBK / Latin-1）</text>
+
+  <rect x="60" y="194" width="520" height="68" rx="8" fill="#0f172a" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="80" y="220" fill="#e2e8f0" font-size="12" font-weight="700">Tab Manager + Session Sidebar</text>
+  <text x="80" y="238" fill="#94a3b8" font-size="11">多标签 / 分组展开 / 双击连接 / 关闭确认 / 批量删除 / 刷新恢复</text>
+
+  <rect x="60" y="280" width="520" height="46" rx="8" fill="#0f172a" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="80" y="306" fill="#e2e8f0" font-size="12" font-weight="700">SFTP Panel + Scan Dialog + Commands + Capture</text>
+  <text x="80" y="324" fill="#94a3b8" font-size="11">文件面板 · 断点续传上传/下载/目录打包 · 网络扫描 · 快捷命令 · 原始抓包</text>
+
+  <!-- Browser -> Server: ws -->
+  <line x1="620" y1="150" x2="620" y2="150" stroke="#22d3ee" stroke-width="1.6" marker-end="url(#arrow-data)"/>
+  <text x="574" y="144" fill="#22d3ee" font-size="10">ws://127.0.0.1:8787</text>
+  <text x="574" y="158" fill="#64748b" font-size="10">Origin: 127.0.0.1 / localhost</text>
+
+  <!-- Server components -->
+  <rect x="640" y="90" width="500" height="72" rx="8" fill="#0f172a" stroke="#34d399" stroke-width="1.5"/>
+  <text x="660" y="116" fill="#e2e8f0" font-size="12" font-weight="700">HTTP Static Server + API</text>
+  <text x="660" y="134" fill="#94a3b8" font-size="11">web/ + vendor/ · SFTP 上传 PUT/HEAD · 目录打包 zip · Zmodem 下载</text>
+
+  <rect x="640" y="178" width="500" height="72" rx="8" fill="#0f172a" stroke="#34d399" stroke-width="1.5"/>
+  <text x="660" y="204" fill="#e2e8f0" font-size="12" font-weight="700">WebSocket Router</text>
+  <text x="660" y="222" fill="#94a3b8" font-size="11">binary: [connId 2B][payload] → conn.write</text>
+  <text x="660" y="238" fill="#94a3b8" font-size="11">JSON 控制面: connect / disconnect / resize / sftp / scan / serial-control</text>
+
+  <rect x="640" y="266" width="500" height="52" rx="8" fill="#0f172a" stroke="#34d399" stroke-width="1.5"/>
+  <text x="660" y="288" fill="#e2e8f0" font-size="12" font-weight="700">Connection Manager</text>
+  <text x="660" y="306" fill="#94a3b8" font-size="11">Map&lt;connId, BaseConnection&gt; + 去重 Map&lt;fingerprint, connId&gt;</text>
+
+  <rect x="640" y="326" width="500" height="46" rx="8" fill="#0f172a" stroke="#34d399" stroke-width="1.5"/>
+  <text x="660" y="348" fill="#e2e8f0" font-size="12" font-weight="700">Session Persistence + SSH Config Parser + Logs</text>
+  <text x="660" y="366" fill="#94a3b8" font-size="11">sessions.json（脱敏） · ~/.ssh/config · ~/.sshterm/logs/</text>
+
+  <!-- Protocol plugins -->
+  <rect x="660" y="430" width="200" height="60" rx="8" fill="#0f172a" stroke="#34d399" stroke-width="1.5"/>
+  <text x="680" y="454" fill="#e2e8f0" font-size="11" font-weight="700">SSHConnection</text>
+  <text x="680" y="470" fill="#94a3b8" font-size="10">ssh2 + keepalive + 代理 + SFTP</text>
+  <text x="680" y="484" fill="#94a3b8" font-size="10">getShellCwd / ZmodemReceiver</text>
+
+  <rect x="880" y="430" width="200" height="60" rx="8" fill="#0f172a" stroke="#34d399" stroke-width="1.5"/>
+  <text x="900" y="454" fill="#e2e8f0" font-size="11" font-weight="700">TelnetConnection</text>
+  <text x="900" y="470" fill="#94a3b8" font-size="10">net + IAC 协商 + NAWS</text>
+  <text x="900" y="484" fill="#94a3b8" font-size="10">自动登录状态机 / 免密兜底</text>
+
+  <rect x="660" y="510" width="200" height="60" rx="8" fill="#0f172a" stroke="#34d399" stroke-width="1.5"/>
+  <text x="680" y="534" fill="#e2e8f0" font-size="11" font-weight="700">SerialConnection</text>
+  <text x="680" y="550" fill="#94a3b8" font-size="10">serialport + 全参数</text>
+  <text x="680" y="564" fill="#94a3b8" font-size="10">HEX / DTR RTS Break / 占用检测</text>
+
+  <rect x="880" y="510" width="200" height="60" rx="8" fill="#0f172a" stroke="#34d399" stroke-width="1.5"/>
+  <text x="900" y="534" fill="#e2e8f0" font-size="11" font-weight="700">ZmodemReceiver</text>
+  <text x="900" y="550" fill="#94a3b8" font-size="10">ZPAD/ZDLE 帧解析</text>
+  <text x="900" y="564" fill="#94a3b8" font-size="10">CRC-16 校验 / 错误 ZNAK</text>
+
+  <rect x="660" y="590" width="420" height="40" rx="8" fill="#0f172a" stroke="#fbbf24" stroke-width="1.2"/>
+  <text x="680" y="610" fill="#fbbf24" font-size="11" font-weight="700">Proxy Connector（SOCKS5 / HTTP CONNECT）</text>
+  <text x="680" y="626" fill="#94a3b8" font-size="10">公司网络代理场景 · ssh2 的 sock 透传</text>
+
+  <!-- Server -> Devices -->
+  <line x1="760" y1="380" x2="760" y2="430" stroke="#34d399" stroke-width="1.4" marker-end="url(#arrow-ctrl)"/>
+  <text x="678" y="412" fill="#34d399" font-size="10">TCP/SSH/Telnet/Serial</text>
+
+  <line x1="890" y1="380" x2="890" y2="430" stroke="#34d399" stroke-width="1.4" marker-end="url(#arrow-ctrl)"/>
+
+  <!-- Security / Persistence -->
+  <rect x="60" y="430" width="520" height="46" rx="8" fill="#0f172a" stroke="#fb7185" stroke-width="1.5"/>
+  <text x="80" y="454" fill="#e2e8f0" font-size="11" font-weight="700">Credential Sanitizer</text>
+  <text x="80" y="470" fill="#94a3b8" font-size="10">load/save 时剥离 password/passphrase/loginPass · 前端不返显</text>
+
+  <rect x="60" y="490" width="520" height="46" rx="8" fill="#0f172a" stroke="#fb7185" stroke-width="1.5"/>
+  <text x="80" y="514" fill="#e2e8f0" font-size="11" font-weight="700">Origin / Loopback Guard</text>
+  <text x="80" y="530" fill="#94a3b8" font-size="10">127.0.0.1 监听 · WS verifyClient Origin 校验 · maxPayload 8MB</text>
+
+  <rect x="60" y="550" width="520" height="46" rx="8" fill="#0f172a" stroke="#fb7185" stroke-width="1.5"/>
+  <text x="80" y="574" fill="#e2e8f0" font-size="11" font-weight="700">Auto-Exit + Zombie Cleanup</text>
+  <text x="80" y="590" fill="#94a3b8" font-size="10">--auto-exit 无 WS 10s 退出 · ws close 清理全量 connections</text>
+
+  <rect x="60" y="610" width="520" height="46" rx="8" fill="#0f172a" stroke="#fb7185" stroke-width="1.5"/>
+  <text x="80" y="634" fill="#e2e8f0" font-size="11" font-weight="700">Session Store</text>
+  <text x="80" y="650" fill="#94a3b8" font-size="10">%USERPROFILE%\.sshterm\sessions.json · 不含敏感字段</text>
+
+  <!-- External host icons -->
+  <rect x="680" y="640" width="110" height="44" rx="8" fill="#0f172a" stroke="#94a3b8" stroke-width="1.2"/>
+  <text x="700" y="664" fill="#e2e8f0" font-size="10">Linux Board / Server</text>
+  <rect x="810" y="640" width="110" height="44" rx="8" fill="#0f172a" stroke="#94a3b8" stroke-width="1.2"/>
+  <text x="830" y="664" fill="#e2e8f0" font-size="10">Network Device</text>
+  <rect x="940" y="640" width="110" height="44" rx="8" fill="#0f172a" stroke="#94a3b8" stroke-width="1.2"/>
+  <text x="960" y="664" fill="#e2e8f0" font-size="10">Serial Device COMx</text>
+
+  <!-- Top right annotations -->
+  <rect x="940" y="90" width="200" height="110" rx="8" fill="#0f172a" stroke="#fbbf24" stroke-width="1.2"/>
+  <text x="960" y="114" fill="#fbbf24" font-size="11" font-weight="700">Performance Evidence</text>
+  <text x="960" y="132" fill="#94a3b8" font-size="10">perf-proto/ 压测结果</text>
+  <text x="960" y="148" fill="#94a3b8" font-size="10">921600 baud 全速</text>
+  <text x="960" y="164" fill="#94a3b8" font-size="10">WS 延迟 &lt;2ms / 0 丢包</text>
+  <text x="960" y="180" fill="#94a3b8" font-size="10">xterm.js rAF 丢帧保 UI</text>
+
+</svg>
+
+<div class="legend">
+  <div><span class="dot" style="color:#22d3ee;background:#22d3ee"></span>Frontend / Render</div>
+  <div><span class="dot" style="color:#34d399;background:#34d399"></span>Backend / Service</div>
+  <div><span class="dot" style="color:#fbbf24;background:#fbbf24"></span>Performance / Evidence</div>
+  <div><span class="dot" style="color:#fb7185;background:#fb7185"></span>Security / Boundary</div>
+  <div><span class="dot" style="color:#94a3b8;background:#94a3b8"></span>External / Device</div>
+</div>
+</div>
+
+<div style="margin-top:14px; color:#64748b; font-size:11px;">
+  Generated from source review of <code style="color:#e2e8f0">/c/tools/sshterm</code> · server/index.js 738LOC · web/app.js 1666LOC · protocol plugins 760LOC · tests 60+
+</div>
+</body>
+</html>

@@ -43,11 +43,14 @@ function log(level, msg) {
 }
 
 // ---------- 会话持久化 ----------
+let sessions = loadSessions();
+const { writeSecrets, readSecrets } = require('./dpapi');
 function loadSessions() {
   try {
     const raw = JSON.parse(fs.readFileSync(CONN_FILE, 'utf8'));
     // Migrate older versions that persisted credentials. Credentials are
-    // intentionally process-memory-only and must not survive a restart.
+    // intentionally process-memory-only and must not survive a restart unless
+    // the session opts in to DPAPI-backed "remember password".
     let migrated = false;
     const clean = Object.fromEntries(Object.entries(raw).map(([id, s]) => {
       const { password, passphrase, loginPass, ...safe } = s || {};
@@ -58,6 +61,13 @@ function loadSessions() {
       fs.mkdirSync(CONN_DIR, { recursive: true });
       fs.writeFileSync(CONN_FILE, JSON.stringify(clean, null, 2));
     }
+    // Load DPAPI-backed secrets for sessions that opted into "remember password"
+    const secrets = readSecrets();
+    for (const [id, s] of Object.entries(clean)) {
+      if (s.rememberPassword && secrets[id]) {
+        clean[id] = { ...s, ...secrets[id] };
+      }
+    }
     return clean;
   }
   catch { return {}; }
@@ -65,18 +75,27 @@ function loadSessions() {
 function saveSessions(data) {
   try {
     fs.mkdirSync(CONN_DIR, { recursive: true });
-    // Never write reusable credentials to disk. Secrets remain in memory only
-    // for the lifetime of this server process; after restart the user must
-    // enter them again. This avoids plaintext passwords in sessions.json.
+    // Write DPAPI-backed secrets only for opted-in sessions
+    const secrets = {};
+    for (const [id, s] of Object.entries(data)) {
+      if (s.rememberPassword && (s.password || s.passphrase || s.loginPass || s.privateKey)) {
+        secrets[id] = {
+          password: s.password,
+          passphrase: s.passphrase,
+          loginPass: s.loginPass,
+          privateKey: s.privateKey,
+        };
+      }
+    }
+    writeSecrets(secrets);
+    // Never write reusable credentials to disk in plain JSON.
     const diskData = Object.fromEntries(Object.entries(data).map(([id, s]) => {
-      // privateKey is a local file path, not private-key material; preserve it.
-      const { password, passphrase, loginPass, ...safe } = s;
+      const { password, passphrase, loginPass, privateKey, ...safe } = s;
       return [id, safe];
     }));
     fs.writeFileSync(CONN_FILE, JSON.stringify(diskData, null, 2));
   } catch (e) { console.error('[会话] 保存失败:', e.message); }
 }
-let sessions = loadSessions();
 
 // ---------- SSH config 解析 ----------
 // 支持: Host 别名 → Hostname IP/Port/User/IdentityFile
@@ -581,6 +600,32 @@ async function handle(ws, m) {
         // 获取 shell 当前目录 (定位文件面板)
         const cwd = await conn.getShellCwd();
         send(ws, { type: 'sftp', id: m.id, action: 'cwd', path: cwd });
+      }
+      break;
+    }
+    case 'tunnel': {
+      const conn = connections.get(m.id);
+      if (!conn || conn.config.type !== 'ssh') {
+        return send(ws, { type: 'error', id: m.id, msg: '隧道需要活跃的 SSH 连接' });
+      }
+      try {
+        if (m.action === 'list') {
+          const list = conn.listTunnels ? conn.listTunnels() : [];
+          send(ws, { type: 'tunnel', id: m.id, action: 'list', tunnels: list });
+        } else if (m.action === 'add') {
+          const item = await conn.addTunnel({
+            type: m.tunnelType,
+            localPort: m.localPort,
+            remoteHost: m.remoteHost,
+            remotePort: m.remotePort,
+          });
+          send(ws, { type: 'tunnel', id: m.id, action: 'add', tunnel: item });
+        } else if (m.action === 'remove') {
+          const ok = conn.removeTunnel ? conn.removeTunnel(m.tunnelId) : false;
+          send(ws, { type: 'tunnel', id: m.id, action: 'remove', ok, tunnelId: m.tunnelId });
+        }
+      } catch (e) {
+        send(ws, { type: 'error', id: m.id, msg: `隧道操作失败: ${e.message}` });
       }
       break;
     }

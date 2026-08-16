@@ -211,10 +211,86 @@ class SSHConnection extends BaseConnection {
     if (this.stream) this.stream.setWindow(rows, cols);
   }
 
+  // ---------- SSH 隧道 / 端口转发 ----------
+  // 单会话上限由服务端控制
+  _nextTunnelId = 1;
+  get tunnels() { return this._tunnels || (this._tunnels = new Map()); }
+  async addTunnel({ type = 'local', localPort, remoteHost, remotePort }) {
+    if (this.tunnels.size >= 8) throw new Error('单会话隧道已达上限 8');
+    const port = Number(localPort);
+    if (!Number.isInteger(port) || port <= 0 || port > 65535) throw new Error('本地端口无效');
+    const id = this._nextTunnelId++;
+    const tunnel = { id, type, localPort: port, remoteHost, remotePort, server: null };
+    await new Promise((resolve, reject) => {
+      const done = (err, srv) => {
+        if (err) { delete tunnel.server; return reject(err); }
+        tunnel.server = srv;
+        this.tunnels.set(id, tunnel);
+        resolve();
+      };
+      if (type === 'local') {
+        this.client.createConnection({ srcPort: port }, (err, srv) => done(err, srv)).on('connection', (info, accept) => {
+          const s = accept();
+          this.client.forwardOut(info.dstHost, info.dstPort, info.srcHost, info.srcPort, (e, stream) => {
+            if (e) return s.destroy();
+            const parts = String(remoteHost || '').split(':');
+            const rh = parts[0];
+            const rp = Number(parts[1]) || 22;
+            this.client.exec(`nc ${rh} ${rp}`, (ee, xstream) => {
+              if (ee) { s.destroy(); return; }
+              xstream.pipe(s);
+              s.pipe(xstream);
+              xstream.on('close', () => { s.end(); });
+              s.on('close', () => { try { xstream.end(); } catch {} });
+            });
+          });
+        });
+      } else if (type === 'dynamic') {
+        this.client.createConnection({ srcPort: port }, (err, srv) => done(err, srv)).on('connection', (info, accept) => {
+          const s = accept();
+          this.client.forwardOut(info.dstHost, info.dstPort, info.srcHost, info.srcPort, (e, stream) => {
+            if (e) return s.destroy();
+            s.pipe(stream);
+            stream.pipe(s);
+            stream.on('close', () => s.end());
+            s.on('close', () => { try { stream.end(); } catch {} });
+          });
+        });
+      } else if (type === 'remote') {
+        const [rh, rp] = String(remoteHost || '').split(':');
+        const rPort = Number(rp) || 80;
+        this.client.forwardOut('127.0.0.1', port, rh || '127.0.0.1', rPort, (err, stream) => {
+          if (err) return reject(err);
+          tunnel._remoteStream = stream;
+          this.tunnels.set(id, tunnel);
+          resolve();
+        });
+      } else {
+        reject(new Error('未知隧道类型'));
+      }
+    });
+    return { id, type, localPort: port, remoteHost, remotePort };
+  }
+  removeTunnel(id) {
+    const t = this.tunnels.get(id);
+    if (!t) return false;
+    try { if (t.server) t.server.close(); } catch {}
+    try { if (t._remoteStream) t._remoteStream.end(); } catch {}
+    this.tunnels.delete(id);
+    return true;
+  }
+  listTunnels() {
+    return Array.from(this.tunnels.values()).map(t => ({ id: t.id, type: t.type, localPort: t.localPort, remoteHost: t.remoteHost, remotePort: t.remotePort }));
+  }
   close() {
     if (this.state === 'closed') return;
     this.state = 'closing';
     try {
+      if (this._tunnels) for (const t of this._tunnels.values()) {
+        try { if (t.server) t.server.close(); } catch {}
+        try { if (t._remoteStream) t._remoteStream.end(); } catch {}
+      }
+      this._tunnels = new Map();
       if (this._sftp) { this._sftp.end(); this._sftp = null; }
       if (this.stream) { this.stream.end(); this.stream = null; }
       if (this.client) { this.client.end(); }

@@ -245,6 +245,11 @@ function handleMsg(m) {
       }
       break;
     }
+    case 'tunnel': {
+      if (m.id !== (tunnelTab && tunnelTab.id)) break;
+      if (m.action === 'list' || m.action === 'add' || m.action === 'remove') renderTunnelList(m);
+      break;
+    }
   }
 }
 
@@ -349,14 +354,17 @@ window.addEventListener('beforeunload', () => saveTabs());
 // ---------- 标签管理 ----------
 function newTab(cfg, opts = {}) {
   const id = tabSeq++;
+  const container = document.createElement('div');
+  container.className = 'split-container hidden';
   const host = document.createElement('div');
-  host.className = 'term-host';
-  $('terms').appendChild(host);
+  host.className = 'term-host main-pane';
+  container.appendChild(host);
+  $('terms').appendChild(container);
 
   const term = new Terminal({
     fontSize: 13, fontFamily: 'Consolas, "Courier New", monospace',
     cursorBlink: true, scrollback: 5000,
-    allowProposedApi: true,   // SearchAddon decorations (搜索高亮) 需要
+    allowProposedApi: true,
     theme: { background: '#1a1b26', foreground: '#c0caf5' },
   });
   const fitAddon = new (FitAddonCtor)();
@@ -365,7 +373,6 @@ function newTab(cfg, opts = {}) {
   if (SearchAddonCtor) {
     searchAddon = new SearchAddonCtor();
     term.loadAddon(searchAddon);
-    // 搜索结果计数
     searchAddon.onDidChangeResults((r) => {
       if ($('search-count') && !$('search-bar').classList.contains('hidden')) {
         $('search-count').textContent = r.resultCount ? `${r.resultIndex + 1}/${r.resultCount}` : '0';
@@ -375,12 +382,13 @@ function newTab(cfg, opts = {}) {
   term.open(host);
   setTimeout(() => fitAddon.fit(), 0);
 
-  const tab = { id, cfg, term, host, state: 'idle', hex: !!(opts.hex ?? cfg.hexMode), fitAddon, searchAddon, recParts: [], recLen: 0, extraPanes: [] };
+  const tab = { id, cfg, term, host: container, state: 'idle', hex: !!(opts.hex ?? cfg.hexMode), fitAddon, searchAddon, recParts: [], recLen: 0, extraPanes: [] };
   tabs.push(tab);
   renderTabbar();
   activateTab(id);
   bindClipboard(tab);
   saveTabs();
+  installSplitDragger(tab);
 
   // 刷新恢复: 先重放之前的终端内容, 再建立连接
   if (opts.replay) {
@@ -389,7 +397,7 @@ function newTab(cfg, opts = {}) {
     try {
       term.write(opts.replay);
       term.write('\r\n\x1b[33m[--- 连接已重新建立 ---]\x1b[0m\r\n');
-    } catch (e) { /* 忽略 */ }
+    } catch (e) {}
   }
 
   term.onData((d) => sendInput(id, d));
@@ -397,7 +405,7 @@ function newTab(cfg, opts = {}) {
 
   // 窗口尺寸变化 → 重新适配
   const ro = new ResizeObserver(() => { if (activeTabId === id) fitTerm(tab); });
-  ro.observe(host);
+  ro.observe(container);
 
   if (opts.connect !== false) {
     setTabState(id, 'connecting', '连接中…');
@@ -832,6 +840,8 @@ function updateSftpBtn() {
   const ok = !!(tab && tab.cfg.type === 'ssh' && tab.state === 'connected');
   $('btn-sftp').disabled = !ok;
   $('btn-sftp').title = ok ? 'SSH 文件浏览/下载 (SFTP)' : '文件面板仅 SSH 已连接时可用';
+  $('btn-tunnel').disabled = !ok;
+  if (ok) $('btn-tunnel').classList.remove('hidden'); else $('btn-tunnel').classList.add('hidden');
 }
 
 function toggleSftpPanel() {
@@ -1216,25 +1226,47 @@ function renderScan(m) {
     m.open.map(p => `<div class="scan-open">● ${p} ${PORT_NAMES[p] ? ' (' + PORT_NAMES[p] + ')' : ''}</div>`).join('');
 }
 
-// ---------- 分屏 (标签内左右第二 pane, 再点按钮=关闭) ----------
-$('btn-split').onclick = () => {
-  const tab = tabs.find(t => t.id === activeTabId);
-  if (!tab) return setStatus('没有激活的会话');
-  if (tab.extraPanes.length) {
-    // 已分屏 → 再点 = 关闭分屏 (切换式)
-    closePane(tab, tab.extraPanes[0]);
-    setStatus('分屏已关闭');
-    return;
+// ---------- Split Pane Manager (最多 4 pane, 支持横向/纵向 2x2 + 分割条拖拽) ----------
+const SPLIT_STORAGE = 'sshterm.split';
+const SPLIT_MAX = 4;
+function loadSplitPrefs() {
+  try { return JSON.parse(localStorage.getItem(SPLIT_STORAGE) || '{}'); } catch { return {}; }
+}
+function saveSplitPrefs(prefs) {
+  try { localStorage.setItem(SPLIT_STORAGE, JSON.stringify(prefs)); } catch {}
+}
+function countPanes(tab) { return (tab.extraPanes || []).length + 1; }
+function splitDirection(tab) {
+  const prefs = loadSplitPrefs();
+  return prefs[tab.id] ? prefs[tab.id].dir : 'row';
+}
+function splitRatio(tab) {
+  const prefs = loadSplitPrefs();
+  return prefs[tab.id] ? prefs[tab.id].ratio : 0.5;
+}
+function findPane(tab, connId) {
+  if (tab.id === connId) return tab;
+  const p = (tab.extraPanes || []).find(x => x.connId === connId);
+  return p || null;
+}
+function findTabByConnId(connId) {
+  for (const t of tabs) {
+    if (findPane(t, connId)) return t;
   }
+  return null;
+}
+
+function createPaneHost(className) {
   const host = document.createElement('div');
-  host.className = 'term-host pane1';
+  host.className = 'term-host ' + (className || '');
   const closeBtn = document.createElement('button');
   closeBtn.className = 'pane-close';
   closeBtn.textContent = '✕';
   closeBtn.title = '关闭此分屏';
   host.appendChild(closeBtn);
-  $('terms').appendChild(host);
-
+  return host;
+}
+function createTerminal(host, tabOrPane) {
   const term = new Terminal({
     fontSize: 13, fontFamily: 'Consolas, "Courier New", monospace',
     cursorBlink: true, scrollback: 5000, allowProposedApi: true,
@@ -1244,27 +1276,152 @@ $('btn-split').onclick = () => {
   term.loadAddon(fitAddon);
   term.open(host);
   setTimeout(() => fitAddon.fit(), 0);
+  bindClipboard(tabOrPane);
+  term.onData((d) => sendInput(tabOrPane.connId, d));
+  term.onResize(({ cols, rows }) => send({ type: 'resize', id: tabOrPane.connId, cols, rows }));
+  return { term, fitAddon };
+}
 
-  const pane = { connId: tabSeq++, term, host, cfg: { ...tab.cfg },
-    state: 'connecting', hex: !!tab.hex, fitAddon, recParts: [], recLen: 0, logging: false, logBuf: '' };
+function addPane(tab, dir = 'row', ratio = 0.5) {
+  if (countPanes(tab) >= SPLIT_MAX) { setStatus(`最多支持 ${SPLIT_MAX} 个分屏`); return; }
+  const paneId = tabSeq++;
+  const host = createPaneHost('pane-split');
+  const pane = {
+    connId: paneId, term: null, fitAddon: null, host,
+    cfg: { ...tab.cfg }, state: 'connecting',
+    hex: !!tab.hex, recParts: [], recLen: 0, logging: false, logBuf: ''
+  };
   tab.extraPanes.push(pane);
-  bindClipboard(pane);                    // 复用复制粘贴
-  term.onData((d) => sendInput(pane.connId, d));
-  term.onResize(({ cols, rows }) => send({ type: 'resize', id: pane.connId, cols, rows }));
-  closeBtn.onclick = () => closePane(tab, pane);
-  send({ type: 'connect', session: pane.cfg, id: pane.connId });
-  // 焦点还给主 pane (pane1 创建时 term.open 会抢焦点)
-  setTimeout(() => { if (tabs.includes(tab)) tab.term.focus(); }, 100);
+  const { term, fitAddon } = createTerminal(host, pane);
+  pane.term = term;
+  pane.fitAddon = fitAddon;
+  host.querySelector('.pane-close').onclick = () => removePane(tab, pane);
+  send({ type: 'connect', session: pane.cfg, id: paneId });
   setStatus('已分屏');
-};
+  applySplitLayout(tab, dir, ratio);
+  setTimeout(() => { if (tabs.includes(tab)) tab.term.focus(); }, 100);
+}
 
-function closePane(tab, pane) {
+function removePane(tab, pane) {
   send({ type: 'disconnect', id: pane.connId });
-  try { pane.term.dispose(); } catch (e) {}
+  try { pane.term.dispose(); } catch {}
   pane.host.remove();
   const i = tab.extraPanes.indexOf(pane);
   if (i >= 0) tab.extraPanes.splice(i, 1);
+  if (tab.extraPanes.length === 0) applySplitLayout(tab, 'none', 1);
+  else applySplitLayout(tab, splitDirection(tab), splitRatio(tab));
 }
+
+function applySplitLayout(tab, dir, ratio) {
+  const container = tab.host.querySelector('.split-container');
+  const main = tab.host.querySelector('.term-host.main-pane');
+  if (!container || !main) return;
+  const n = countPanes(tab);
+  if (n <= 1 || dir === 'none') {
+    main.style.display = '';
+    (tab.extraPanes[0] && tab.extraPanes[0].host)?.classList.add('hidden');
+    container.classList.add('hidden');
+    return;
+  }
+  container.classList.remove('hidden');
+  main.style.display = '';
+  tab.extraPanes.forEach(p => p.host.classList.remove('hidden'));
+  if (n === 2) {
+    container.style.flexDirection = dir === 'col' ? 'column' : 'row';
+    main.style.flex = `${ratio} 1 0`;
+    tab.extraPanes[0].host.style.flex = `${1 - ratio} 1 0`;
+  } else if (n >= 3) {
+    // 3-4 pane: 2x2 grid
+    container.style.flexDirection = 'column';
+    container.style.display = 'grid';
+    container.style.gridTemplateColumns = '1fr 1fr';
+    container.style.gridTemplateRows = '1fr 1fr';
+    main.style.flex = '';
+    tab.extraPanes.slice(0, 3).forEach((p, idx) => {
+      p.host.style.flex = '';
+      p.host.style.gridColumn = (idx % 2) + 1;
+      p.host.style.gridRow = Math.floor(idx / 2) + 1;
+    });
+  }
+  // save prefs for first pane dir/ratio
+  if (!loadSplitPrefs()[tab.id]) saveSplitPrefs({ ...loadSplitPrefs(), [tab.id]: { dir, ratio } });
+  setTimeout(() => {
+    [tab, ...tab.extraPanes].forEach(x => { try { x.fitAddon.fit(); } catch {} });
+  }, 50);
+}
+
+function toggleSplit(tab) {
+  if (!tab) return;
+  const n = countPanes(tab);
+  if (n === 1 && tab.extraPanes.length === 0) {
+    addPane(tab, 'row', 0.5);
+  } else {
+    // close all panes one by one
+    while (tab.extraPanes.length) removePane(tab, tab.extraPanes[0]);
+  }
+}
+
+// replace old split logic with PaneManager
+$('btn-split').onclick = () => {
+  const tab = tabs.find(t => t.id === activeTabId);
+  if (!tab) return setStatus('没有激活的会话');
+  toggleSplit(tab);
+};
+
+function closePane(tab, pane) { removePane(tab, pane); }
+
+function installSplitDragger(tab) {
+  const container = tab.host;
+  if (!container || container._draggerInstalled) return;
+  container._draggerInstalled = true;
+  const makeDivider = (dir) => {
+    const d = document.createElement('div');
+    d.className = 'split-divider ' + (dir === 'col' ? 'col' : '');
+    d.style.display = 'none';
+    return d;
+  };
+  tab._dividers = [];
+  let divider = makeDivider('row');
+  container.appendChild(divider);
+  tab._dividers.push(divider);
+  let dragging = false, startPos = 0, startFlex = 0, node = null;
+  const start = (e, n, dir) => {
+    dragging = true; node = n; startPos = dir === 'row' ? e.clientX : e.clientY;
+    const flex = n.style.flex || '1 1 0';
+    const base = parseFloat(flex.split(' ')[0]) || 1;
+    startFlex = base;
+    e.preventDefault();
+  };
+  const move = (e) => {
+    if (!dragging || !node) return;
+    const p = node.parentElement.getBoundingClientRect();
+    const pos = node.dataset.dir === 'col' ? e.clientY : e.clientX - (node.dataset.dir === 'col' ? p.top : p.left);
+    const size = node.dataset.dir === 'col' ? p.height : p.width;
+    const ratio = Math.max(0.1, Math.min(0.9, pos / size));
+    node.style.flex = `${ratio} 1 0`;
+    const siblings = [...node.parentElement.children].filter(c => c !== node && c.classList.contains('term-host'));
+    if (siblings[0]) siblings[0].style.flex = `${1 - ratio} 1 0`;
+    [tab, ...tab.extraPanes].forEach(x => { try { x.fitAddon.fit(); } catch {} });
+  };
+  const end = () => {
+    if (!dragging) return;
+    dragging = false;
+    const main = container.querySelector('.term-host.main-pane');
+    const mFlex = main.style.flex || '';
+    const mRatio = parseFloat(mFlex.split(' ')[0]) || 0.5;
+    saveSplitPrefs({ ...loadSplitPrefs(), [tab.id]: { dir: 'row', ratio: mRatio } });
+    node = null;
+  };
+  divider.addEventListener('mousedown', (e) => start(e, divider, 'row'));
+  document.addEventListener('mousemove', move);
+  document.addEventListener('mouseup', end);
+  tab._splitCleanup = () => {
+    document.removeEventListener('mousemove', move);
+    document.removeEventListener('mouseup', end);
+    container._draggerInstalled = false;
+  };
+}
+
 
 // ---------- 操作日志面板 (日志文件持久化: 每次启动新文件) ----------
 function openLogPanel() {
@@ -1333,6 +1490,24 @@ $('mi-capture').onclick = () => {
 };
 $('log-close').onclick = () => $('dlg-log-mask').classList.add('hidden');
 $('btn-sftp').onclick = toggleSftpPanel;
+$('btn-tunnel').onclick = () => {
+  const tab = tabs.find(t => t.id === activeTabId);
+  if (!tab || tab.cfg.type !== 'ssh') return setStatus('隧道仅适用于 SSH 会话');
+  openTunnelPanel(tab);
+};
+$('tunnel-close').onclick = () => $('dlg-tunnel-mask').classList.add('hidden');
+$('btn-tunnel-refresh').onclick = () => {
+  const tab = tunnelTab;
+  if (tab) send({ type: 'tunnel', id: tab.id, action: 'list' });
+};
+$('btn-tunnel-add').onclick = () => {
+  const tab = tunnelTab; if (!tab) return;
+  const type = $('tn-type').value;
+  const localPort = Number($('tn-local').value);
+  const remoteHost = $('tn-remote').value.trim();
+  if (!localPort || !remoteHost) return setStatus('请填写端口和远端目标');
+  send({ type: 'tunnel', id: tab.id, action: 'add', tunnelType: type, localPort, remoteHost, remotePort: remoteHost.split(':')[1] || 80 });
+};
 $('btn-killall').onclick = () => {
   if (!tabs.length) return setStatus('没有打开的会话');
   if (!confirm(`关闭全部 ${tabs.length} 个会话? (将断开所有连接)`)) return;
