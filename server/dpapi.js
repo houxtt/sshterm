@@ -1,10 +1,11 @@
 // Windows DPAPI via PowerShell (no npm dependency).
 // Caller must catch errors; functions never throw on non-Windows.
-const { execSync } = require('child_process');
+const { execSync, execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
 const SECRETS_PATH = path.join(require('os').homedir(), '.sshterm', 'secrets.enc');
+let writeChain = Promise.resolve();
 
 function isWindows() {
   return process.platform === 'win32';
@@ -24,6 +25,15 @@ $enc=[System.Security.Cryptography.ProtectedData]::Protect($bytes,$null,[System.
 [Convert]::ToBase64String($enc)`;
   return execSync(psScript(script), { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
 }
+function dpapiProtectAsync(text) {
+  if (!isWindows()) return Promise.reject(new Error('DPAPI 仅支持 Windows'));
+  const safe = text.replace(/'/g, "''");
+  const script = `$ErrorActionPreference='Stop';Add-Type -AssemblyName System.Security;$bytes=[System.Text.Encoding]::UTF8.GetBytes('${safe}');$enc=[System.Security.Cryptography.ProtectedData]::Protect($bytes,$null,[System.Security.Cryptography.DataProtectionScope]::CurrentUser);[Convert]::ToBase64String($enc)`;
+  return new Promise((resolve, reject) => {
+    execFile('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
+      { windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => err ? reject(err) : resolve(stdout.trim()));
+  });
+}
 function dpapiUnprotect(b64) {
   if (!isWindows()) throw new Error('DPAPI 仅支持 Windows');
   const script = `
@@ -35,12 +45,16 @@ $bytes=[Convert]::FromBase64String('${b64.replace(/'/g, "''")}');
 }
 
 function writeSecrets(map) {
-  if (!isWindows()) return;
-  try {
+  if (!isWindows()) return Promise.resolve();
+  // Saving credentials must never stall terminal I/O.  The synchronous reader
+  // is retained only for the one-time startup migration path.
+  const snapshot = JSON.stringify(map || {});
+  writeChain = writeChain.catch(() => {}).then(() => dpapiProtectAsync(snapshot)).then(blob => {
     fs.mkdirSync(path.dirname(SECRETS_PATH), { recursive: true });
-    const blob = dpapiProtect(JSON.stringify(map || {}));
-    fs.writeFileSync(SECRETS_PATH, blob, 'utf8');
-  } catch (e) { /* 加密失败不影响主流程 */ }
+    fs.writeFileSync(SECRETS_PATH, blob, { encoding: 'utf8', mode: 0o600 });
+    try { fs.chmodSync(SECRETS_PATH, 0o600); } catch {}
+  }).catch(() => {});
+  return writeChain;
 }
 function readSecrets() {
   if (!isWindows()) return {};

@@ -42,18 +42,24 @@ function newLogFile() {
   return path.join(LOG_DIR, `sshterm-${ts}.log`);
 }
 let LOG_FILE = newLogFile();
+function redactLog(value) {
+  return String(value)
+    .replace(/(password|passphrase|token|secret|authorization)\s*[:=]\s*[^\s,;]+/gi, '$1=[REDACTED]')
+    .replace(/(-----BEGIN [A-Z ]*PRIVATE KEY-----)[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----)/g, '$1\n[REDACTED]\n$2')
+    .replace(/Bearer\s+[A-Za-z0-9._~+\/-]+=*/gi, 'Bearer [REDACTED]');
+}
 function log(level, msg) {
   const d = new Date();
   const pad = (n) => String(n).padStart(2, '0');
   const entry = {
     t: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`,
-    level, msg,
+    level, msg: redactLog(msg),
   };
   logs.push(entry);
   if (logs.length > MAX_LOGS) logs.shift();
   try {
     fs.mkdirSync(LOG_DIR, { recursive: true });
-    fs.appendFileSync(LOG_FILE, `[${entry.t}] [${level}] ${msg}\n`);
+    fs.appendFileSync(LOG_FILE, `[${entry.t}] [${level}] ${entry.msg}\n`);
   } catch (e) { /* 日志写入失败不影响功能 */ }
   return entry;
 }

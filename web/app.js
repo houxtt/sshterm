@@ -126,6 +126,7 @@ function handleMsg(m) {
           $('f-port').value = cfg.port;
           $('f-user').value = cfg.user;
           $('f-key').value = cfg.key;
+          $('f-jump').value = cfg.proxyJump || '';
           $('f-name').value = n;
           $('dlg-mask').classList.add('hidden');
           $('sshcfg-dialog-mask').classList.add('hidden');
@@ -736,6 +737,7 @@ function openDlg(existing = null) {
   $('f-proxy-type').value = existing?.proxy?.type || '';
   $('f-proxy-host').value = existing?.proxy?.host || '';
   $('f-proxy-port').value = existing?.proxy?.port || '';
+  $('f-jump').value = existing?.proxyJump || '';
   $('t-host').value = existing?.host || '';
   $('t-port').value = existing?.port || 23;
   $('t-autologin').checked = !!existing?.autoLogin;
@@ -788,6 +790,7 @@ function collectDlg() {
         host: $('f-proxy-host').value.trim(),
         port: parseInt($('f-proxy-port').value, 10) || 1080,
       } : undefined,
+      proxyJump: $('f-jump').value.trim() || undefined,
     });
   } else if (type === 'telnet') {
     Object.assign(base, {

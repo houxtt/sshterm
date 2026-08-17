@@ -18,6 +18,56 @@ function saveKnownHost(name, fingerprint) {
   fs.writeFileSync(KNOWN_HOSTS_PATH, JSON.stringify(hosts, null, 2), { mode: 0o600 });
   try { fs.chmodSync(KNOWN_HOSTS_PATH, 0o600); } catch { /* Windows ACL controls access */ }
 }
+function makeHostVerifier(connection, hostName) {
+  return (key, verify) => {
+    const fingerprint = `SHA256:${createHash('sha256').update(key).digest('base64').replace(/=+$/, '')}`;
+    const known = loadKnownHosts()[hostName];
+    if (known === fingerprint) return verify ? verify(true) : true;
+    if (known) {
+      connection._emitError(`SSH 主机密钥不匹配 (${hostName})，可能存在中间人攻击`);
+      return verify ? verify(false) : false;
+    }
+    connection._pendingHostKey = { hostName, fingerprint, verify, timer: setTimeout(() => connection.resolveHostKey(false), 30000) };
+    connection.emit('host-key', { host: hostName, fingerprint });
+    return undefined;
+  };
+}
+function applyAuth(cfg, config) {
+  const { auth = 'password', password, privateKey, passphrase } = config;
+  if (auth === 'key') {
+    cfg.privateKey = fs.readFileSync(privateKey);
+    if (passphrase) cfg.passphrase = passphrase;
+  } else if (auth === 'agent') {
+    cfg.agent = process.env.SSH_AUTH_SOCK || '\\\\.\\pipe\\openssh-ssh-agent';
+    cfg.agentForward = !!config.agentForward;
+  } else {
+    cfg.password = password;
+    if (auth === 'keyboard-interactive') cfg.tryKeyboard = true;
+  }
+}
+function parseJumpChain(value) {
+  if (!value) return [];
+  const items = String(value).split(',').map(s => s.trim()).filter(Boolean);
+  if (items.length > 4) throw new Error('最多支持 4 跳跳板机');
+  return items.map(item => {
+    const m = item.match(/^(?:([^@\s]+)@)?([^:\s]+)(?::(\d{1,5}))?$/);
+    if (!m) throw new Error(`跳板机格式无效: ${item}`);
+    const port = m[3] ? Number(m[3]) : 22;
+    if (port < 1 || port > 65535) throw new Error(`跳板机端口无效: ${item}`);
+    return { username: m[1], host: m[2], port };
+  });
+}
+function waitReady(client, cfg) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`跳板机连接超时: ${cfg.host}`)), cfg.readyTimeout || 10000);
+    client.once('ready', () => { clearTimeout(timer); resolve(); });
+    client.once('error', e => { clearTimeout(timer); reject(e); });
+    client.connect(cfg);
+  });
+}
+function forwardThrough(client, host, port) {
+  return new Promise((resolve, reject) => client.forwardOut('127.0.0.1', 0, host, port, (err, stream) => err ? reject(err) : resolve(stream)));
+}
 
 class SSHConnection extends BaseConnection {
   async connect() {
@@ -29,22 +79,7 @@ class SSHConnection extends BaseConnection {
       keepaliveInterval: 15000,   // 15 秒心跳, 防空闲断链(网络设备 idle timeout)
       keepaliveCountMax: 3,       // 连续 3 次无响应才判定连接死亡
     };
-    const hostName = `${host}:${port}`;
-    cfg.hostVerifier = (key, verify) => {
-      const fingerprint = `SHA256:${createHash('sha256').update(key).digest('base64').replace(/=+$/, '')}`;
-      const known = loadKnownHosts()[hostName];
-      if (known === fingerprint) return verify ? verify(true) : true;
-      // A changed key is never silently accepted.  This is the important MITM
-      // defence; a user must explicitly remove/review the stored host entry.
-      if (known) {
-        this._emitError(`SSH 主机密钥不匹配 (${hostName})，可能存在中间人攻击`);
-        return verify ? verify(false) : false;
-      }
-      // First use requires an explicit UI decision, rather than auto-trusting.
-      this._pendingHostKey = { fingerprint, verify, timer: setTimeout(() => this.resolveHostKey(false), 30000) };
-      this.emit('host-key', { host: hostName, fingerprint });
-      return undefined;
-    };
+    cfg.hostVerifier = makeHostVerifier(this, `${host}:${port}`);
 
     // Zmodem 接收器: 检测 sz 文件传输
     const ZmodemReceiver = require('./zmodem');
@@ -54,6 +89,8 @@ class SSHConnection extends BaseConnection {
         this.emit('zmodem-file', filename, filePath, size);
         this._zmodem.reset();
       });
+    const jumps = parseJumpChain(this.config.proxyJump);
+    if (jumps.length && proxy) throw new Error('跳板机与 HTTP/SOCKS 代理不能同时使用');
 
     // 代理支持: SOCKS5 / HTTP CONNECT (公司网络场景)
     if (proxy && proxy.host && proxy.port) {
@@ -68,20 +105,24 @@ class SSHConnection extends BaseConnection {
       }
     }
 
-    if (auth === 'key') {
-      cfg.privateKey = fs.readFileSync(privateKey);
-      if (passphrase) cfg.passphrase = passphrase;
-    } else if (auth === 'agent') {
-      // OpenSSH Agent on Windows; SSH_AUTH_SOCK is used on Unix/WSL.  This
-      // supports hardware-backed FIDO2 keys without exporting private keys.
-      cfg.agent = process.env.SSH_AUTH_SOCK || '\\\\.\\pipe\\openssh-ssh-agent';
-      cfg.agentForward = !!this.config.agentForward;
-    } else if (auth === 'keyboard-interactive') {
-      cfg.tryKeyboard = true;
-      cfg.password = password;
-    } else {
-      cfg.password = password;
+    applyAuth(cfg, this.config);
+
+    // ProxyJump: each hop is authenticated and host-key verified, then its
+    // direct-tcpip channel becomes the socket for the next hop/target.
+    let upstream = null;
+    this.jumpClients = [];
+    for (const hop of jumps) {
+      const jumpCfg = { host: hop.host, port: hop.port, username: hop.username || username, readyTimeout: 10000,
+        keepaliveInterval: 15000, keepaliveCountMax: 3, hostVerifier: makeHostVerifier(this, `${hop.host}:${hop.port}`) };
+      applyAuth(jumpCfg, this.config);
+      if (upstream) jumpCfg.sock = await forwardThrough(upstream, hop.host, hop.port);
+      const jump = new Client();
+      if (auth === 'keyboard-interactive') jump.on('keyboard-interactive', (n, i, l, prompts, finish) => finish(prompts.map(() => password || '')));
+      await waitReady(jump, jumpCfg);
+      this.jumpClients.push(jump);
+      upstream = jump;
     }
+    if (upstream) cfg.sock = await forwardThrough(upstream, host, port);
 
     return new Promise((resolve, reject) => {
       const client = new Client();
@@ -145,7 +186,7 @@ class SSHConnection extends BaseConnection {
     if (!pending) return false;
     this._pendingHostKey = null;
     clearTimeout(pending.timer);
-    if (accept) saveKnownHost(`${this.config.host}:${this.config.port || 22}`, pending.fingerprint);
+    if (accept) saveKnownHost(pending.hostName, pending.fingerprint);
     if (pending.verify) pending.verify(!!accept);
     return true;
   }
@@ -370,6 +411,7 @@ class SSHConnection extends BaseConnection {
         if (this._sftp) { this._sftp.end(); this._sftp = null; }
         if (this.stream) { this.stream.end(); this.stream = null; }
       if (this.client) { this.client.end(); }
+        for (const jump of this.jumpClients || []) { try { jump.end(); } catch {} }
         this.resolveHostKey(false);
       } catch (e) { /* 忽略 */ }
       setTimeout(() => this._emitClose('已断开'), 50);
