@@ -1,7 +1,23 @@
 // SSH 连接 (ssh2): 密码 / 密钥认证, 交互式 shell
 const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { createHash } = require('crypto');
+const net = require('net');
 const { Client } = require('ssh2');
 const BaseConnection = require('./base');
+
+const KNOWN_HOSTS_PATH = path.join(os.homedir(), '.sshterm', 'known-hosts.json');
+function loadKnownHosts() {
+  try { return JSON.parse(fs.readFileSync(KNOWN_HOSTS_PATH, 'utf8')); } catch { return {}; }
+}
+function saveKnownHost(name, fingerprint) {
+  const hosts = loadKnownHosts();
+  hosts[name] = fingerprint;
+  fs.mkdirSync(path.dirname(KNOWN_HOSTS_PATH), { recursive: true });
+  fs.writeFileSync(KNOWN_HOSTS_PATH, JSON.stringify(hosts, null, 2), { mode: 0o600 });
+  try { fs.chmodSync(KNOWN_HOSTS_PATH, 0o600); } catch { /* Windows ACL controls access */ }
+}
 
 class SSHConnection extends BaseConnection {
   async connect() {
@@ -12,6 +28,22 @@ class SSHConnection extends BaseConnection {
       host, port, username, readyTimeout: 10000,
       keepaliveInterval: 15000,   // 15 秒心跳, 防空闲断链(网络设备 idle timeout)
       keepaliveCountMax: 3,       // 连续 3 次无响应才判定连接死亡
+    };
+    const hostName = `${host}:${port}`;
+    cfg.hostVerifier = (key, verify) => {
+      const fingerprint = `SHA256:${createHash('sha256').update(key).digest('base64').replace(/=+$/, '')}`;
+      const known = loadKnownHosts()[hostName];
+      if (known === fingerprint) return verify ? verify(true) : true;
+      // A changed key is never silently accepted.  This is the important MITM
+      // defence; a user must explicitly remove/review the stored host entry.
+      if (known) {
+        this._emitError(`SSH 主机密钥不匹配 (${hostName})，可能存在中间人攻击`);
+        return verify ? verify(false) : false;
+      }
+      // First use requires an explicit UI decision, rather than auto-trusting.
+      this._pendingHostKey = { fingerprint, verify, timer: setTimeout(() => this.resolveHostKey(false), 30000) };
+      this.emit('host-key', { host: hostName, fingerprint });
+      return undefined;
     };
 
     // Zmodem 接收器: 检测 sz 文件传输
@@ -39,6 +71,14 @@ class SSHConnection extends BaseConnection {
     if (auth === 'key') {
       cfg.privateKey = fs.readFileSync(privateKey);
       if (passphrase) cfg.passphrase = passphrase;
+    } else if (auth === 'agent') {
+      // OpenSSH Agent on Windows; SSH_AUTH_SOCK is used on Unix/WSL.  This
+      // supports hardware-backed FIDO2 keys without exporting private keys.
+      cfg.agent = process.env.SSH_AUTH_SOCK || '\\\\.\\pipe\\openssh-ssh-agent';
+      cfg.agentForward = !!this.config.agentForward;
+    } else if (auth === 'keyboard-interactive') {
+      cfg.tryKeyboard = true;
+      cfg.password = password;
     } else {
       cfg.password = password;
     }
@@ -46,6 +86,14 @@ class SSHConnection extends BaseConnection {
     return new Promise((resolve, reject) => {
       const client = new Client();
       this.client = client;
+      if (auth === 'keyboard-interactive') {
+        client.on('keyboard-interactive', (name, instructions, lang, prompts, finish) => {
+          // One password is appropriate for common OTP/password prompts.  For
+          // arbitrary MFA challenges the server will reject rather than expose
+          // the prompt content to untrusted local pages.
+          finish(prompts.map(() => password || ''));
+        });
+      }
       client.on('ready', () => {
         client.shell({ term: 'xterm-256color', cols: 120, rows: 32 }, (err, stream) => {
           if (err) { this._emitError(`shell: ${err.message}`); return reject(err); }
@@ -90,6 +138,16 @@ class SSHConnection extends BaseConnection {
 
   write(data) {
     if (this.stream) this.stream.write(data);
+  }
+
+  resolveHostKey(accept) {
+    const pending = this._pendingHostKey;
+    if (!pending) return false;
+    this._pendingHostKey = null;
+    clearTimeout(pending.timer);
+    if (accept) saveKnownHost(`${this.config.host}:${this.config.port || 22}`, pending.fingerprint);
+    if (pending.verify) pending.verify(!!accept);
+    return true;
   }
 
   // ---------- SFTP 文件访问 (独立子系统, 与 shell 通道共存) ----------
@@ -193,7 +251,7 @@ class SSHConnection extends BaseConnection {
           stream.removeListener('data', onData);
           // 提取绝对路径: 白名单字符 + 至少两级目录 (排除提示符 ~/xxx 的干扰)
           const text = buf.slice(0, idx);
-          const match = text.match(/(\/[a-zA-Z0-9_\-.\/]+)/g) || [];
+          const match = text.match(/(\/[a-zA-Z0-9_\-\.\/]+)/g) || [];
           const paths = match.filter(p => (p.match(/\//g) || []).length >= 2);
           resolve(paths.length ? paths.reduce((a, b) => (b.length > a.length ? b : a)) : null);
         } else if (Date.now() - t0 > 5000) {
@@ -215,88 +273,121 @@ class SSHConnection extends BaseConnection {
   // 单会话上限由服务端控制
   _nextTunnelId = 1;
   get tunnels() { return this._tunnels || (this._tunnels = new Map()); }
+
   async addTunnel({ type = 'local', localPort, remoteHost, remotePort }) {
     if (this.tunnels.size >= 8) throw new Error('单会话隧道已达上限 8');
     const port = Number(localPort);
     if (!Number.isInteger(port) || port <= 0 || port > 65535) throw new Error('本地端口无效');
     const id = this._nextTunnelId++;
-    const tunnel = { id, type, localPort: port, remoteHost, remotePort, server: null };
+    const targetPort = Number(remotePort);
+    if (!Number.isInteger(targetPort) || targetPort <= 0 || targetPort > 65535) throw new Error('目标端口无效');
+    if (!/^[a-zA-Z0-9_.:-]+$/.test(String(remoteHost || ''))) throw new Error('目标主机无效');
+
+    if (type === 'remote') {
+      // Remote forwarding: the SSH server listens on targetPort and each
+      // inbound channel is connected to local 127.0.0.1:port. Never bind an
+      // unintended LAN interface on the client.
+      await new Promise((resolve, reject) => this.client.forwardIn('127.0.0.1', targetPort, err => err ? reject(err) : resolve()));
+      const handler = (info, accept, reject) => {
+        if (info.destPort !== targetPort) return reject();
+        const socket = net.connect({ host: '127.0.0.1', port });
+        socket.once('error', () => { try { reject(); } catch {} });
+        socket.once('connect', () => {
+          const stream = accept();
+          socket.pipe(stream).pipe(socket);
+        });
+      };
+      this.client.on('tcp connection', handler);
+      const tunnel = { id, type, localPort: port, remoteHost: '127.0.0.1', remotePort: targetPort, handler };
+      this.tunnels.set(id, tunnel);
+      return { id, type, localPort: port, remoteHost: '127.0.0.1', remotePort: targetPort };
+    }
+
+    if (type === 'dynamic') throw new Error('动态 SOCKS 转发正在重构，暂不可用');
+    if (type !== 'local') throw new Error('未知隧道类型');
+    const tunnel = { id, type, localPort: port, remoteHost, remotePort: targetPort, server: null };
     await new Promise((resolve, reject) => {
-      const done = (err, srv) => {
-        if (err) { delete tunnel.server; return reject(err); }
-        tunnel.server = srv;
+      const server = net.createServer(socket => {
+        this.client.forwardOut(socket.remoteAddress || '127.0.0.1', socket.remotePort || 0, remoteHost, targetPort, (err, stream) => {
+          if (err) return socket.destroy();
+          socket.pipe(stream).pipe(socket);
+        });
+      });
+      server.once('error', reject);
+      server.listen(port, '127.0.0.1', () => {
+        server.removeListener('error', reject);
+        tunnel.server = server;
         this.tunnels.set(id, tunnel);
         resolve();
-      };
-      if (type === 'local') {
-        this.client.createConnection({ srcPort: port }, (err, srv) => done(err, srv)).on('connection', (info, accept) => {
-          const s = accept();
-          this.client.forwardOut(info.dstHost, info.dstPort, info.srcHost, info.srcPort, (e, stream) => {
-            if (e) return s.destroy();
-            const parts = String(remoteHost || '').split(':');
-            const rh = parts[0];
-            const rp = Number(parts[1]) || 22;
-            this.client.exec(`nc ${rh} ${rp}`, (ee, xstream) => {
-              if (ee) { s.destroy(); return; }
-              xstream.pipe(s);
-              s.pipe(xstream);
-              xstream.on('close', () => { s.end(); });
-              s.on('close', () => { try { xstream.end(); } catch {} });
-            });
-          });
-        });
-      } else if (type === 'dynamic') {
-        this.client.createConnection({ srcPort: port }, (err, srv) => done(err, srv)).on('connection', (info, accept) => {
-          const s = accept();
-          this.client.forwardOut(info.dstHost, info.dstPort, info.srcHost, info.srcPort, (e, stream) => {
-            if (e) return s.destroy();
-            s.pipe(stream);
-            stream.pipe(s);
-            stream.on('close', () => s.end());
-            s.on('close', () => { try { stream.end(); } catch {} });
-          });
-        });
-      } else if (type === 'remote') {
-        const [rh, rp] = String(remoteHost || '').split(':');
-        const rPort = Number(rp) || 80;
-        this.client.forwardOut('127.0.0.1', port, rh || '127.0.0.1', rPort, (err, stream) => {
-          if (err) return reject(err);
-          tunnel._remoteStream = stream;
-          this.tunnels.set(id, tunnel);
-          resolve();
-        });
-      } else {
-        reject(new Error('未知隧道类型'));
-      }
+      });
     });
-    return { id, type, localPort: port, remoteHost, remotePort };
+    return { id, type, localPort: port, remoteHost, remotePort: targetPort };
   }
+
+  // ===== 修改点 3: 移除Tunnel改进 =====
   removeTunnel(id) {
     const t = this.tunnels.get(id);
     if (!t) return false;
-    try { if (t.server) t.server.close(); } catch {}
-    try { if (t._remoteStream) t._remoteStream.end(); } catch {}
+    try {
+      if (t.handler) {
+        this.client.unforwardIn('127.0.0.1', t.remotePort, () => {});
+        this.client.removeListener('tcp connection', t.handler);
+      } else if (t.server) {
+        t.server.close();
+      }
+      if (t._remoteStream) t._remoteStream.end();
+    } catch {}
     this.tunnels.delete(id);
     return true;
   }
+
   listTunnels() {
-    return Array.from(this.tunnels.values()).map(t => ({ id: t.id, type: t.type, localPort: t.localPort, remoteHost: t.remoteHost, remotePort: t.remotePort }));
+    return Array.from(this.tunnels.values()).map(t => ({
+      id: t.id, type: t.type, localPort: t.localPort,
+      remoteHost: t.remoteHost, remotePort: t.remotePort
+    }));
   }
+
   close() {
-    if (this.state === 'closed') return;
-    this.state = 'closing';
-    try {
-      if (this._tunnels) for (const t of this._tunnels.values()) {
-        try { if (t.server) t.server.close(); } catch {}
-        try { if (t._remoteStream) t._remoteStream.end(); } catch {}
-      }
-      this._tunnels = new Map();
-      if (this._sftp) { this._sftp.end(); this._sftp = null; }
-      if (this.stream) { this.stream.end(); this.stream = null; }
+      if (this.state === 'closed') return;
+      this.state = 'closing';
+      try {
+        // 关闭所有隧道
+        if (this._tunnels) {
+          for (const t of this._tunnels.values()) {
+            try {
+              if (t.handler) {
+                this.client.unforwardIn('127.0.0.1', t.remotePort, () => {});
+                this.client.removeListener('tcp connection', t.handler);
+              } else if (t.server) {
+                t.server.close();
+              }
+            } catch {}
+            try { if (t._remoteStream) t._remoteStream.end(); } catch {}
+          }
+          this._tunnels = new Map();
+        }
+        if (this._sftp) { this._sftp.end(); this._sftp = null; }
+        if (this.stream) { this.stream.end(); this.stream = null; }
       if (this.client) { this.client.end(); }
-    } catch (e) { /* 忽略 */ }
-    setTimeout(() => this._emitClose('已断开'), 50);
+        this.resolveHostKey(false);
+      } catch (e) { /* 忽略 */ }
+      setTimeout(() => this._emitClose('已断开'), 50);
+    }
+
+    // ---------- ZMODEM 文件发送 ----------
+    // 通过 sz 命令发送文件到远端 (终端需要支持 ZMODEM)
+    // 用法: conn.sendZmodem(filePath) → 终端会显示文件传输进度
+    sendZmodem(filePath) {
+      if (!this.stream || this.state !== 'connected') {
+        return Promise.reject(new Error('SSH 未连接'));
+      }
+      // 发送 sz 命令，终端会自动收发 ZMODEM 协议
+      const cmd = `sz -vv "${filePath}"
+\n`;
+      this.stream.write(cmd);
+      return Promise.resolve();
+    }
   }
-}
 
 module.exports = SSHConnection;

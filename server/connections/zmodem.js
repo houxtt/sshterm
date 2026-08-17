@@ -11,6 +11,8 @@ const ZRQINIT = 0, ZRINIT = 1, ZSINIT = 2, ZACK = 3, ZFILE = 4, ZSKIP = 5,
       ZFREECNT = 17, ZCOMMAND = 18, ZSTDERR = 19;
 // 子包结束标志
 const ZCRCE = 0x68, ZCRCG = 0x69, ZCRCQ = 0x42, ZCRCW = 0x43;
+const ZCRCZ = 0x6a;
+const MAX_FILE_SIZE = 512 * 1024 * 1024;
 
 // ZMODEM CRC16 (XMODEM 多项式)
 function crc16(buf) {
@@ -40,10 +42,13 @@ class ZmodemReceiver {
     this.reset();
   }
   reset() {
+    if (this.fileFd !== null || this.filePath) this._discardPartial();
     this.state = 'idle';         // idle | frame
     this.buf = Buffer.alloc(0);
     this.filename = '';
-    this.fileData = Buffer.alloc(0);
+    this.fileSize = 0;
+    this.fileFd = null;
+    this.filePath = null;
     this.frameType = -1;
     this.frameData = Buffer.alloc(0);
   }
@@ -157,7 +162,11 @@ class ZmodemReceiver {
       // ZFILE 帧: 文件名 (子包 ZCRCW 带文件名 + 大小)
       const text = data.toString('latin1');
       this.filename = text.split('\0')[0] || 'zmodem_file';
-      this.fileData = Buffer.alloc(0);
+      this._discardPartial();
+      this.fileSize = 0;
+      this.filePath = path.join(this.tmpDir, `${Date.now()}-${Math.random().toString(36).slice(2)}.part`);
+      try { this.fileFd = fs.openSync(this.filePath, 'w', 0o600); }
+      catch { this.fileFd = null; }
       if (subType === ZCRCW) {
         // 需要响应 ZACK
         this.send(Buffer.from([ZPAD, ZDLE, ZACK, 0x00, 0x00]));
@@ -165,18 +174,18 @@ class ZmodemReceiver {
     } else if (type === ZDATA) {
       // ZDATA 帧: 头后跟子包数据 (ZCRCQ/ZCRCE...)
       if (subType === ZCRCQ) {
-        this.fileData = Buffer.concat([this.fileData, data]);
+        this._appendData(data);
         this.send(Buffer.from([ZPAD, ZDLE, ZACK, 0x00, 0x00]));
       } else {
-        this.fileData = Buffer.concat([this.fileData, data]);
+        this._appendData(data);
       }
     } else if (type === ZEOF) {
       // 文件完成
-      if (this.filename && this.fileData.length) {
+      if (this.filename && this.fileFd !== null && this.fileSize > 0) {
         this._saveFile();
       }
       this.filename = '';
-      this.fileData = Buffer.alloc(0);
+      this._discardPartial();
     } else if (type === ZFIN) {
       // 会话结束: 回 ZFIN + OO
       this.send(Buffer.from([ZPAD, ZDLE, ZFIN, 0x00, 0x00]));
@@ -191,10 +200,34 @@ class ZmodemReceiver {
     const safe = this.filename.replace(/[\\/]/g, '_');
     const fp = path.join(this.tmpDir, safe);
     try {
-      fs.writeFileSync(fp, this.fileData);
-      this.onFile && this.onFile(safe, fp, this.fileData.length);
+      if (this.fileFd !== null) fs.closeSync(this.fileFd);
+      this.fileFd = null;
+      fs.renameSync(this.filePath, fp);
+      this.onFile && this.onFile(safe, fp, this.fileSize);
     } catch (e) { /* 忽略 */ }
-    this.fileData = Buffer.alloc(0);
+    this.filePath = null;
+    this.fileSize = 0;
+  }
+
+  _appendData(data) {
+    if (this.fileFd === null || !data.length) return;
+    if (this.fileSize + data.length > MAX_FILE_SIZE) {
+      this._discardPartial();
+      this.reset();
+      return;
+    }
+    try {
+      fs.writeSync(this.fileFd, data);
+      this.fileSize += data.length;
+    } catch { this._discardPartial(); }
+  }
+
+  _discardPartial() {
+    try { if (this.fileFd !== null) fs.closeSync(this.fileFd); } catch {}
+    this.fileFd = null;
+    try { if (this.filePath) fs.unlinkSync(this.filePath); } catch {}
+    this.filePath = null;
+    this.fileSize = 0;
   }
 }
 

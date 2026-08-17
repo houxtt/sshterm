@@ -29,7 +29,12 @@ const TYPE_ICON = { ssh: '🖥️', telnet: '🔌', serial: '🔗' };
 const STATE_TEXT = { connecting: '连接中…', connected: '● 已连接', closed: '✕ 已断开' };
 
 // ---------- 全局状态 ----------
-const ws = new WebSocket(`ws://${location.host}`);
+const clientToken = window.__SSHTERM_TOKEN || '';
+const ws = new WebSocket(`ws://${location.host}/?token=${encodeURIComponent(clientToken)}`);
+const apiUrl = (pathname, params = {}) => {
+  const q = new URLSearchParams({ ...params, token: clientToken });
+  return `${pathname}?${q.toString()}`;
+};
 let tabs = [];            // {id, cfg, term, host, state, hex}
 let tabSeq = 1;
 let activeTabId = null;
@@ -166,6 +171,12 @@ function handleMsg(m) {
       }
       break;
     }
+    case 'host-key': {
+      const message = `首次连接 ${m.host}\n\n服务器主机密钥指纹：\n${m.fingerprint}\n\n请仅在通过独立可信渠道核对指纹后选择“确定”。`;
+      const accept = confirm(message);
+      send({ type: 'host-key-decision', id: m.id, accept });
+      break;
+    }
     case 'error': {
       sftpBusy = false;                 // SFTP 加载失败也释放锁
       // 串口被占用 → 弹窗 (等待重试/强制释放/取消)
@@ -225,7 +236,7 @@ function handleMsg(m) {
       const fileName = m.filename || 'file';
       if (tab) {
         tab.term.writeln(`\r\n\x1b[32m[Zmodem] 已接收: ${fileName} (${fmtSize(m.size)})\x1b[0m`);
-        tab.term.writeln(`\x1b[33m点击下载: /api/zmodem/download?file=${encodeURIComponent(fileName)}\x1b[0m`);
+        tab.term.writeln(`\x1b[33m下载地址: ${apiUrl('/api/zmodem/download', { file: fileName })}\x1b[0m`);
       }
       setStatus(`Zmodem 收到文件: ${fileName} (${fmtSize(m.size)})`);
       break;
@@ -751,7 +762,7 @@ function updateDlgFields() {
   $('grp-telnet').classList.toggle('hidden', type !== 'telnet');
   $('grp-serial').classList.toggle('hidden', type !== 'serial');
   const auth = $('f-auth').value;
-  $('f-pwd-wrap').classList.toggle('hidden', auth !== 'password');
+  $('f-pwd-wrap').classList.toggle('hidden', auth !== 'password' && auth !== 'keyboard-interactive');
   $('f-key-wrap').classList.toggle('hidden', auth !== 'key');
   $('f-pass-wrap').classList.toggle('hidden', auth !== 'key');
   const proxy = $('f-proxy-type').value;
@@ -907,8 +918,8 @@ function renderSftpList(entries) {
       ev.stopPropagation();
       const full = sftpJoin(sftpPath, e.name);
       const url = e.isDir
-        ? `/api/sftp/download-dir?conn=${sftpConnId}&path=${encodeURIComponent(full)}`
-        : `/api/sftp/download?conn=${sftpConnId}&path=${encodeURIComponent(full)}`;
+        ? apiUrl('/api/sftp/download-dir', { conn: sftpConnId, path: full })
+        : apiUrl('/api/sftp/download', { conn: sftpConnId, path: full });
       const dlName = e.isDir ? e.name + '.zip' : e.name;
       showProgress(`下载: ${dlName} 准备中...`, 0);
       try {
@@ -1440,6 +1451,47 @@ function renderLogs(list, file) {
   el.scrollTop = el.scrollHeight;
 }
 
+// ---------- SSH 隧道列表渲染 ----------
+function renderTunnelList(m) {
+  const el = $('tunnel-list');
+  const tabs = m.tunnels || [];
+  if (tabs.length === 0) {
+    el.innerHTML = '<div class="muted" style="padding:12px">暂无隧道</div>';
+    return;
+  }
+  el.innerHTML = tabs.map(t => {
+    const typeMap = { local: '本地转发', remote: '远端转发', dynamic: '动态转发(SOCKS5)' };
+    const typeLabel = typeMap[t.type] || t.type;
+    return `
+      <div class="tunnel-item" style="padding:8px; border:1px solid #3a3b4d; margin-bottom:6px; border-radius:4px; background:#1a1b26;">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <div>
+            <strong>${typeLabel}</strong><br>
+            <span class="muted">本地:${t.localPort} → ${t.remoteHost}:${t.remotePort}</span>
+          </div>
+          <button class="mini danger tunnel-del" data-id="${t.id}" title="删除">🗑</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+  // 绑定删除按钮事件
+  el.querySelectorAll('.tunnel-del').forEach(btn => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const id = parseInt(btn.dataset.id, 10);
+      send({ type: 'tunnel', id: tunnelTab.id, action: 'remove', tunnelId: id });
+    };
+  });
+}
+
+// 保存当前激活的 SSH 标签 (隧道面板使用)
+let tunnelTab = null;
+function openTunnelPanel(tab) {
+  tunnelTab = tab;
+  $('dlg-tunnel-mask').classList.remove('hidden');
+  send({ type: 'tunnel', id: tab.id, action: 'list' });
+}
+
 // ---------- 事件绑定 ----------
 $('btn-new').onclick = () => openDlg();
 $('btn-welcome-new').onclick = () => openDlg();
@@ -1604,7 +1656,7 @@ function remoteSize(url) {
 const UPLOAD_PARALLEL = 4;
 const UPLOAD_CHUNK = 8 * 1024 * 1024;
 async function uploadFileSmart(tabId, dirPath, name, file, onProg) {
-  const base = `/api/sftp/upload?conn=${tabId}&path=${encodeURIComponent(dirPath)}&name=${encodeURIComponent(name)}`;
+  const base = apiUrl('/api/sftp/upload', { conn: tabId, path: dirPath, name });
   const remote = await remoteSize(base);
   let offset = remote;
   if (offset >= file.size) { onProg(1); return 200; }   // 已完整存在
@@ -1661,8 +1713,7 @@ $('sftp-dir-input').onchange = async (e) => {
   for (let i = 0; i < files.length; i++) {
     const f = files[i];
     const rel = f.webkitRelativePath || f.name;
-    const url = `/api/sftp/upload?conn=${sftpConnId}` +
-      `&path=${encodeURIComponent(sftpPath)}&name=${encodeURIComponent(rel)}`;
+    const url = apiUrl('/api/sftp/upload', { conn: sftpConnId, path: sftpPath, name: rel });
     try {
       const status = await xhrUpload(url, f, (loaded, ftotal) => {
         const pct = (i + loaded / ftotal) / total * 100;
@@ -1726,7 +1777,7 @@ $('terms').addEventListener('drop', async (e) => {
     const buf = await f.arrayBuffer();
     setStatus(`上传: ${f.name} (${fmtSize(buf.byteLength)})...`);
     try {
-      const url = `/api/sftp/upload?conn=${tab.id}&path=${encodeURIComponent(dir)}&name=${encodeURIComponent(f.name)}`;
+      const url = apiUrl('/api/sftp/upload', { conn: tab.id, path: dir, name: f.name });
       const resp = await fetch(url, { method: 'PUT', body: buf });
       if (!resp.ok) throw new Error(await resp.text());
       setStatus(`✅ 已上传: ${f.name}`);

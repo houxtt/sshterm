@@ -4,16 +4,32 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { randomUUID } = require('crypto');
+const { randomUUID, randomBytes } = require('crypto');
 const { WebSocketServer } = require('ws');
 
 const ROOT = path.join(__dirname, '..');
 const WEB = path.join(ROOT, 'web');
 const CONN_DIR = path.join(os.homedir(), '.sshterm');
 const CONN_FILE = path.join(CONN_DIR, 'sessions.json');
+const MAX_SFTP_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
 
 const connections = new Map();   // connId -> BaseConnection
 const liveByConfig = new Map();  // 配置指纹 -> connId (去重: 同一配置只开一个)
+// A random per-process capability prevents arbitrary web pages from controlling
+// the loopback service.  Loopback is not an authentication boundary by itself.
+const CLIENT_TOKEN = randomBytes(32).toString('base64url');
+
+function hasClientToken(req) {
+  try {
+    const u = new URL(req.url, 'http://127.0.0.1');
+    return u.searchParams.get('token') === CLIENT_TOKEN;
+  } catch { return false; }
+}
+
+function isInside(root, candidate) {
+  const rel = path.relative(root, candidate);
+  return rel && !rel.startsWith('..' + path.sep) && rel !== '..' && !path.isAbsolute(rel);
+}
 
 // ---------- 操作日志 (内存环形 + 每次启动新日志文件落盘) ----------
 const MAX_LOGS = 1000;
@@ -113,12 +129,13 @@ function loadSSHConfig() {
       const k = key.toLowerCase();
       if (k === 'host') {
         current = val.replace(/['"]/g, '').trim();
-        hosts[current] = { hostname: '', port: 22, user: 'root', identity: '' };
+        hosts[current] = { hostname: '', port: 22, user: 'root', identity: '', proxyJump: '' };
       } else if (current) {
         if (k === 'hostname') hosts[current].hostname = val.replace(/['"]/g, '').trim();
         else if (k === 'port') hosts[current].port = parseInt(val, 10);
         else if (k === 'user') hosts[current].user = val.replace(/['"]/g, '').trim();
         else if (k === 'identityfile') hosts[current].identity = val.replace(/['"]/g, '').trim();
+        else if (k === 'proxyjump') hosts[current].proxyJump = val.replace(/['"]/g, '').trim();
       }
     }
     sshConfig = hosts;
@@ -135,6 +152,18 @@ const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css
                '.json': 'application/json', '.png': 'image/png', '.woff2': 'font/woff2' };
 const server = http.createServer((req, res) => {
   let url = decodeURIComponent(req.url.split('?')[0]);
+
+  // The UI obtains this only from the loopback bootstrap script.  State-changing
+  // and file-transfer endpoints require it; static assets remain public but
+  // cannot perform privileged actions.
+  if (url === '/bootstrap.js') {
+    res.writeHead(200, { 'Content-Type': 'text/javascript', 'Cache-Control': 'no-store' });
+    return res.end(`window.__SSHTERM_TOKEN=${JSON.stringify(CLIENT_TOKEN)};`);
+  }
+  if (url.startsWith('/api/') && !hasClientToken(req)) {
+    res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+    return res.end('forbidden');
+  }
 
   // Zmodem 文件下载: /api/zmodem/download?file=<文件名>
   if (url.startsWith('/api/zmodem/download')) {
@@ -175,8 +204,13 @@ const server = http.createServer((req, res) => {
     const conn = connections.get(parseInt(qs.get('conn'), 10));
     const dir = qs.get('path') || '.';
     const name = qs.get('name') || '';
-    const offset = parseInt(qs.get('offset'), 10) || 0;
-    if (!conn || !conn.getSftpInst() || !name) {
+    const rawOffset = qs.get('offset');
+    const offset = rawOffset === null ? 0 : Number(rawOffset);
+    const segments = String(name).replace(/\\/g, '/').split('/');
+    const contentLength = Number(req.headers['content-length'] || 0);
+    if (!conn || !conn.getSftpInst() || !name || !Number.isSafeInteger(offset) || offset < 0 ||
+        segments.some(p => !p || p === '.' || p === '..' || p.includes('\0')) ||
+        (contentLength && (!Number.isSafeInteger(contentLength) || contentLength > MAX_SFTP_UPLOAD_BYTES))) {
       res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
       return res.end('上传参数错误(连接或文件名无效)');
     }
@@ -200,6 +234,14 @@ const server = http.createServer((req, res) => {
       const ws = sftp.createWriteStream(remotePath, {
         flags: offset > 0 ? 'r+' : 'w',
         start: offset,
+      });
+      let received = 0;
+      req.on('data', (chunk) => {
+        received += chunk.length;
+        if (received > MAX_SFTP_UPLOAD_BYTES) {
+          req.destroy(new Error('上传文件超过大小上限'));
+          ws.destroy(new Error('上传文件超过大小上限'));
+        }
       });
       req.pipe(ws);
       ws.on('close', () => { res.writeHead(200); res.end('ok'); });
@@ -290,11 +332,18 @@ const server = http.createServer((req, res) => {
   } else {
     file = path.join(WEB, url);
   }
-  if (!file.startsWith(ROOT)) { res.writeHead(403); return res.end(); }
+  // Do not use a prefix check here: paths such as ../sshterm-private pass a
+  // textual prefix check.  Assets must be in exactly their intended root.
+  const allowedRoot = url.startsWith('/vendor/')
+    ? path.join(ROOT, 'node_modules')
+    : WEB;
+  if (!isInside(allowedRoot, file)) { res.writeHead(403); return res.end(); }
   fs.readFile(file, (err, data) => {
     if (err) { res.writeHead(404); return res.end('not found'); }
     res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream',
-                         'Cache-Control': 'no-cache' });
+                         'Cache-Control': 'no-cache',
+                         'X-Content-Type-Options': 'nosniff',
+                         'Content-Security-Policy': "default-src 'self'; connect-src 'self' ws:; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'" });
     res.end(data);
   });
 });
@@ -321,9 +370,10 @@ function scheduleIdleExit() {
 const wss = new WebSocketServer({
   server,
   maxPayload: 8 * 1024 * 1024,
-  verifyClient: ({ origin }) => {
-    // Only the local sshterm UI may use this local service. Node-based e2e
-    // clients have no Origin header and are allowed for automation.
+  verifyClient: ({ origin, req }) => {
+    if (!hasClientToken(req)) return false;
+    // A browser UI must originate on the loopback server.  Non-browser test
+    // clients also need the per-process capability token.
     if (!origin) return true;
     try {
       const u = new URL(origin);
@@ -332,12 +382,19 @@ const wss = new WebSocketServer({
     } catch { return false; }
   },
 });
+let activeWs = null;
 wss.on('connection', (ws) => {
+  // The protocol uses compact, UI-local 16-bit tab IDs.  Permit a single UI
+  // client rather than accidentally sharing those IDs and terminal streams.
+  if (activeWs && activeWs.readyState === 1) activeWs.close(4001, '已在另一窗口打开 sshterm');
+  activeWs = ws;
   wsCount++;
   clearTimeout(idleExitTimer);
   ws.on('close', () => {
     wsCount--;
     scheduleIdleExit();
+    if (ws !== activeWs) return;
+    activeWs = null;
     // 浏览器离开 → 关闭该客户端发起的全部连接, 防止僵尸连接
     for (const [id, conn] of connections) {
       conn.close();
@@ -375,11 +432,11 @@ function sessionsList() { return Object.values(sessions).map(sanitize); }
 function broadcast(obj) {
   for (const c of wss.clients) send(c, obj);
 }
-function sendBinary(id, data) {
+function sendBinary(ws, id, data) {
   const frame = Buffer.allocUnsafe(2 + data.length);
   frame.writeUInt16LE(id, 0);
   data.copy(frame, 2);
-  for (const c of wss.clients) if (c.readyState === 1) c.send(frame, { binary: true });
+  if (ws.readyState === 1) ws.send(frame, { binary: true });
 }
 
 async function handle(ws, m) {
@@ -436,13 +493,17 @@ async function handle(ws, m) {
     case 'serial-force-free': {
       // 强制释放被占串口: 提权重启设备 (弹 UAC, 用户确认后 Disable/Enable)
       const { path: comPort } = m;
-      if (!comPort) return send(ws, { type: 'error', msg: '缺少端口号' });
+      if (!/^COM\d+$/i.test(String(comPort || ''))) {
+        return send(ws, { type: 'error', msg: '串口号无效' });
+      }
       const ps1 = path.join(__dirname, 'free-serial.ps1');
-      const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass',
-        '-File', `"${ps1}"`, '-ComPort', comPort];
-      // Start-Process -Verb RunAs 触发 UAC; 非管理员环境会抛错
+      // Use an encoded, fixed PowerShell script and a validated COM value.
+      // Never interpolate client-controlled text into a shell command line.
+      const escPs = ps1.replace(/'/g, "''");
+      const elevated = `Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','${escPs}','-ComPort','${String(comPort).toUpperCase()}')`;
+      const encoded = Buffer.from(elevated, 'utf16le').toString('base64');
       const cp = require('child_process');
-      cp.exec(`powershell.exe -Command "Start-Process powershell -Verb RunAs -ArgumentList '${args.join("','")}' -Wait"`,
+      cp.execFile('powershell.exe', ['-NoProfile', '-EncodedCommand', encoded],
         { timeout: 120000 }, (err, stdout, stderr) => {
           const ok = !err;
           send(ws, {
@@ -532,7 +593,8 @@ async function handle(ws, m) {
         host: cfg.hostname || '',
         port: cfg.port || 22,
         user: cfg.user || 'root',
-        key: cfg.identity || ''
+        key: cfg.identity || '',
+        proxyJump: cfg.proxyJump || ''
       }));
       send(ws, { type: 'ssh-hosts', list });
       break;
@@ -547,6 +609,16 @@ async function handle(ws, m) {
         }
       }
       await doConnect(ws, sess, m.id);
+      break;
+    }
+    case 'host-key-decision': {
+      const conn = connections.get(m.id);
+      if (!conn || conn.config.type !== 'ssh' || !conn.resolveHostKey) {
+        return send(ws, { type: 'error', id: m.id, msg: '没有等待确认的 SSH 主机密钥' });
+      }
+      if (!conn.resolveHostKey(m.accept === true)) {
+        return send(ws, { type: 'error', id: m.id, msg: '主机密钥确认已过期' });
+      }
       break;
     }
     case 'serialports': {
@@ -665,7 +737,7 @@ async function doConnect(ws, cfg, tabId) {
   catch (e) { console.log('[session-log] 创建失败:', e.message); }
 
   conn.on('data', (d) => {
-    sendBinary(connId, d);
+    sendBinary(ws, connId, d);
     if (sessionLogStream) {
       try {
         const text = Buffer.isBuffer(d) ? d.toString(enc) : String(d);
@@ -689,6 +761,9 @@ async function doConnect(ws, cfg, tabId) {
     console.log(`[conn] ${cfg.type} ${tabId} open`);
     log('info', `[${cfg.name || cfg.type}] 已连接`);
     send(ws, { type: 'status', id: connId, state: 'connected', msg: '已连接' });
+  });
+  conn.on('host-key', (info) => {
+    send(ws, { type: 'host-key', id: connId, ...info });
   });
   conn.on('zmodem-file', (filename, filePath, size) => {
     console.log(`[zmodem] 收到文件 ${filename} (${size}B)`);

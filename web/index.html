@@ -128,6 +128,8 @@
           <select id="f-auth">
             <option value="password">密码</option>
             <option value="key">密钥</option>
+            <option value="keyboard-interactive">键盘交互/MFA</option>
+            <option value="agent">SSH Agent（含 FIDO2）</option>
           </select>
         </label>
         <label id="f-pwd-wrap">密码 <input id="f-password" type="password" placeholder="密码"></label>
@@ -333,6 +335,7 @@
   </div>
 </div>
 
+<script src="/bootstrap.js"></script>
 <script src="/vendor/@xterm/xterm/lib/xterm.js"></script>
 <script src="/vendor/@xterm/addon-fit/lib/addon-fit.js"></script>
 <script src="/vendor/@xterm/addon-search/lib/addon-search.js"></script>
