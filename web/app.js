@@ -106,6 +106,16 @@ ws.onmessage = (ev) => {
   try {
     const enc = tab.cfg.encoding || 'utf-8';
     const text = new TextDecoder(enc, { fatal: false }).decode(payload);
+    // Record output only.  Input is deliberately excluded because terminal
+    // input can contain passwords, passphrases and other credentials.
+    if (!pane && tab.recording) {
+      tab.recording.events.push({ at: Date.now() - tab.recording.startedAt, text });
+      tab.recording.size += text.length;
+      if (tab.recording.events.length > 100000 || tab.recording.size > 8 * 1024 * 1024) {
+        tab.recording.stopped = '录制达到 8 MB / 100,000 条上限';
+        stopSessionRecording(tab);
+      }
+    }
     const target = pane || tab;
     if (!target.recParts) target.recParts = [];
     target.recLen = (target.recLen || 0) + text.length;
@@ -1705,6 +1715,69 @@ $('log-close').onclick = () => $('dlg-log-mask').classList.add('hidden');
 $('log-bookmarks').onclick = () => {
   const b = $('log-bookmarks'); b.dataset.only = b.dataset.only === '1' ? '0' : '1';
   b.textContent = b.dataset.only === '1' ? '★ 显示全部' : '★ 仅看书签'; renderLogs(lastLogs, lastLogFile);
+};
+function recordingFileName(tab) {
+  const safe = String(tab.cfg.name || tab.cfg.host || 'session').replace(/[<>:"/\\|?*]+/g, '_');
+  return `sshterm-recording-${safe}-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+}
+function stopSessionRecording(tab) {
+  if (!tab?.recording) return;
+  const recording = tab.recording;
+  tab.recording = null;
+  $('mi-record').textContent = '⏺ 开始会话录制';
+  const exportData = {
+    format: 'sshterm-recording', version: 1,
+    createdAt: new Date(recording.startedAt).toISOString(),
+    // Deliberately omit username and every credential field from the file.
+    session: { name: tab.cfg.name || '', type: tab.cfg.type || '', host: tab.cfg.host || '', port: tab.cfg.port || '' },
+    capture: 'rx-only', events: recording.events,
+  };
+  saveBlob(new Blob([JSON.stringify(exportData)], { type: 'application/json;charset=utf-8' }), recordingFileName(tab));
+  setStatus(recording.stopped || `会话录制已保存（${recording.events.length} 条输出；不含键盘输入）`);
+}
+$('mi-record').onclick = () => {
+  $('menu-more').classList.add('hidden');
+  const tab = tabs.find(t => t.id === activeTabId);
+  if (!tab) return setStatus('没有激活的会话');
+  if (tab.recording) return stopSessionRecording(tab);
+  tab.recording = { startedAt: Date.now(), events: [], size: 0 };
+  $('mi-record').textContent = '⏹ 停止并导出录制';
+  setStatus('会话录制已开始：仅记录终端输出，不记录键盘输入');
+};
+function validateRecording(value) {
+  if (!value || value.format !== 'sshterm-recording' || value.version !== 1 || !Array.isArray(value.events) || value.events.length > 100000) {
+    throw new Error('不是有效的 sshterm 录制文件');
+  }
+  let previous = 0; let size = 0;
+  for (const event of value.events) {
+    if (!event || !Number.isSafeInteger(event.at) || event.at < previous || event.at > 24 * 3600 * 1000 || typeof event.text !== 'string') throw new Error('录制时间轴无效');
+    previous = event.at; size += event.text.length;
+    if (size > 8 * 1024 * 1024) throw new Error('录制文件内容超过 8 MB 上限');
+  }
+  return value;
+}
+async function replayRecording(file) {
+  if (!file) return;
+  if (file.size > 10 * 1024 * 1024) throw new Error('录制文件超过 10 MB 上限');
+  const recording = validateRecording(JSON.parse(await file.text()));
+  const speed = Math.max(0.25, Math.min(16, Number(window.prompt('回放速度（0.25 - 16 倍）', '1')) || 1));
+  const cfg = { type: 'ssh', name: `回放：${recording.session?.name || '未命名会话'}`, host: recording.session?.host || '', port: recording.session?.port || 22 };
+  const tab = newTab(cfg, { connect: false });
+  setTabState(tab.id, 'closed', `只读回放（${speed}x）`);
+  tab.term.writeln('\x1b[33m[只读回放：录制文件不含键盘输入]\x1b[0m\r\n');
+  let previous = 0;
+  for (const event of recording.events) {
+    await new Promise(resolve => setTimeout(resolve, Math.min(30000, Math.max(0, event.at - previous) / speed)));
+    if (!tabs.includes(tab)) return;
+    tab.term.write(event.text);
+    previous = event.at;
+  }
+  setStatus('会话回放完成');
+}
+$('mi-replay').onclick = () => { $('menu-more').classList.add('hidden'); $('recording-import-file').click(); };
+$('recording-import-file').onchange = async (event) => {
+  try { await replayRecording(event.target.files?.[0]); } catch (e) { setStatus(e.message || '录制文件导入失败'); }
+  event.target.value = '';
 };
 $('log-audit').onclick = () => {
   const b = $('log-audit'); b.dataset.only = b.dataset.only === '1' ? '0' : '1';
