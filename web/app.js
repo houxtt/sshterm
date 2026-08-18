@@ -73,8 +73,13 @@ ws.onmessage = (ev) => {
   if (!tab) return;
   const term = pane ? pane.term : tab.term;
   const payload = buf.subarray(2);
-  if ((pane ? pane.hex : tab.hex)) term.write(hexOf(payload) + ' ');
-  else term.write(payload);
+  const displayTarget = pane || tab;
+  const stamp = !pane && tab.cfg.type === 'serial' && tab.cfg.timestamp ? `[${new Date().toLocaleTimeString()}] ` : '';
+  if ((pane ? pane.hex : tab.hex)) term.write(stamp + hexOf(payload) + ' ');
+  else { if (stamp) term.write(stamp); term.write(payload); }
+  if (!pane && tab.cfg.type === 'serial' && tab.cfg.trigger) {
+    try { if (new TextDecoder(tab.cfg.encoding || 'utf-8').decode(payload).includes(tab.cfg.trigger)) setStatus(`串口触发：${tab.cfg.trigger}`); } catch {}
+  }
   if (tab.logging) {
     const dir = pane ? pane : tab;
     if (!dir.captureParts) dir.captureParts = [];
@@ -773,6 +778,8 @@ function openDlg(existing = null) {
   $('s-rtscts').checked = !!existing?.rtscts;
   $('s-reconnect').checked = existing?.reconnect !== false;
   $('s-hex').checked = !!existing?.hexMode;
+  $('s-timestamp').checked = !!existing?.timestamp;
+  $('s-trigger').value = existing?.trigger || '';
   updateDlgFields();
   $('dlg-mask').classList.remove('hidden');
   $('f-name').focus();
@@ -830,6 +837,8 @@ function collectDlg() {
       rtscts: $('s-rtscts').checked,
       reconnect: $('s-reconnect').checked,
       hexMode: $('s-hex').checked,
+      timestamp: $('s-timestamp').checked,
+      trigger: $('s-trigger').value.trim() || undefined,
     });
   }
   // 连接后自动执行脚本 (所有协议通用)
@@ -1624,6 +1633,10 @@ $('sftp-refresh').onclick = sftpLoad;
 // ---------- SFTP 传输 (XHR + 进度条, 大文件不卡页面) ----------
 let _progLast = 0;
 const transferTasks = [];
+let uploadQueuePaused = false;
+async function waitForUploadQueue() {
+  while (uploadQueuePaused) await new Promise(resolve => setTimeout(resolve, 200));
+}
 function newTransferTask(kind, name) {
   const task = { id: Date.now() + Math.random(), kind, name, state: 'running', pct: 0 };
   transferTasks.unshift(task); renderTransferTasks(); return task;
@@ -1635,7 +1648,8 @@ function updateTransferTask(task, pct, state, detail = '') {
 function renderTransferTasks() {
   const el = $('sftp-tasks'); if (!el) return;
   const list = transferTasks.slice(0, 12); el.classList.toggle('hidden', !list.length);
-  el.innerHTML = list.map(t => `<div class="sftp-task ${esc(t.state)}"><span>${t.kind}</span><span class="sftp-task-name">${esc(t.name)}</span><span>${t.state === 'running' ? Math.round(t.pct) + '%' : esc(t.detail || t.state)}</span></div>`).join('');
+  el.innerHTML = `<button id="sftp-queue-toggle" class="mini">${uploadQueuePaused ? '▶ 继续队列' : '⏸ 暂停队列'}</button>` + list.map(t => `<div class="sftp-task ${esc(t.state)}"><span>${t.kind}</span><span class="sftp-task-name">${esc(t.name)}</span><span>${t.state === 'running' ? Math.round(t.pct) + '%' : esc(t.detail || t.state)}</span></div>`).join('');
+  $('sftp-queue-toggle').onclick = () => { uploadQueuePaused = !uploadQueuePaused; renderTransferTasks(); setStatus(uploadQueuePaused ? '上传队列将在当前文件完成后暂停' : '上传队列已继续'); };
 }
 async function sha256File(file) {
   if (!window.crypto?.subtle || file.size > 256 * 1024 * 1024) return null;
@@ -1761,6 +1775,7 @@ $('sftp-file-input').onchange = async (e) => {
   const files = [...(e.target.files || [])]; if (!files.length) return;
   $('sftp-local-list').innerHTML = files.map(f => `<div class="sftp-item"><span class="sftp-ico">📄</span><span class="sftp-name">${esc(f.name)}</span><span class="sftp-size">${fmtSize(f.size)}</span></div>`).join('');
   for (const file of files) {
+    await waitForUploadQueue();
     const task = newTransferTask('上传', file.name); showProgress(`上传: ${file.name} 0%`, 0);
     try {
       const status = await uploadFileSmart(sftpConnId, sftpPath, file.name, file,

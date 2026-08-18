@@ -85,7 +85,7 @@
           <div id="sftp-progress-bar"><div id="sftp-progress-fill"></div></div>
           <span id="sftp-progress-text"></span>
         </div>
-        <div id="sftp-tasks" class="hidden"></div>
+        <div id="sftp-tasks" class="hidden"><button id="sftp-queue-toggle" class="mini">⏸ 暂停队列</button></div>
         <div id="sftp-columns">
           <section class="sftp-column"><div class="sftp-col-title">本地待传文件</div><div id="sftp-local-list"></div></section>
           <section class="sftp-column"><div class="sftp-col-title">远端目录</div><div id="sftp-list"></div></section>
@@ -201,6 +201,8 @@
         <label><input type="checkbox" id="s-rtscts"> RTS/CTS 硬件流控</label>
         <label><input type="checkbox" id="s-reconnect" checked> 断线自动重连</label>
         <label><input type="checkbox" id="s-hex"> HEX 显示/发送</label>
+        <label><input type="checkbox" id="s-timestamp"> 接收显示时间戳</label>
+        <label>触发关键字 <input id="s-trigger" placeholder="匹配后通知，不执行命令"></label>
         <div class="serial-controls">
           <button type="button" id="s-dtr" class="mini">DTR</button>
           <button type="button" id="s-rts" class="mini">RTS</button>
