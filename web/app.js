@@ -1,5 +1,5 @@
 // sshterm 前端: 多标签终端 + 会话管理
-/* global Terminal, WebSocket */
+/* global Terminal, WebSocket, Zmodem */
 
 // ---------- 工具 ----------
 const $ = (id) => document.getElementById(id);
@@ -91,6 +91,9 @@ ws.onmessage = (ev) => {
   if (!tab) return;
   const term = pane ? pane.term : tab.term;
   const payload = buf.subarray(2);
+  if (!pane && tab.zmodemSentry) {
+    try { tab.zmodemSentry.consume(payload); return; } catch { /* normal terminal fallback below */ }
+  }
   const displayTarget = pane || tab;
   const stamp = !pane && tab.cfg.type === 'serial' && tab.cfg.timestamp ? `[${new Date().toLocaleTimeString()}] ` : '';
   if ((pane ? pane.hex : tab.hex)) term.write(stamp + hexOf(payload) + ' ');
@@ -454,6 +457,20 @@ function newTab(cfg, opts = {}) {
   setTimeout(() => fitAddon.fit(), 0);
 
   const tab = { id, cfg, term, host: container, state: 'idle', hex: !!(opts.hex ?? cfg.hexMode), fitAddon, searchAddon, recParts: [], recLen: 0, extraPanes: [] };
+  if (window.Zmodem) {
+    tab.zmodemSentry = new Zmodem.Sentry({
+      to_terminal: octets => term.write(octets),
+      // Protocol bytes must bypass paste confirmation and string coercion.
+      sender: octets => sendInput(id, new Uint8Array(octets)),
+      on_detect: detection => {
+        // Do not start a transfer implicitly. Future send/receive UI confirms
+        // this session before file access is granted.
+        detection.deny();
+        setStatus('检测到 Zmodem 会话；请选择文件发送/接收操作');
+      },
+      on_retract: () => setStatus('Zmodem 协商已取消'),
+    });
+  }
   tabs.push(tab);
   renderTabbar();
   activateTab(id);

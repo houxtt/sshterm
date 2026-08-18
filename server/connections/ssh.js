@@ -81,14 +81,8 @@ class SSHConnection extends BaseConnection {
     };
     cfg.hostVerifier = makeHostVerifier(this, `${host}:${port}`);
 
-    // Zmodem 接收器: 检测 sz 文件传输
-    const ZmodemReceiver = require('./zmodem');
-    this._zmodem = new ZmodemReceiver(
-      (buf) => { if (this.stream) this.stream.write(buf); },
-      (filename, filePath, size) => {
-        this.emit('zmodem-file', filename, filePath, size);
-        this._zmodem.reset();
-      });
+    // Zmodem protocol detection is performed in the browser.  It needs the
+    // raw terminal byte stream to negotiate browser-local file transfers.
     const jumps = parseJumpChain(this.config.proxyJump);
     const jumpAuth = this.config.jumpAuth || null;
     if (jumps.length && proxy) throw new Error('跳板机与 HTTP/SOCKS 代理不能同时使用');
@@ -148,11 +142,6 @@ class SSHConnection extends BaseConnection {
           this.stream = stream;
           this.state = 'connected';
           stream.on('data', (d) => {
-            // Zmodem 接收: 检测到传输时吞掉数据, 否则正常转发
-            if (this._zmodem) {
-              this._zmodem.feed(d);
-              if (this._zmodem.state !== 'idle') return;
-            }
             this._emitData(d);
           });
           stream.on('close', () => {
