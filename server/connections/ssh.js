@@ -90,6 +90,7 @@ class SSHConnection extends BaseConnection {
         this._zmodem.reset();
       });
     const jumps = parseJumpChain(this.config.proxyJump);
+    const jumpAuth = this.config.jumpAuth || null;
     if (jumps.length && proxy) throw new Error('跳板机与 HTTP/SOCKS 代理不能同时使用');
 
     // 代理支持: SOCKS5 / HTTP CONNECT (公司网络场景)
@@ -112,12 +113,18 @@ class SSHConnection extends BaseConnection {
     let upstream = null;
     this.jumpClients = [];
     for (const hop of jumps) {
-      const jumpCfg = { host: hop.host, port: hop.port, username: hop.username || username, readyTimeout: 10000,
+      // A jump chain can use credentials unrelated to the destination.  The
+      // UI supplies one credential set for the chain; an explicit user@host
+      // in ProxyJump remains the highest-priority username.
+      const jumpCredentials = jumpAuth ? { ...this.config, ...jumpAuth } : this.config;
+      const jumpCfg = { host: hop.host, port: hop.port, username: hop.username || jumpAuth?.username || username, readyTimeout: 10000,
         keepaliveInterval: 15000, keepaliveCountMax: 3, hostVerifier: makeHostVerifier(this, `${hop.host}:${hop.port}`) };
-      applyAuth(jumpCfg, this.config);
+      applyAuth(jumpCfg, jumpCredentials);
       if (upstream) jumpCfg.sock = await forwardThrough(upstream, hop.host, hop.port);
       const jump = new Client();
-      if (auth === 'keyboard-interactive') jump.on('keyboard-interactive', (n, i, l, prompts, finish) => finish(prompts.map(() => password || '')));
+      if (jumpCredentials.auth === 'keyboard-interactive') {
+        jump.on('keyboard-interactive', (n, i, l, prompts, finish) => finish(prompts.map(() => jumpCredentials.password || '')));
+      }
       await waitReady(jump, jumpCfg);
       this.jumpClients.push(jump);
       upstream = jump;

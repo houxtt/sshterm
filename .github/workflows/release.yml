@@ -1,0 +1,55 @@
+name: Release build
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version (must match package.json before publishing)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  SIGNING_CERT_BASE64: ${{ secrets.SIGNING_CERT_BASE64 }}
+  SIGNING_CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: node tests/static_security_contract.js
+      - run: node scripts/build-exe.js
+      - name: Require release-signing credentials
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:SIGNING_CERT_BASE64) -or [string]::IsNullOrWhiteSpace($env:SIGNING_CERT_PASSWORD)) {
+            throw 'Refusing to create an externally distributable unsigned release. Configure SIGNING_CERT_BASE64 and SIGNING_CERT_PASSWORD GitHub secrets.'
+          }
+      - name: Sign and verify Authenticode artifact
+        shell: pwsh
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'sshterm-signing.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGNING_CERT_BASE64))
+          try {
+            $signtool = (Get-Command signtool.exe -ErrorAction Stop).Source
+            & $signtool sign /fd SHA256 /f $pfx /p $env:SIGNING_CERT_PASSWORD /tr http://timestamp.digicert.com /td SHA256 dist/sshterm.exe
+            if ($LASTEXITCODE -ne 0) { throw "signtool sign failed: $LASTEXITCODE" }
+            & $signtool verify /pa /all dist/sshterm.exe
+            if ($LASTEXITCODE -ne 0) { throw "signtool verify failed: $LASTEXITCODE" }
+          } finally {
+            Remove-Item -LiteralPath $pfx -Force -ErrorAction SilentlyContinue
+          }
+      - name: Upload signed release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sshterm-${{ inputs.version }}-signed
+          path: dist/sshterm.exe
+          if-no-files-found: error

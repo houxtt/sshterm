@@ -1,6 +1,6 @@
 // Windows DPAPI via PowerShell (no npm dependency).
 // Caller must catch errors; functions never throw on non-Windows.
-const { execSync, execFile } = require('child_process');
+const { execSync, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
@@ -30,8 +30,23 @@ function dpapiProtectAsync(text) {
   const safe = text.replace(/'/g, "''");
   const script = `$ErrorActionPreference='Stop';Add-Type -AssemblyName System.Security;$bytes=[System.Text.Encoding]::UTF8.GetBytes('${safe}');$enc=[System.Security.Cryptography.ProtectedData]::Protect($bytes,$null,[System.Security.Cryptography.DataProtectionScope]::CurrentUser);[Convert]::ToBase64String($enc)`;
   return new Promise((resolve, reject) => {
-    execFile('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
-      { windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => err ? reject(err) : resolve(stdout.trim()));
+    // Do not pass the plaintext payload through a process command line: other
+    // same-user processes can inspect it. PowerShell reads this short script
+    // from stdin instead; the resulting DPAPI blob is the only value retained.
+    const child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', '-'], {
+      windowsHide: true,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', chunk => { stdout += chunk; });
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    child.once('error', reject);
+    child.once('close', code => {
+      if (code !== 0) return reject(new Error(stderr.trim() || `PowerShell 退出码 ${code}`));
+      resolve(stdout.trim());
+    });
+    child.stdin.end(script);
   });
 }
 function dpapiUnprotect(b64) {

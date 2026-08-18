@@ -21,33 +21,76 @@ function connectProxy(target, cfg) {
   });
 }
 
-// SOCKS5 握手 (显式 stage: 0=方法协商, 1=连接请求)
+// SOCKS5 handshake with optional RFC 1929 username/password authentication.
 function handshakeSocks5(sock, target, cfg) {
   return new Promise((resolve, reject) => {
-    let stage = 0;
-    const timer = setTimeout(() => reject(new Error('SOCKS5 握手超时')), 10000);
+    let stage = 'method';
+    let buf = Buffer.alloc(0);
+    let settled = false;
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      sock.removeListener('data', onData);
+      reject(error);
+    };
+    const succeed = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      sock.removeListener('data', onData);
+      resolve();
+    };
+    const timer = setTimeout(() => fail(new Error('SOCKS5 握手超时')), 10000);
+    const sendConnect = () => {
+      const hostBuf = Buffer.from(target.host, 'utf8');
+      if (!hostBuf.length || hostBuf.length > 255) return fail(new Error('SOCKS5 目标主机无效'));
+      sock.write(Buffer.concat([
+        Buffer.from([0x05, 0x01, 0x00, 0x03, hostBuf.length]), hostBuf,
+        Buffer.from([(target.port >> 8) & 0xff, target.port & 0xff]),
+      ]));
+      stage = 'connect';
+    };
     const onData = (d) => {
-      if (stage === 0 && d.length >= 2) {
-        if (d[1] !== 0x00) {
-          clearTimeout(timer);
-          return reject(new Error('代理需要认证(仅支持无认证 SOCKS5)'));
+      buf = Buffer.concat([buf, d]);
+      while (!settled) {
+        if (stage === 'method') {
+          if (buf.length < 2) return;
+          const [version, method] = buf.subarray(0, 2); buf = buf.subarray(2);
+          if (version !== 0x05 || method === 0xff) return fail(new Error('SOCKS5 不接受客户端认证方式'));
+          if (method === 0x00) { sendConnect(); continue; }
+          if (method !== 0x02) return fail(new Error(`不支持的 SOCKS5 认证方式: ${method}`));
+          const user = Buffer.from(cfg.username || '', 'utf8');
+          const password = Buffer.from(cfg.password || '', 'utf8');
+          if (!user.length || user.length > 255 || !password.length || password.length > 255) {
+            return fail(new Error('SOCKS5 用户名或密码无效'));
+          }
+          sock.write(Buffer.concat([Buffer.from([0x01, user.length]), user, Buffer.from([password.length]), password]));
+          stage = 'auth';
+          continue;
         }
-        // 发送连接请求 (域名类型)
-        const hostBuf = Buffer.from(target.host, 'utf8');
-        sock.write(Buffer.concat([
-          Buffer.from([0x05, 0x01, 0x00, 0x03, hostBuf.length]),
-          hostBuf,
-          Buffer.from([(target.port >> 8) & 0xff, target.port & 0xff]),
-        ]));
-        stage = 1;
-      } else if (stage === 1 && d.length >= 2) {
-        clearTimeout(timer);
-        if (d[1] !== 0x00) return reject(new Error(`SOCKS5 连接失败 code=${d[1]}`));
-        resolve();
+        if (stage === 'auth') {
+          if (buf.length < 2) return;
+          const [version, status] = buf.subarray(0, 2); buf = buf.subarray(2);
+          if (version !== 0x01 || status !== 0x00) return fail(new Error('SOCKS5 用户名或密码认证失败'));
+          sendConnect();
+          continue;
+        }
+        if (stage === 'connect') {
+          if (buf.length < 5) return;
+          const atyp = buf[3];
+          const addressLength = atyp === 0x01 ? 4 : atyp === 0x04 ? 16 : atyp === 0x03 ? (buf.length >= 5 ? buf[4] : 0) : -1;
+          const frameLength = atyp === 0x03 ? 7 + addressLength : 6 + addressLength;
+          if (addressLength < 0 || buf.length < frameLength) return;
+          const status = buf[1]; buf = buf.subarray(frameLength);
+          if (status !== 0x00) return fail(new Error(`SOCKS5 连接失败 code=${status}`));
+          return succeed();
+        }
       }
     };
     sock.on('data', onData);
-    sock.write(Buffer.from([0x05, 0x01, 0x00]));   // 无认证
+    const hasCredentials = !!(cfg.username || cfg.password);
+    sock.write(Buffer.from(hasCredentials ? [0x05, 0x02, 0x00, 0x02] : [0x05, 0x01, 0x00]));
   });
 }
 

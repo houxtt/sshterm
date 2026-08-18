@@ -22,6 +22,7 @@
         <button id="mi-lang">🌐 切换语言</button>
         <button id="mi-timer">⏱ 定时发送</button>
         <button id="mi-scan">🔍 端口扫描</button>
+        <button id="mi-transfer">⇄ 导入 / 导出会话</button>
         <button id="mi-capture">⏺ 开始原始抓包</button>
       </div>
     </div>
@@ -86,6 +87,7 @@
         <div id="sftp-progress" class="hidden">
           <div id="sftp-progress-bar"><div id="sftp-progress-fill"></div></div>
           <span id="sftp-progress-text"></span>
+          <button id="sftp-cancel-transfer" class="mini danger hidden" title="取消当前下载">取消</button>
         </div>
         <div id="sftp-tasks" class="hidden"><button id="sftp-queue-toggle" class="mini">⏸ 暂停队列</button></div>
         <div id="sftp-columns">
@@ -158,9 +160,22 @@
         </label>
         <label id="f-proxy-wrap" class="hidden">代理地址 <input id="f-proxy-host" placeholder="127.0.0.1" style="width:140px">
           <input id="f-proxy-port" type="number" placeholder="1080" style="width:80px"></label>
+        <label id="f-proxy-auth-wrap" class="hidden">代理认证
+          <input id="f-proxy-user" placeholder="用户名" style="width:120px">
+          <input id="f-proxy-password" type="password" placeholder="密码" style="width:120px"></label>
         <label>跳板链 (ProxyJump)
           <input id="f-jump" placeholder="user@bastion1:22,bastion2:22">
         </label>
+        <div id="f-jump-auth-wrap" class="hidden">
+          <label>跳板凭据（整条跳板链共用，独立于目标主机）</label>
+          <label>跳板用户 <input id="f-jump-user" placeholder="留空则使用跳板链中的用户或目标用户"></label>
+          <label>跳板认证
+            <select id="f-jump-auth"><option value="password">密码</option><option value="key">密钥</option><option value="agent">SSH Agent</option></select>
+          </label>
+          <label id="f-jump-pwd-wrap">跳板密码 <input id="f-jump-password" type="password"></label>
+          <label id="f-jump-key-wrap" class="hidden">跳板私钥路径 <input id="f-jump-key" placeholder="C:\\Users\\...\\.ssh\\id_ed25519"></label>
+          <label id="f-jump-pass-wrap" class="hidden">跳板密钥口令 <input id="f-jump-passphrase" type="password"></label>
+        </div>
       </div>
 
       <!-- Telnet 字段 -->
@@ -170,6 +185,9 @@
         <label><input type="checkbox" id="t-autologin"> 自动登录</label>
         <label id="t-user-wrap" class="hidden">用户名 <input id="t-user"></label>
         <label id="t-pass-wrap2" class="hidden">密码 <input id="t-pass" type="password"></label>
+      </div>
+      <div class="grp" id="f-remember-wrap">
+        <label><input type="checkbox" id="f-remember"> 记住凭据（使用 Windows DPAPI 加密）</label>
       </div>
       <div class="grp">
         <label>连接后自动执行(每行一条)
@@ -342,9 +360,37 @@
   <div id="dlg-log">
     <h3>📋 操作日志 <button id="log-close" class="mini" style="float:right">✕</button></h3>
     <button id="log-bookmarks" class="mini">★ 仅看书签</button>
+    <button id="log-audit" class="mini">🔐 仅看审计</button>
+    <button id="log-export" class="mini">⬇ 导出 CSV</button>
     <div id="log-file" class="log-foot muted" style="word-break:break-all">日志文件: 加载中…</div>
     <div id="log-list"></div>
     <div class="log-foot muted">每次启动工具自动新建日志文件, 关闭后保留在本地</div>
+  </div>
+</div>
+
+<!-- 会话导入 / 导出 -->
+<div id="dlg-transfer-mask" class="hidden">
+  <div id="dlg-transfer">
+    <h3>⇄ 导入 / 导出会话 <button id="transfer-close" class="mini" style="float:right">✕</button></h3>
+    <section class="transfer-section">
+      <h4>导出 sshterm 加密备份</h4>
+      <p class="muted">备份以 AES-256-GCM 加密，可跨设备导入；口令无法找回。</p>
+      <label>备份口令 <input id="backup-passphrase" type="password" minlength="12" placeholder="至少 12 个字符"></label>
+      <label>确认口令 <input id="backup-passphrase-confirm" type="password" minlength="12"></label>
+      <button id="backup-export" class="primary">⬇ 导出加密备份</button>
+    </section>
+    <section class="transfer-section">
+      <h4>导入 sshterm 加密备份</h4>
+      <input id="backup-import-file" type="file" accept="application/json,.json">
+      <label>备份口令 <input id="backup-import-passphrase" type="password" minlength="12"></label>
+      <button id="backup-import">⬆ 导入备份</button>
+    </section>
+    <section class="transfer-section">
+      <h4>导入 OpenSSH config</h4>
+      <p class="muted">导入具体 Host；通配符、Match 和 Include 规则会跳过。不会导入密码。</p>
+      <input id="openssh-import-file" type="file" accept="text/plain,.conf,.config">
+      <button id="openssh-import">⬆ 导入 OpenSSH config</button>
+    </section>
   </div>
 </div>
 

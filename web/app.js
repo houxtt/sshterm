@@ -27,6 +27,23 @@ if (typeof Terminal !== 'function' || !FitAddonCtor) {
 
 const TYPE_ICON = { ssh: '🖥️', telnet: '🔌', serial: '🔗' };
 const STATE_TEXT = { connecting: '连接中…', connected: '● 已连接', closed: '✕ 已断开' };
+const SENSITIVE_CONFIG_KEYS = new Set(['password', 'privateKey', 'passphrase', 'loginPass']);
+
+// Workspace recovery must never turn browser storage into a credential vault.
+// Saved sessions are rehydrated by the server from memory or DPAPI when the
+// user explicitly opted in to remembering credentials.
+function configForBrowserStorage(cfg) {
+  const safe = Object.fromEntries(Object.entries(cfg || {}).filter(([key]) => !SENSITIVE_CONFIG_KEYS.has(key)));
+  if (safe.proxy) {
+    const { password, ...proxy } = safe.proxy;
+    safe.proxy = proxy;
+  }
+  if (safe.jumpAuth) {
+    const { password, privateKey, passphrase, ...jumpAuth } = safe.jumpAuth;
+    safe.jumpAuth = jumpAuth;
+  }
+  return safe;
+}
 
 // ---------- 全局状态 ----------
 const clientToken = window.__SSHTERM_TOKEN || '';
@@ -147,6 +164,16 @@ function handleMsg(m) {
     case 'sessions': {
       sessions = m.list || [];
       renderSessionList();
+      break;
+    }
+    case 'session-export': {
+      saveBlob(new Blob([m.data], { type: 'application/json;charset=utf-8' }), m.filename || 'sshterm-backup.json');
+      setStatus('加密会话备份已导出');
+      break;
+    }
+    case 'session-import': {
+      setStatus(`已从 ${m.source === 'openssh' ? 'OpenSSH config' : '加密备份'} 导入 ${m.count} 个会话`);
+      $('dlg-transfer-mask').classList.add('hidden');
       break;
     }
     case 'status': {
@@ -351,7 +378,7 @@ const BUF_MAX = 200 * 1024;   // 每标签保留最近 200KB 输出, 刷新后�
 function saveTabs() {
   try {
     localStorage.setItem(LS_TABS, JSON.stringify(tabs.map(t => ({
-      cfg: t.cfg, hex: !!t.hex, buf: (t.recParts || []).join(''),
+      cfg: configForBrowserStorage(t.cfg), hex: !!t.hex, buf: (t.recParts || []).join(''),
       panes: (t.extraPanes || []).length,
       split: { dir: splitDirection(t), ratio: splitRatio(t) },
     }))));
@@ -762,10 +789,18 @@ function openDlg(existing = null) {
   $('f-password').value = '';
   $('f-key').value = existing?.privateKey || '';
   $('f-passphrase').value = '';
+  $('f-remember').checked = !!existing?.rememberPassword;
   $('f-proxy-type').value = existing?.proxy?.type || '';
   $('f-proxy-host').value = existing?.proxy?.host || '';
   $('f-proxy-port').value = existing?.proxy?.port || '';
+  $('f-proxy-user').value = existing?.proxy?.username || '';
+  $('f-proxy-password').value = '';
   $('f-jump').value = existing?.proxyJump || '';
+  $('f-jump-user').value = existing?.jumpAuth?.username || '';
+  $('f-jump-auth').value = existing?.jumpAuth?.auth || 'password';
+  $('f-jump-password').value = '';
+  $('f-jump-key').value = '';
+  $('f-jump-passphrase').value = '';
   $('t-host').value = existing?.host || '';
   $('t-port').value = existing?.port || 23;
   $('t-autologin').checked = !!existing?.autoLogin;
@@ -793,12 +828,20 @@ function updateDlgFields() {
   $('grp-ssh').classList.toggle('hidden', type !== 'ssh');
   $('grp-telnet').classList.toggle('hidden', type !== 'telnet');
   $('grp-serial').classList.toggle('hidden', type !== 'serial');
+  $('f-remember-wrap').classList.toggle('hidden', type === 'serial');
   const auth = $('f-auth').value;
   $('f-pwd-wrap').classList.toggle('hidden', auth !== 'password' && auth !== 'keyboard-interactive');
   $('f-key-wrap').classList.toggle('hidden', auth !== 'key');
   $('f-pass-wrap').classList.toggle('hidden', auth !== 'key');
   const proxy = $('f-proxy-type').value;
   $('f-proxy-wrap').classList.toggle('hidden', !proxy);
+  $('f-proxy-auth-wrap').classList.toggle('hidden', !proxy);
+  const hasJump = !!$('f-jump').value.trim();
+  $('f-jump-auth-wrap').classList.toggle('hidden', !hasJump);
+  const jumpAuth = $('f-jump-auth').value;
+  $('f-jump-pwd-wrap').classList.toggle('hidden', jumpAuth !== 'password');
+  $('f-jump-key-wrap').classList.toggle('hidden', jumpAuth !== 'key');
+  $('f-jump-pass-wrap').classList.toggle('hidden', jumpAuth !== 'key');
   const auto = $('t-autologin').checked;
   $('t-user-wrap').classList.toggle('hidden', !auto);
   $('t-pass-wrap2').classList.toggle('hidden', !auto);
@@ -806,7 +849,13 @@ function updateDlgFields() {
 
 function collectDlg() {
   const type = $('f-type').value;
-  const base = { id: editingId || undefined, name: $('f-name').value.trim(), group: $('f-group').value.trim() || undefined, type };
+  const base = {
+    id: editingId || undefined,
+    name: $('f-name').value.trim(),
+    group: $('f-group').value.trim() || undefined,
+    type,
+    rememberPassword: type !== 'serial' && $('f-remember').checked,
+  };
   if (type === 'ssh') {
     const ptype = $('f-proxy-type').value;
     Object.assign(base, {
@@ -819,8 +868,17 @@ function collectDlg() {
         type: ptype,
         host: $('f-proxy-host').value.trim(),
         port: parseInt($('f-proxy-port').value, 10) || 1080,
+        username: $('f-proxy-user').value.trim() || undefined,
+        password: $('f-proxy-password').value || undefined,
       } : undefined,
       proxyJump: $('f-jump').value.trim() || undefined,
+      jumpAuth: $('f-jump').value.trim() ? {
+        username: $('f-jump-user').value.trim() || undefined,
+        auth: $('f-jump-auth').value,
+        password: $('f-jump-password').value || undefined,
+        privateKey: $('f-jump-key').value.trim() || undefined,
+        passphrase: $('f-jump-passphrase').value || undefined,
+      } : undefined,
     });
   } else if (type === 'telnet') {
     Object.assign(base, {
@@ -951,6 +1009,7 @@ function renderSftpList(entries) {
     };
     row.querySelector('.sftp-dl')?.addEventListener('click', async (ev) => {
       ev.stopPropagation();
+      if (!e.isDir && activeDownload) return setStatus('已有下载进行中，请先完成或取消');
       const full = sftpJoin(sftpPath, e.name);
       const url = e.isDir
         ? apiUrl('/api/sftp/download-dir', { conn: sftpConnId, path: full })
@@ -959,7 +1018,7 @@ function renderSftpList(entries) {
       const task = newTransferTask('下载', dlName);
       showProgress(`下载: ${dlName} 准备中...`, 0);
       try {
-        const blob = await xhrDownload(url, (loaded, total) => {
+        const download = e.isDir ? xhrDownload(url, undefined) : resumableDownload(url, (loaded, total) => {
           if (total > 0) {
             showProgress(`下载: ${dlName} ${(loaded / total * 100).toFixed(0)}% (${fmtSize(loaded)}/${fmtSize(total)})`,
               loaded / total * 100); updateTransferTask(task, loaded / total * 100);
@@ -967,6 +1026,7 @@ function renderSftpList(entries) {
             showProgress(`下载: ${dlName} ${fmtSize(loaded)}`, undefined);
           }
         });
+        const blob = await download;
         if (blob && blob.size > 0) {
           saveBlob(blob, dlName);
           doneProgress(`✅ 已下载: ${dlName} (${fmtSize(blob.size)})`);
@@ -976,8 +1036,9 @@ function renderSftpList(entries) {
         }
       } catch (err) {
         $('sftp-progress').classList.add('hidden');
-        $('sftp-status').textContent = `下载失败: ${err.message}`;
-        updateTransferTask(task, undefined, 'failed', '失败');
+        const cancelled = err && err.name === 'AbortError';
+        $('sftp-status').textContent = cancelled ? '下载已取消' : `下载失败: ${err.message}`;
+        updateTransferTask(task, undefined, cancelled ? 'cancelled' : 'failed', cancelled ? '已取消' : '失败');
       }
     });
     el.appendChild(row);
@@ -1517,7 +1578,8 @@ function renderLogs(list, file) {
   const el = $('log-list');
   const saved = new Set(JSON.parse(localStorage.getItem('sshterm.log.bookmarks') || '[]'));
   const onlyBookmarks = $('log-bookmarks')?.dataset.only === '1';
-  const visible = onlyBookmarks ? list.filter(l => saved.has(`${l.t}|${l.msg}`)) : list;
+  const onlyAudit = $('log-audit')?.dataset.only === '1';
+  const visible = list.filter(l => (!onlyBookmarks || saved.has(`${l.t}|${l.msg}`)) && (!onlyAudit || l.level === 'audit'));
   el.innerHTML = list.length
     ? visible.map(l => { const key = `${l.t}|${l.msg}`; return `<div class="log-line ${l.level === 'error' ? 'log-err' : ''}">
         <span class="log-t">${esc(l.t)}</span>
@@ -1531,6 +1593,22 @@ function renderLogs(list, file) {
     renderLogs(list, file);
   });
   el.scrollTop = el.scrollHeight;
+}
+function exportVisibleLogs() {
+  const saved = new Set(JSON.parse(localStorage.getItem('sshterm.log.bookmarks') || '[]'));
+  const onlyBookmarks = $('log-bookmarks')?.dataset.only === '1';
+  const onlyAudit = $('log-audit')?.dataset.only === '1';
+  const csv = (v) => {
+    let value = String(v ?? '');
+    // Prevent exported log text from becoming an Excel formula when opened.
+    if (/^[=+\-@]/.test(value)) value = `'${value}`;
+    return `"${value.replace(/"/g, '""')}"`;
+  };
+  const rows = lastLogs
+    .filter(l => (!onlyBookmarks || saved.has(`${l.t}|${l.msg}`)) && (!onlyAudit || l.level === 'audit'))
+    .map(l => [l.t, l.level, l.msg].map(csv).join(','));
+  saveBlob(new Blob([[['time', 'level', 'message'].map(csv).join(','), ...rows].join('\r\n')],
+    { type: 'text/csv;charset=utf-8' }), `sshterm-audit-${Date.now()}.csv`);
 }
 
 // ---------- SSH 隧道列表渲染 ----------
@@ -1597,6 +1675,7 @@ $('mi-timer').onclick = () => {
   $('dlg-timer-mask').classList.remove('hidden');
 };
 $('mi-scan').onclick = () => { $('menu-more').classList.add('hidden'); $('dlg-scan-mask').classList.remove('hidden'); };
+$('mi-transfer').onclick = () => { $('menu-more').classList.add('hidden'); $('dlg-transfer-mask').classList.remove('hidden'); };
 $('btn-sshcfg').onclick = () => {
   send({ type: 'ssh-hosts' });
   $('sshcfg-list').querySelector('tbody').innerHTML = '';
@@ -1626,6 +1705,38 @@ $('log-close').onclick = () => $('dlg-log-mask').classList.add('hidden');
 $('log-bookmarks').onclick = () => {
   const b = $('log-bookmarks'); b.dataset.only = b.dataset.only === '1' ? '0' : '1';
   b.textContent = b.dataset.only === '1' ? '★ 显示全部' : '★ 仅看书签'; renderLogs(lastLogs, lastLogFile);
+};
+$('log-audit').onclick = () => {
+  const b = $('log-audit'); b.dataset.only = b.dataset.only === '1' ? '0' : '1';
+  b.textContent = b.dataset.only === '1' ? '🔐 显示全部' : '🔐 仅看审计'; renderLogs(lastLogs, lastLogFile);
+};
+$('log-export').onclick = exportVisibleLogs;
+$('transfer-close').onclick = () => $('dlg-transfer-mask').classList.add('hidden');
+function readImportFile(id) {
+  const file = $(id).files?.[0];
+  if (!file) throw new Error('请选择文件');
+  if (file.size > 4 * 1024 * 1024) throw new Error('导入文件超过 4 MB 上限');
+  return file.text();
+}
+$('backup-export').onclick = () => {
+  const passphrase = $('backup-passphrase').value;
+  if (passphrase.length < 12) return setStatus('备份口令至少需要 12 个字符');
+  if (passphrase !== $('backup-passphrase-confirm').value) return setStatus('两次输入的备份口令不一致');
+  send({ type: 'export-sessions', passphrase });
+  $('backup-passphrase').value = '';
+  $('backup-passphrase-confirm').value = '';
+};
+$('backup-import').onclick = async () => {
+  try {
+    const passphrase = $('backup-import-passphrase').value;
+    if (passphrase.length < 12) throw new Error('备份口令至少需要 12 个字符');
+    send({ type: 'import-sessions-backup', data: await readImportFile('backup-import-file'), passphrase });
+    $('backup-import-passphrase').value = '';
+  } catch (e) { setStatus(e.message); }
+};
+$('openssh-import').onclick = async () => {
+  try { send({ type: 'import-openssh-config', data: await readImportFile('openssh-import-file') }); }
+  catch (e) { setStatus(e.message); }
 };
 $('btn-sftp').onclick = toggleSftpPanel;
 $('btn-tunnel').onclick = () => {
@@ -1746,6 +1857,52 @@ function xhrDownload(url, onProg) {
     xhr.send();
   });
 }
+let activeDownload = null;
+function cancelActiveDownload() {
+  if (activeDownload) activeDownload.controller.abort();
+}
+// Keep partial data in memory for the current operation and retry a failed
+// request from the byte offset already received. Browser download files cannot
+// be appended safely, so final disk persistence still happens only on success.
+async function resumableDownload(url, onProg, retries = 3) {
+  const chunks = [];
+  let received = 0;
+  let total = 0;
+  const cancel = $('sftp-cancel-transfer');
+  cancel.classList.remove('hidden');
+  cancel.onclick = cancelActiveDownload;
+  try {
+    for (let attempt = 0; ; attempt++) {
+      const controller = new AbortController();
+      activeDownload = { controller };
+      try {
+        const headers = received ? { Range: `bytes=${received}-` } : {};
+        const response = await fetch(url, { headers, signal: controller.signal });
+        if (!response.ok || !response.body) throw new Error(`下载请求失败: ${response.status}`);
+        const range = response.headers.get('Content-Range');
+        const length = Number(response.headers.get('Content-Length') || 0);
+        total = range ? Number(range.split('/')[1]) : (length || total);
+        const reader = response.body.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+          received += value.byteLength;
+          if (onProg) onProg(received, total);
+        }
+        return new Blob(chunks, { type: 'application/octet-stream' });
+      } catch (err) {
+        if (err.name === 'AbortError' || attempt >= retries) throw err;
+        await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
+      } finally {
+        activeDownload = null;
+      }
+    }
+  } finally {
+    cancel.classList.add('hidden');
+    cancel.onclick = null;
+  }
+}
 // Blob 触发浏览器保存
 function saveBlob(blob, name) {
   const url = URL.createObjectURL(blob);
@@ -1772,33 +1929,15 @@ function remoteSize(url) {
     xhr.send();
   });
 }
-// 上传单个文件: 断点续传 (HEAD 检查远端已有大小 → 从 offset 续传)
-// 大文件(>8MB)分块并行 (PARALLEL 块)
-const UPLOAD_PARALLEL = 4;
-const UPLOAD_CHUNK = 8 * 1024 * 1024;
+// 上传单个文件: HEAD 检查远端已有大小后单流续传。过去的浏览器
+// 多分块并发会让 r+ 分块抢在首个 w 创建文件之前执行，并且会绕过
+// 服务端的资源控制；并发由服务端在“文件”粒度统一管理。
 async function uploadFileSmart(tabId, dirPath, name, file, onProg) {
   const base = apiUrl('/api/sftp/upload', { conn: tabId, path: dirPath, name });
   const remote = await remoteSize(base);
   let offset = remote;
   if (offset >= file.size) { onProg(1); return 200; }   // 已完整存在
 
-  const work = [];
-  if (file.size - offset > UPLOAD_CHUNK * 2) {
-    // 多线程: 从 offset 起分块并行
-    const starts = [];
-    for (let s = offset; s < file.size; s += UPLOAD_CHUNK) starts.push(s);
-    let done = 0;
-    const totalBytes = file.size - offset;
-    const pool = starts.map((s, i) => {
-      const end = Math.min(s + UPLOAD_CHUNK, file.size);
-      const blob = file.slice(s, end);
-      return xhrUpload(`${base}&offset=${s}`, blob, (loaded, t) => {
-        onProg((offset + (done + (i === 0 ? loaded : 0))) / file.size);
-      }).then((st) => { done += end - s; onProg((offset + done) / file.size); return st; });
-    });
-    const results = await Promise.all(pool);
-    return results.every(s => s === 200) ? 200 : 500;
-  }
   // 单线程续传: 从 offset 继续
   const blob = file.slice(offset);
   return xhrUpload(`${base}&offset=${offset}`, blob, (loaded, t) => {
@@ -1912,6 +2051,8 @@ $('terms').addEventListener('drop', async (e) => {
 $('f-type').onchange = updateDlgFields;
 $('f-auth').onchange = updateDlgFields;
 $('f-proxy-type').onchange = updateDlgFields;
+$('f-jump').oninput = updateDlgFields;
+$('f-jump-auth').onchange = updateDlgFields;
 $('t-autologin').onchange = updateDlgFields;
 $('btn-dlg-cancel').onclick = () => $('dlg-mask').classList.add('hidden');
 

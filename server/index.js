@@ -6,6 +6,7 @@ const path = require('path');
 const os = require('os');
 const { randomUUID, randomBytes } = require('crypto');
 const { WebSocketServer } = require('ws');
+const { createBackup, readBackup, parseOpenSSHConfig } = require('./session-backup');
 
 const ROOT = path.join(__dirname, '..');
 const WEB = path.join(ROOT, 'web');
@@ -15,9 +16,17 @@ const MAX_SFTP_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
 
 const connections = new Map();   // connId -> BaseConnection
 const liveByConfig = new Map();  // 配置指纹 -> connId (去重: 同一配置只开一个)
+// Enables an isolated local SFTP fixture for transport integration tests only.
+// The variable is intentionally undocumented for end users and is never set by
+// normal launchers or release workflows.
+if (process.env.SSHTERM_TEST_SFTP_ROOT) {
+  const { installLocalSftpFixture } = require('./test-sftp-fixture');
+  installLocalSftpFixture(connections, process.env.SSHTERM_TEST_SFTP_ROOT);
+}
 // P2 FIX: SFTP 上传并发控制
 const MAX_CONCURRENT_UPLOADS = 3;  // 最大并发上传数
 let activeUploads = 0;
+const activeUploadKeys = new Set(); // connId:remotePath; prevents overlapping r+/w writes
 // A random per-process capability prevents arbitrary web pages from controlling
 // the loopback service.  Loopback is not an authentication boundary by itself.
 const CLIENT_TOKEN = randomBytes(32).toString('base64url');
@@ -55,6 +64,7 @@ const MAX_LOGS = 1000;
 const logs = [];
 // 每次启动生成新的日志文件: ~/.sshterm/logs/sshterm-YYYYMMDD-HHMMSS.log (关闭后保留)
 const LOG_DIR = path.join(CONN_DIR, 'logs');
+const SESSION_LOG_DIR = path.join(CONN_DIR, 'session-logs');
 function newLogFile() {
   const d = new Date();
   const ts = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}-${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}${String(d.getSeconds()).padStart(2, '0')}`;
@@ -86,33 +96,31 @@ function log(level, msg) {
 // ---------- 会话持久化 ----------
 let sessions = loadSessions();
 
-// P3-4 FIX: session-logs 目录清理策略
-const MAX_LOG_FILES = 100;  // 最多保留 100 个日志文件
-const MAX_LOG_AGE_DAYS = 30; // 最多保留 30 天
-function cleanupOldLogs() {
+// Retain both operation logs and terminal transcripts.  Session transcripts
+// used to grow without bound because only LOG_DIR was cleaned.
+const MAX_LOG_FILES = 100;
+const MAX_LOG_AGE_DAYS = 30;
+function cleanupLogDirectory(dir, matcher) {
   try {
-    const files = fs.readdirSync(LOG_DIR, { withFileTypes: true })
-      .filter(f => f.isFile() && f.name.match(/^sshterm-\d{8}-\d{6}\.log$/))
-      .map(f => ({ name: f.name, path: path.join(LOG_DIR, f.name), mtime: fs.statSync(path.join(LOG_DIR, f.name)).mtime }))
-      .sort((a, b) => b.mtime - a.mtime);  // 最新的在前
-    // 删除超出数量限制的文件
-    if (files.length > MAX_LOG_FILES) {
-      for (let i = MAX_LOG_FILES; i < files.length; i++) {
-        fs.unlinkSync(files[i].path);
-        console.log(`[log-cleanup] 删除旧日志: ${files[i].name}`);
-      }
-    }
-    // 删除超过年龄限制的文件
+    const files = fs.readdirSync(dir, { withFileTypes: true })
+      .filter(f => f.isFile() && matcher.test(f.name))
+      .map(f => ({ name: f.name, path: path.join(dir, f.name), mtime: fs.statSync(path.join(dir, f.name)).mtime }))
+      .sort((a, b) => b.mtime - a.mtime);
     const cutoff = Date.now() - MAX_LOG_AGE_DAYS * 24 * 3600 * 1000;
-    for (const f of files) {
+    for (let i = MAX_LOG_FILES; i < files.length; i++) {
+      try { fs.unlinkSync(files[i].path); } catch {}
+    }
+    for (const f of files.slice(0, MAX_LOG_FILES)) {
       if (f.mtime.getTime() < cutoff) {
         fs.unlinkSync(f.path);
         console.log(`[log-cleanup] 删除过期日志: ${f.name} (${f.mtime.toISOString().split('T')[0]})`);
-      } else {
-        break;  // 已按时间排序，后面文件都较旧
       }
     }
   } catch (e) { /* 静默处理 */ }
+}
+function cleanupOldLogs() {
+  cleanupLogDirectory(LOG_DIR, /^sshterm-\d{8}-\d{6}\.log$/);
+  cleanupLogDirectory(SESSION_LOG_DIR, /\.log$/i);
 }
 // 启动时清理旧日志
 setTimeout(cleanupOldLogs, 1000);
@@ -125,8 +133,12 @@ function loadSessions() {
     // the session opts in to DPAPI-backed "remember password".
     let migrated = false;
     const clean = Object.fromEntries(Object.entries(raw).map(([id, s]) => {
-      const { password, passphrase, loginPass, ...safe } = s || {};
-      if ([password, passphrase, loginPass].some(v => v !== undefined)) migrated = true;
+      const { password, passphrase, loginPass, privateKey, proxy, jumpAuth, ...safe } = s || {};
+      const { password: proxyPassword, ...safeProxy } = proxy || {};
+      const { password: jumpPassword, privateKey: jumpPrivateKey, passphrase: jumpPassphrase, ...safeJumpAuth } = jumpAuth || {};
+      if ([password, passphrase, loginPass, privateKey, proxyPassword, jumpPassword, jumpPrivateKey, jumpPassphrase].some(v => v !== undefined)) migrated = true;
+      if (proxy) safe.proxy = safeProxy;
+      if (jumpAuth) safe.jumpAuth = safeJumpAuth;
       return [id, safe];
     }));
     if (migrated) {
@@ -137,7 +149,21 @@ function loadSessions() {
     const secrets = readSecrets();
     for (const [id, s] of Object.entries(clean)) {
       if (s.rememberPassword && secrets[id]) {
-        clean[id] = { ...s, ...secrets[id] };
+        const saved = secrets[id];
+        clean[id] = {
+          ...s,
+          password: saved.password,
+          passphrase: saved.passphrase,
+          loginPass: saved.loginPass,
+          privateKey: saved.privateKey,
+          proxy: s.proxy ? { ...s.proxy, ...(saved.proxyPassword ? { password: saved.proxyPassword } : {}) } : s.proxy,
+          jumpAuth: s.jumpAuth ? {
+            ...s.jumpAuth,
+            ...(saved.jumpPassword ? { password: saved.jumpPassword } : {}),
+            ...(saved.jumpPrivateKey ? { privateKey: saved.jumpPrivateKey } : {}),
+            ...(saved.jumpPassphrase ? { passphrase: saved.jumpPassphrase } : {}),
+          } : s.jumpAuth,
+        };
       }
     }
     return clean;
@@ -150,19 +176,32 @@ function saveSessions(data) {
     // Write DPAPI-backed secrets only for opted-in sessions
     const secrets = {};
     for (const [id, s] of Object.entries(data)) {
-      if (s.rememberPassword && (s.password || s.passphrase || s.loginPass || s.privateKey)) {
+      if (s.rememberPassword && (s.password || s.passphrase || s.loginPass || s.privateKey || s.proxy?.password ||
+          s.jumpAuth?.password || s.jumpAuth?.privateKey || s.jumpAuth?.passphrase)) {
         secrets[id] = {
           password: s.password,
           passphrase: s.passphrase,
           loginPass: s.loginPass,
           privateKey: s.privateKey,
+          proxyPassword: s.proxy?.password,
+          jumpPassword: s.jumpAuth?.password,
+          jumpPrivateKey: s.jumpAuth?.privateKey,
+          jumpPassphrase: s.jumpAuth?.passphrase,
         };
       }
     }
     writeSecrets(secrets);
     // Never write reusable credentials to disk in plain JSON.
     const diskData = Object.fromEntries(Object.entries(data).map(([id, s]) => {
-      const { password, passphrase, loginPass, privateKey, ...safe } = s;
+      const { password, passphrase, loginPass, privateKey, proxy, jumpAuth, ...safe } = s;
+      if (proxy) {
+        const { password: proxyPassword, ...safeProxy } = proxy;
+        safe.proxy = safeProxy;
+      }
+      if (jumpAuth) {
+        const { password: jumpPassword, privateKey: jumpPrivateKey, passphrase: jumpPassphrase, ...safeJumpAuth } = jumpAuth;
+        safe.jumpAuth = safeJumpAuth;
+      }
       return [id, safe];
     }));
     fs.writeFileSync(CONN_FILE, JSON.stringify(diskData, null, 2));
@@ -276,6 +315,32 @@ const server = http.createServer((req, res) => {
       return res.end('上传参数错误(连接或文件名无效)');
     }
     const remotePath = dir.endsWith('/') ? dir + name : `${dir}/${name}`;
+    const uploadKey = `${conn.id}:${remotePath}`;
+    if (activeUploads >= MAX_CONCURRENT_UPLOADS) {
+      res.writeHead(429, { 'Content-Type': 'text/plain; charset=utf-8', 'Retry-After': '2' });
+      return res.end('上传队列繁忙，请稍后重试');
+    }
+    if (activeUploadKeys.has(uploadKey)) {
+      res.writeHead(409, { 'Content-Type': 'text/plain; charset=utf-8' });
+      return res.end('同一远端文件正在上传');
+    }
+    activeUploads++;
+    activeUploadKeys.add(uploadKey);
+    let finished = false;
+    const finish = (status, message, payload) => {
+      if (finished) return;
+      finished = true;
+      activeUploads--;
+      activeUploadKeys.delete(uploadKey);
+      if (res.writableEnded) return;
+      if (payload) {
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(payload));
+      } else {
+        res.writeHead(status, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end(message);
+      }
+    };
     const sftp = conn.getSftpInst();
     console.log(`[sftp-upload] ${remotePath} offset=${offset}`);
     // 递归创建父目录 (文件夹上传的子目录可能不存在)
@@ -291,52 +356,56 @@ const server = http.createServer((req, res) => {
       next(0);
     });
     mkdirs(parent).then(() => {
-          // offset>0 用 r+ 模式续写, offset=0 用 w 新建
-          const ws = sftp.createWriteStream(remotePath, {
-            flags: offset > 0 ? 'r+' : 'w',
-            start: offset,
-          });
-          let received = 0;
-          req.on('data', (chunk) => {
-            received += chunk.length;
-            if (received > MAX_SFTP_UPLOAD_BYTES) {
-              req.destroy(new Error('上传文件超过大小上限'));
-              ws.destroy(new Error('上传文件超过大小上限'));
-            }
-          });
-          req.pipe(ws);
-          ws.on('close', () => {
-            // P1-2 FIX: 断点续传后校验文件完整性
-            // 计算文件 SHA-256 哈希，前端可通过 /api/sftp/checksum 再校验
-            const crypto = require('crypto');
-            const hash = crypto.createHash('sha256');
-            const rs = conn.getSftpInst().createReadStream(remotePath);
-            rs.on('data', d => hash.update(d));
-            rs.on('error', (e) => {
-              console.log('[sftp-upload] 校验错误:', e.message);
-              res.writeHead(500);
-              res.end(`校验文件哈希失败: ${e.message}`);
-            });
-            rs.on('end', () => {
-              if (!res.writableEnded) {
-                const fileHash = hash.digest('hex');
-                console.log(`[sftp-upload] ${remotePath} 完成, size=${received}, hash=${fileHash.substring(0, 16)}...`);
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ 
-                  ok: true, 
-                  size: received, 
-                  hash: fileHash,
-                  message: offset > 0 ? '续写完成' : '上传完成'
-                }));
-              }
-            });
-          });
-          ws.on('error', (e) => {
-            console.log('[sftp-upload] 错误:', e.message);
-            try { res.writeHead(500); res.end(e.message); } catch (err) { /* 忽略 */ }
-          });
-          req.on('error', () => { try { ws.destroy(); } catch (e) { /* 忽略 */ } });
+      // offset>0 用 r+ 模式续写, offset=0 用 w 新建。一个远端文件同
+      // 一时间仅允许一个请求，避免分块上传之间的创建/覆盖竞态。
+      const ws = sftp.createWriteStream(remotePath, {
+        flags: offset > 0 ? 'r+' : 'w',
+        start: offset,
+      });
+      let received = 0;
+      let aborted = false;
+      req.setTimeout(30 * 60 * 1000, () => {
+        aborted = true;
+        req.destroy(new Error('上传超时'));
+        ws.destroy(new Error('上传超时'));
+      });
+      req.on('data', (chunk) => {
+        received += chunk.length;
+        if (received > MAX_SFTP_UPLOAD_BYTES) {
+          aborted = true;
+          req.destroy(new Error('上传文件超过大小上限'));
+          ws.destroy(new Error('上传文件超过大小上限'));
+        }
+      });
+      req.on('aborted', () => { aborted = true; try { ws.destroy(); } catch {} });
+      req.on('error', () => { aborted = true; try { ws.destroy(); } catch {} });
+      req.pipe(ws);
+      ws.on('close', () => {
+        if (aborted) return finish(499, '上传已取消或超时');
+        // A complete remote hash is calculated exactly once, after the only
+        // writer closes. It is used by the UI to verify the local file.
+        const crypto = require('crypto');
+        const hash = crypto.createHash('sha256');
+        const rs = conn.getSftpInst().createReadStream(remotePath);
+        rs.on('data', d => hash.update(d));
+        rs.on('error', (e) => {
+          console.log('[sftp-upload] 校验错误:', e.message);
+          finish(500, `校验文件哈希失败: ${e.message}`);
         });
+        rs.on('end', () => {
+          const fileHash = hash.digest('hex');
+          console.log(`[sftp-upload] ${remotePath} 完成, size=${received}, hash=${fileHash.substring(0, 16)}...`);
+          finish(200, '', {
+            ok: true, size: received, hash: fileHash,
+            message: offset > 0 ? '续写完成' : '上传完成',
+          });
+        });
+      });
+      ws.on('error', (e) => {
+        console.log('[sftp-upload] 错误:', e.message);
+        finish(500, e.message);
+      });
+    }).catch((e) => finish(500, `创建远端目录失败: ${e.message}`));
     return;
   }
 
@@ -406,7 +475,9 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // SFTP 文件下载 (流式): /api/sftp/download?conn=<id>&path=<远端路径>
+  // SFTP file download with single-range support.  Range lets an interrupted
+  // browser download continue without asking the remote server to resend the
+  // bytes already received.
   if (url.startsWith('/api/sftp/download')) {
     const qs = new URLSearchParams(req.url.split('?')[1] || '');
     const conn = connections.get(parseInt(qs.get('conn'), 10));
@@ -415,15 +486,49 @@ const server = http.createServer((req, res) => {
       res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
       return res.end('SFTP 通道未就绪(连接可能已断开)');
     }
-    const name = path.basename(rpath);
-    res.writeHead(200, {
-      'Content-Type': 'application/octet-stream',
-      'Content-Disposition': `attachment; filename="${encodeURIComponent(name)}"`,
-      'Cache-Control': 'no-cache',
+    const sftp = conn.getSftpInst();
+    sftp.stat(rpath, (statErr, st) => {
+      if (statErr || !st || !Number.isSafeInteger(st.size)) {
+        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+        return res.end('远端文件不存在或无法读取');
+      }
+      const size = st.size;
+      const name = path.basename(rpath);
+      let start = 0;
+      let end = Math.max(0, size - 1);
+      let partial = false;
+      const range = req.headers.range;
+      if (range) {
+        const m = /^bytes=(\d+)-(\d*)$/.exec(range);
+        if (!m) {
+          res.writeHead(416, { 'Content-Range': `bytes */${size}` });
+          return res.end();
+        }
+        start = Number(m[1]);
+        end = m[2] ? Number(m[2]) : end;
+        if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start >= size || end < start) {
+          res.writeHead(416, { 'Content-Range': `bytes */${size}` });
+          return res.end();
+        }
+        end = Math.min(end, size - 1);
+        partial = true;
+      }
+      const length = size === 0 ? 0 : end - start + 1;
+      const headers = {
+        'Content-Type': 'application/octet-stream',
+        'Content-Disposition': `attachment; filename="${encodeURIComponent(name)}"`,
+        'Cache-Control': 'no-cache',
+        'Accept-Ranges': 'bytes',
+        'Content-Length': String(length),
+      };
+      if (partial) headers['Content-Range'] = `bytes ${start}-${end}/${size}`;
+      res.writeHead(partial ? 206 : 200, headers);
+      if (size === 0) return res.end();
+      const rs = sftp.createReadStream(rpath, { start, end });
+      rs.on('error', (e) => { if (!res.writableEnded) res.destroy(e); });
+      req.on('aborted', () => { try { rs.destroy(); } catch {} });
+      rs.pipe(res);
     });
-    const rs = conn.getSftpInst().createReadStream(rpath);
-    rs.on('error', (e) => { res.end(`\n[下载错误] ${e.message}`); });
-    rs.pipe(res);
     return;
   }
 
@@ -528,10 +633,45 @@ function send(ws, obj) {
 }
 function sanitize(s) {
   // 返回给前端时剥除敏感字段 (密码/私钥/口令)
-  const { password, privateKey, passphrase, loginPass, ...rest } = s;
+  const { password, privateKey, passphrase, loginPass, proxy, jumpAuth, ...rest } = s;
+  if (proxy) {
+    const { password: proxyPassword, ...safeProxy } = proxy;
+    rest.proxy = safeProxy;
+  }
+  if (jumpAuth) {
+    const { password: jumpPassword, privateKey: jumpPrivateKey, passphrase: jumpPassphrase, ...safeJumpAuth } = jumpAuth;
+    rest.jumpAuth = safeJumpAuth;
+  }
   return rest;
 }
 function sessionsList() { return Object.values(sessions).map(sanitize); }
+function importSessionEntries(entries, source) {
+  if (!Array.isArray(entries) || entries.length > 500) throw new Error('导入会话数量无效（最多 500 个）');
+  const names = new Set(Object.values(sessions).map(s => s.name));
+  const acceptedTypes = new Set(['ssh', 'telnet', 'serial']);
+  let count = 0;
+  for (const item of entries) {
+    if (!item || typeof item !== 'object' || !acceptedTypes.has(item.type)) continue;
+    const session = JSON.parse(JSON.stringify(item)); // drops hostile prototypes
+    let name = String(session.name || '').trim().slice(0, 120);
+    if (!name) continue;
+    const original = name;
+    let suffix = 2;
+    while (names.has(name)) name = `${original} (${suffix++})`;
+    names.add(name);
+    session.id = randomUUID();
+    session.name = name;
+    // Imported OpenSSH IdentityFile paths use the existing DPAPI-backed key
+    // path field; a portable backup retains its own rememberPassword choice.
+    if (source === 'openssh' && session.privateKey) session.rememberPassword = true;
+    sessions[session.id] = session;
+    count++;
+  }
+  if (!count) throw new Error('没有可导入的有效会话');
+  saveSessions(sessions);
+  log('audit', `导入 ${count} 个会话（${source}）`);
+  return count;
+}
 function broadcast(obj) {
   for (const c of wss.clients) send(c, obj);
 }
@@ -555,6 +695,14 @@ async function handle(ws, m) {
         // 编辑保存: 前端表单密码框留空 = 不修改, 保留存储中的敏感字段
         for (const k of ['password', 'privateKey', 'passphrase', 'loginPass']) {
           if (s[k] === undefined || s[k] === '') s[k] = sessions[s.id][k];
+        }
+        if (s.proxy && !s.proxy.password && sessions[s.id].proxy?.password) {
+          s.proxy = { ...s.proxy, password: sessions[s.id].proxy.password };
+        }
+        if (s.jumpAuth && sessions[s.id].jumpAuth) {
+          for (const k of ['password', 'privateKey', 'passphrase']) {
+            if (!s.jumpAuth[k] && sessions[s.id].jumpAuth[k]) s.jumpAuth[k] = sessions[s.id].jumpAuth[k];
+          }
         }
         sessions[s.id] = s;
         log('info', `更新会话「${s.name}」`);
@@ -591,6 +739,25 @@ async function handle(ws, m) {
     }
     case 'logs': {
       send(ws, { type: 'logs', list: logs.slice(-300), file: LOG_FILE });
+      break;
+    }
+    case 'export-sessions': {
+      const data = createBackup(Object.values(sessions), m.passphrase);
+      const stamp = new Date().toISOString().slice(0, 10);
+      log('audit', `导出 ${Object.keys(sessions).length} 个会话（加密备份）`);
+      send(ws, { type: 'session-export', filename: `sshterm-backup-${stamp}.json`, data });
+      break;
+    }
+    case 'import-sessions-backup': {
+      const count = importSessionEntries(readBackup(m.data, m.passphrase), 'backup');
+      send(ws, { type: 'sessions', list: sessionsList() });
+      send(ws, { type: 'session-import', source: 'backup', count });
+      break;
+    }
+    case 'import-openssh-config': {
+      const count = importSessionEntries(parseOpenSSHConfig(m.data), 'openssh');
+      send(ws, { type: 'sessions', list: sessionsList() });
+      send(ws, { type: 'session-import', source: 'openssh', count });
       break;
     }
     case 'serial-force-free': {
@@ -710,6 +877,14 @@ async function handle(ws, m) {
         const stored = sessions[sess.id];
         for (const k of ['password', 'privateKey', 'passphrase', 'loginPass']) {
           if (!sess[k]) sess[k] = stored[k];
+        }
+        if (sess.proxy && !sess.proxy.password && stored.proxy?.password) {
+          sess.proxy = { ...sess.proxy, password: stored.proxy.password };
+        }
+        if (sess.jumpAuth && stored.jumpAuth) {
+          for (const k of ['password', 'privateKey', 'passphrase']) {
+            if (!sess.jumpAuth[k] && stored.jumpAuth[k]) sess.jumpAuth[k] = stored.jumpAuth[k];
+          }
         }
       }
       await doConnect(ws, sess, m.id);
@@ -833,7 +1008,6 @@ async function doConnect(ws, cfg, tabId) {
   log('info', `连接 ${cfg.name || cfg.type}:${cfg.host || cfg.port || cfg.port} (${cfg.type})`);
 
   // 终端输出自动落盘: ~/.sshterm/session-logs/<会话名>-<时间戳>.log
-  const SESSION_LOG_DIR = path.join(CONN_DIR, 'session-logs');
   const enc = cfg.encoding || 'utf-8';
   const safeName = (cfg.name || cfg.type).replace(/[\\/:*?"<>|]/g, '_');
   const sts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);

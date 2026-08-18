@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  static-and-unit:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: node --check server/index.js
+      - run: node --check server/session-backup.js
+      - run: node --check server/dpapi.js
+      - run: node --check server/connections/ssh.js
+      - run: node --check server/connections/telnet.js
+      - run: node --check server/connections/serial.js
+      - run: node --check server/connections/proxy.js
+      - run: node --check server/connections/zmodem.js
+      - run: node --check web/app.js
+      - run: node tests/static_security_contract.js
+      - run: node tests/verify_new_features.js
+      - run: node tests/proxy_socks5_auth.js
+      - run: node tests/session_backup.js
+      - run: node tests/integration_session_transfer.js
+      - run: node tests/integration_sftp_transport.js
+      - run: node tests/ui_workspace_credentials.js
+      - run: npm audit --omit=dev
