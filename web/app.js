@@ -1058,6 +1058,11 @@ function renderSftpList(entries) {
         });
         const blob = await download;
         if (blob && blob.size > 0) {
+          if (!e.isDir) {
+            const verification = await verifyDownloadedSha256(sftpConnId, full, blob);
+            if (verification === 'mismatch') throw new Error('SHA-256 校验失败，文件未保存');
+            if (verification === 'verified') setStatus('SHA-256 校验通过，正在保存文件');
+          }
           saveBlob(blob, dlName);
           doneProgress(`✅ 已下载: ${dlName} (${fmtSize(blob.size)})`);
           updateTransferTask(task, 100, 'done', '完成');
@@ -1953,6 +1958,17 @@ function xhrDownload(url, onProg) {
     xhr.send();
   });
 }
+async function verifyDownloadedSha256(connId, remotePath, blob) {
+  // WebCrypto is one-shot; avoid duplicating very large files in renderer
+  // memory. The server still protects transfer integrity through Range retry.
+  if (!window.crypto?.subtle || blob.size > 256 * 1024 * 1024) return 'skipped';
+  const resp = await fetch(apiUrl('/api/sftp/checksum', { conn: connId, path: remotePath }));
+  if (!resp.ok) throw new Error('无法读取远端 SHA-256');
+  const expected = (await resp.json()).hash;
+  const digest = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer());
+  const actual = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+  return actual === expected ? 'verified' : 'mismatch';
+}
 let activeDownload = null;
 function cancelActiveDownload() {
   if (activeDownload) activeDownload.controller.abort();
@@ -1988,6 +2004,7 @@ async function resumableDownload(url, onProg, retries = 3) {
         }
         return new Blob(chunks, { type: 'application/octet-stream' });
       } catch (err) {
+        if (received && err.name !== 'AbortError') setStatus(`下载中断，已从 ${fmtSize(received)} 处自动续传 ${Math.min(attempt + 1, retries)} 次`);
         if (err.name === 'AbortError' || attempt >= retries) throw err;
         await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
       } finally {
