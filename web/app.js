@@ -101,7 +101,10 @@ ws.onmessage = (ev) => {
 function send(obj) { if (ws.readyState === 1) ws.send(JSON.stringify(obj)); }
 function log(msg) { send({ type: 'log', msg }); }
 function sendInput(tabId, str) {
-  const bytes = new TextEncoder().encode(str);
+  // 支持 Uint8Array (HEX 模式传递的二进制数据)
+  const bytes = str instanceof Uint8Array || str instanceof ArrayBuffer
+    ? new Uint8Array(str)
+    : new TextEncoder().encode(str);
   const frame = new Uint8Array(2 + bytes.length);
   frame[0] = tabId & 0xff; frame[1] = (tabId >> 8) & 0xff;
   frame.set(bytes, 2);
@@ -1018,7 +1021,40 @@ $('search-next').onclick = () => doSearch(1);
 $('search-prev').onclick = () => doSearch(-1);
 $('search-close').onclick = closeSearch;
 
-// ---------- 定时发送 (串口/SSH/Telnet 通用, 入口在下拉菜单 ☰) ----------
+// ---------- SFTP 面板宽度调节 ----------
+let sftpDragging = false;
+let sftpStartX = 0;
+let sftpStartWidth = 0;
+function initSftpDragger() {
+  const divider = $('sftp-divider');
+  if (!divider) return;
+  divider.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    sftpDragging = true;
+    sftpStartX = e.clientX;
+    const panel = document.getElementById('sftp-panel');
+    sftpStartWidth = panel.offsetWidth;
+    divider.classList.add('dragging');
+    const onMouseMove = (ev) => {
+      if (!sftpDragging) return;
+      const delta = ev.clientX - sftpStartX;
+      const newWidth = Math.max(280, Math.min(600, sftpStartWidth + delta));
+      const panel = document.getElementById('sftp-panel');
+      panel.style.width = newWidth + 'px';
+      $('terms').style.marginRight = '0';
+    };
+    const onMouseUp = () => {
+      sftpDragging = false;
+      divider.classList.remove('dragging');
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    };
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  });
+}
+// 初始化拖拽 (页面加载后)
+setTimeout(initSftpDragger, 100);
 let _timerHandle = null;
 $('btn-tm-cancel').onclick = () => $('dlg-timer-mask').classList.add('hidden');
 $('btn-tm-start').onclick = () => {
@@ -1032,10 +1068,10 @@ $('btn-tm-start').onclick = () => {
     const t = tabs.find(x => x.id === activeTabId);
     if (!t || t.state !== 'connected') return;
     if ($('tm-hex').checked) {
-      // HEX 发送: "AB CD EF" → bytes
-      const bytes = content.split(/[\s,]+/).filter(Boolean).map(h => parseInt(h, 16));
-      if (bytes.every(b => !isNaN(b))) sendInput(t.id, String.fromCharCode(...bytes));
-    } else {
+          // HEX 发送: "AB CD EF" → bytes (Uint8Array, 避免 UTF-8 编码导致字节损坏)
+          const byteArr = content.split(/[\s,]+/).filter(Boolean).map(h => parseInt(h, 16));
+          if (byteArr.every(b => !isNaN(b))) sendInput(t.id, new Uint8Array(byteArr));
+        } else {
       sendInput(t.id, content);
     }
   }, interval);

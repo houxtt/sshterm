@@ -159,12 +159,25 @@ button.mini { padding: 2px 8px; font-size: 11px; }
 
 /* SFTP 面板 */
 #sftp-panel {
-  position: absolute; top: 0; right: 0; bottom: 0; width: 360px;
+  position: absolute; top: 0; right: 0; bottom: 0; min-width: 280px; max-width: 600px;  /* P2 FIX: 可拉伸宽度 */
   background: #16161e; border-left: 1px solid #2a2b3a; z-index: 5;
   display: flex; flex-direction: column;
 }
 #sftp-panel.hidden { display: none; }
-#terms.sftp-open { margin-right: 360px; transition: margin-right .15s; }
+#terms.sftp-open { margin-right: 0; transition: margin 0 .15s; }
+
+/* P2 FIX: SFTP 面板分隔线 - 可拖拽调整宽度 */
+#sftp-divider {
+  position: absolute; top: 0; right: 0; bottom: 0; width: 6px;
+  background: #2a2b3a; cursor: ew-resize; z-index: 10;
+  display: flex; align-items: center; justify-content: center;
+}
+#sftp-divider::before {
+  content: '⏱'; font-size: 12px; color: #565f89;
+}
+#sftp-divider.dragging {
+  background: #3b82f6; opacity: 0.8;
+}
 .sftp-head {
   display: flex; align-items: center; gap: 4px; padding: 6px;
   border-bottom: 1px solid #2a2b3a;

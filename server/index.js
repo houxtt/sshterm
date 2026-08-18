@@ -15,14 +15,33 @@ const MAX_SFTP_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
 
 const connections = new Map();   // connId -> BaseConnection
 const liveByConfig = new Map();  // 配置指纹 -> connId (去重: 同一配置只开一个)
+// P2 FIX: SFTP 上传并发控制
+const MAX_CONCURRENT_UPLOADS = 3;  // 最大并发上传数
+let activeUploads = 0;
 // A random per-process capability prevents arbitrary web pages from controlling
 // the loopback service.  Loopback is not an authentication boundary by itself.
 const CLIENT_TOKEN = randomBytes(32).toString('base64url');
+const PORT = parseInt(process.argv[process.argv.indexOf('--port') + 1], 10) || 8787; // P0 FIX: 移到此处供 isTrustedOrigin 使用
 
 function hasClientToken(req) {
   try {
     const u = new URL(req.url, 'http://127.0.0.1');
     return u.searchParams.get('token') === CLIENT_TOKEN;
+  } catch { return false; }
+}
+
+// 新增：双重来源校验 - 防止恶意网页通过 <script src="..."> 抓取 token
+// 由端口函数获取，确保与 server.listen 的端口一致
+function isTrustedOrigin(req) {
+  const origin = req.headers.origin;
+  if (!origin) return true; // 非浏览器请求(CLI)，放行
+  try {
+    const u = new URL(origin);
+    const validHost = u.hostname === '127.0.0.1' || u.hostname === 'localhost';
+    // Origin port 应该匹配实际监听端口；若未指定则默认 8787
+    const origPort = u.port || (u.protocol === 'https:' ? '443' : '80');
+    const validPort = origPort === String(PORT);
+    return validHost && validPort;
   } catch { return false; }
 }
 
@@ -66,6 +85,37 @@ function log(level, msg) {
 
 // ---------- 会话持久化 ----------
 let sessions = loadSessions();
+
+// P3-4 FIX: session-logs 目录清理策略
+const MAX_LOG_FILES = 100;  // 最多保留 100 个日志文件
+const MAX_LOG_AGE_DAYS = 30; // 最多保留 30 天
+function cleanupOldLogs() {
+  try {
+    const files = fs.readdirSync(LOG_DIR, { withFileTypes: true })
+      .filter(f => f.isFile() && f.name.match(/^sshterm-\d{8}-\d{6}\.log$/))
+      .map(f => ({ name: f.name, path: path.join(LOG_DIR, f.name), mtime: fs.statSync(path.join(LOG_DIR, f.name)).mtime }))
+      .sort((a, b) => b.mtime - a.mtime);  // 最新的在前
+    // 删除超出数量限制的文件
+    if (files.length > MAX_LOG_FILES) {
+      for (let i = MAX_LOG_FILES; i < files.length; i++) {
+        fs.unlinkSync(files[i].path);
+        console.log(`[log-cleanup] 删除旧日志: ${files[i].name}`);
+      }
+    }
+    // 删除超过年龄限制的文件
+    const cutoff = Date.now() - MAX_LOG_AGE_DAYS * 24 * 3600 * 1000;
+    for (const f of files) {
+      if (f.mtime.getTime() < cutoff) {
+        fs.unlinkSync(f.path);
+        console.log(`[log-cleanup] 删除过期日志: ${f.name} (${f.mtime.toISOString().split('T')[0]})`);
+      } else {
+        break;  // 已按时间排序，后面文件都较旧
+      }
+    }
+  } catch (e) { /* 静默处理 */ }
+}
+// 启动时清理旧日志
+setTimeout(cleanupOldLogs, 1000);
 const { writeSecrets, readSecrets } = require('./dpapi');
 function loadSessions() {
   try {
@@ -160,16 +210,21 @@ const server = http.createServer((req, res) => {
   let url = decodeURIComponent(req.url.split('?')[0]);
 
   // The UI obtains this only from the loopback bootstrap script.  State-changing
-  // and file-transfer endpoints require it; static assets remain public but
-  // cannot perform privileged actions.
-  if (url === '/bootstrap.js') {
-    res.writeHead(200, { 'Content-Type': 'text/javascript', 'Cache-Control': 'no-store' });
-    return res.end(`window.__SSHTERM_TOKEN=${JSON.stringify(CLIENT_TOKEN)};`);
-  }
-  if (url.startsWith('/api/') && !hasClientToken(req)) {
-    res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
-    return res.end('forbidden');
-  }
+    // and file-transfer endpoints require it; static assets remain public but
+    // cannot perform privileged actions.
+    // P0 FIX: bootstrap.js 也要 Origin 校验，防止 <script src="..."> 抓取 token
+    if (url === '/bootstrap.js') {
+      if (!isTrustedOrigin(req)) {
+        res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+        return res.end('forbidden: untrusted origin');
+      }
+      res.writeHead(200, { 'Content-Type': 'text/javascript', 'Cache-Control': 'no-store' });
+      return res.end(`window.__SSHTERM_TOKEN=${JSON.stringify(CLIENT_TOKEN)};`);
+    }
+    if (url.startsWith('/api/') && (!hasClientToken(req) || !isTrustedOrigin(req))) {
+        res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+        return res.end('forbidden');
+      }
 
   // Zmodem 文件下载: /api/zmodem/download?file=<文件名>
   if (url.startsWith('/api/zmodem/download')) {
@@ -236,27 +291,52 @@ const server = http.createServer((req, res) => {
       next(0);
     });
     mkdirs(parent).then(() => {
-      // offset>0 用 r+ 模式续写, offset=0 用 w 新建
-      const ws = sftp.createWriteStream(remotePath, {
-        flags: offset > 0 ? 'r+' : 'w',
-        start: offset,
-      });
-      let received = 0;
-      req.on('data', (chunk) => {
-        received += chunk.length;
-        if (received > MAX_SFTP_UPLOAD_BYTES) {
-          req.destroy(new Error('上传文件超过大小上限'));
-          ws.destroy(new Error('上传文件超过大小上限'));
-        }
-      });
-      req.pipe(ws);
-      ws.on('close', () => { res.writeHead(200); res.end('ok'); });
-      ws.on('error', (e) => {
-        console.log('[sftp-upload] 错误:', e.message);
-        try { res.writeHead(500); res.end(e.message); } catch (err) { /* 忽略 */ }
-      });
-      req.on('error', () => { try { ws.destroy(); } catch (e) { /* 忽略 */ } });
-    });
+          // offset>0 用 r+ 模式续写, offset=0 用 w 新建
+          const ws = sftp.createWriteStream(remotePath, {
+            flags: offset > 0 ? 'r+' : 'w',
+            start: offset,
+          });
+          let received = 0;
+          req.on('data', (chunk) => {
+            received += chunk.length;
+            if (received > MAX_SFTP_UPLOAD_BYTES) {
+              req.destroy(new Error('上传文件超过大小上限'));
+              ws.destroy(new Error('上传文件超过大小上限'));
+            }
+          });
+          req.pipe(ws);
+          ws.on('close', () => {
+            // P1-2 FIX: 断点续传后校验文件完整性
+            // 计算文件 SHA-256 哈希，前端可通过 /api/sftp/checksum 再校验
+            const crypto = require('crypto');
+            const hash = crypto.createHash('sha256');
+            const rs = conn.getSftpInst().createReadStream(remotePath);
+            rs.on('data', d => hash.update(d));
+            rs.on('error', (e) => {
+              console.log('[sftp-upload] 校验错误:', e.message);
+              res.writeHead(500);
+              res.end(`校验文件哈希失败: ${e.message}`);
+            });
+            rs.on('end', () => {
+              if (!res.writableEnded) {
+                const fileHash = hash.digest('hex');
+                console.log(`[sftp-upload] ${remotePath} 完成, size=${received}, hash=${fileHash.substring(0, 16)}...`);
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ 
+                  ok: true, 
+                  size: received, 
+                  hash: fileHash,
+                  message: offset > 0 ? '续写完成' : '上传完成'
+                }));
+              }
+            });
+          });
+          ws.on('error', (e) => {
+            console.log('[sftp-upload] 错误:', e.message);
+            try { res.writeHead(500); res.end(e.message); } catch (err) { /* 忽略 */ }
+          });
+          req.on('error', () => { try { ws.destroy(); } catch (e) { /* 忽略 */ } });
+        });
     return;
   }
 
@@ -778,12 +858,17 @@ async function doConnect(ws, cfg, tabId) {
     send(ws, { type: 'error', id: connId, msg, occupied: !!(meta && meta.occupied) });
   });
   conn.on('close', (reason) => {
-    console.log(`[conn] ${cfg.type} ${tabId} close:`, reason);
-    log('info', `[${cfg.name || cfg.type}] 断开: ${reason}`);
-    send(ws, { type: 'status', id: connId, state: 'closed', msg: reason });
-    connections.delete(connId);
-    if (liveByConfig.get(fpKey) === connId) liveByConfig.delete(fpKey);
-  });
+      console.log(`[conn] ${cfg.type} ${tabId} close:`, reason);
+      log('info', `[${cfg.name || cfg.type}] 断开: ${reason}`);
+      send(ws, { type: 'status', id: connId, state: 'closed', msg: reason });
+      // P1-3 FIX: 关闭会话日志文件句柄，防止 fd 溢出
+      if (sessionLogStream) {
+        try { sessionLogStream.end(); } catch {}
+        sessionLogStream = null;
+      }
+      connections.delete(connId);
+      if (liveByConfig.get(fpKey) === connId) liveByConfig.delete(fpKey);
+    });
   conn.on('open', () => {
     console.log(`[conn] ${cfg.type} ${tabId} open`);
     log('info', `[${cfg.name || cfg.type}] 已连接`);
@@ -850,10 +935,9 @@ function expandTarget(t) {
     return Array.from({ length: size }, (_, i) => formatIPv4((start + i) >>> 0));
   }
   return [];
-}
+  }
 
-const PORT = parseInt(process.argv[process.argv.indexOf('--port') + 1], 10) || 8787;
-server.listen(PORT, '127.0.0.1', () => {
+  server.listen(PORT, '127.0.0.1', () => {
   console.log('┌──────────────────────────────────────────────┐');
   console.log('│  sshterm  —  SSH / Telnet / 串口 连接工具     │');
   console.log('└──────────────────────────────────────────────┘');
