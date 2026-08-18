@@ -320,9 +320,9 @@ class SSHConnection extends BaseConnection {
     const port = Number(localPort);
     if (!Number.isInteger(port) || port <= 0 || port > 65535) throw new Error('本地端口无效');
     const id = this._nextTunnelId++;
-    const targetPort = Number(remotePort);
-    if (!Number.isInteger(targetPort) || targetPort <= 0 || targetPort > 65535) throw new Error('目标端口无效');
-    if (!/^[a-zA-Z0-9_.:-]+$/.test(String(remoteHost || ''))) throw new Error('目标主机无效');
+    const targetPort = type === 'dynamic' ? 0 : Number(remotePort);
+    if (type !== 'dynamic' && (!Number.isInteger(targetPort) || targetPort <= 0 || targetPort > 65535)) throw new Error('目标端口无效');
+    if (type !== 'dynamic' && !/^[a-zA-Z0-9_.:-]+$/.test(String(remoteHost || ''))) throw new Error('目标主机无效');
 
     if (type === 'remote') {
       // Remote forwarding: the SSH server listens on targetPort and each
@@ -344,7 +344,68 @@ class SSHConnection extends BaseConnection {
       return { id, type, localPort: port, remoteHost: '127.0.0.1', remotePort: targetPort };
     }
 
-    if (type === 'dynamic') throw new Error('动态 SOCKS 转发正在重构，暂不可用');
+    if (type === 'dynamic') {
+      // RFC 1928 CONNECT-only SOCKS5 proxy.  It deliberately listens only on
+      // loopback, exposes no UDP/BIND modes, and forwards each approved TCP
+      // stream through the already authenticated SSH connection.
+      const tunnel = { id, type, localPort: port, remoteHost: 'SOCKS5', remotePort: 0, server: null };
+      await new Promise((resolve, reject) => {
+        const server = net.createServer(socket => {
+          let buffer = Buffer.alloc(0);
+          let stage = 'greeting';
+          const fail = () => { try { socket.end(Buffer.from([0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0])); } catch {} };
+          const onData = (chunk) => {
+            buffer = Buffer.concat([buffer, chunk]);
+            if (stage === 'greeting') {
+              if (buffer.length < 2) return;
+              const nMethods = buffer[1];
+              if (buffer.length < 2 + nMethods) return;
+              if (buffer[0] !== 0x05 || !buffer.subarray(2, 2 + nMethods).includes(0x00)) return fail();
+              buffer = buffer.subarray(2 + nMethods);
+              socket.write(Buffer.from([0x05, 0x00]));
+              stage = 'request';
+            }
+            if (stage !== 'request' || buffer.length < 4) return;
+            const [ver, cmd, , atyp] = buffer;
+            if (ver !== 0x05 || cmd !== 0x01) return fail();
+            let host, portOffset;
+            if (atyp === 0x01) { // IPv4
+              if (buffer.length < 10) return;
+              host = [...buffer.subarray(4, 8)].join('.'); portOffset = 8;
+            } else if (atyp === 0x03) { // domain
+              const len = buffer[4];
+              if (!len || buffer.length < 7 + len) return;
+              host = buffer.subarray(5, 5 + len).toString('utf8'); portOffset = 5 + len;
+            } else if (atyp === 0x04) { // IPv6
+              if (buffer.length < 22) return;
+              const groups = []; for (let i = 4; i < 20; i += 2) groups.push(buffer.readUInt16BE(i).toString(16));
+              host = groups.join(':'); portOffset = 20;
+            } else return fail();
+            const dstPort = buffer.readUInt16BE(portOffset);
+            if (!host || !dstPort || host.length > 253) return fail();
+            const rest = buffer.subarray(portOffset + 2);
+            socket.removeListener('data', onData);
+            this.client.forwardOut(socket.remoteAddress || '127.0.0.1', socket.remotePort || 0, host, dstPort, (err, stream) => {
+              if (err) return fail();
+              socket.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
+              if (rest.length) stream.write(rest);
+              socket.pipe(stream).pipe(socket);
+            });
+          };
+          socket.setTimeout(15000, () => socket.destroy());
+          socket.on('error', () => {});
+          socket.on('data', onData);
+        });
+        server.once('error', reject);
+        server.listen(port, '127.0.0.1', () => {
+          server.removeListener('error', reject);
+          tunnel.server = server;
+          this.tunnels.set(id, tunnel);
+          resolve();
+        });
+      });
+      return { id, type, localPort: port, remoteHost: 'SOCKS5', remotePort: 0 };
+    }
     if (type !== 'local') throw new Error('未知隧道类型');
     const tunnel = { id, type, localPort: port, remoteHost, remotePort: targetPort, server: null };
     await new Promise((resolve, reject) => {

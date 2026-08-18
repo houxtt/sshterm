@@ -502,6 +502,7 @@ async function handle(ws, m) {
       if (!/^COM\d+$/i.test(String(comPort || ''))) {
         return send(ws, { type: 'error', msg: '串口号无效' });
       }
+      log('audit', `请求提权释放串口 ${String(comPort).toUpperCase()}`);
       const ps1 = path.join(__dirname, 'free-serial.ps1');
       // Use an encoded, fixed PowerShell script and a validated COM value.
       // Never interpolate client-controlled text into a shell command line.
@@ -625,6 +626,7 @@ async function handle(ws, m) {
       if (!conn.resolveHostKey(m.accept === true)) {
         return send(ws, { type: 'error', id: m.id, msg: '主机密钥确认已过期' });
       }
+      log('audit', `SSH 主机密钥 ${m.accept === true ? '已信任' : '已拒绝'} (会话 ${m.id})`);
       break;
     }
     case 'serialports': {
@@ -698,9 +700,11 @@ async function handle(ws, m) {
             remotePort: m.remotePort,
           });
           send(ws, { type: 'tunnel', id: m.id, action: 'add', tunnel: item });
+          log('audit', `创建 ${item.type} 隧道: ${item.localPort} → ${item.remoteHost}:${item.remotePort}`);
         } else if (m.action === 'remove') {
           const ok = conn.removeTunnel ? conn.removeTunnel(m.tunnelId) : false;
           send(ws, { type: 'tunnel', id: m.id, action: 'remove', ok, tunnelId: m.tunnelId });
+          if (ok) log('audit', `删除 SSH 隧道 ${m.tunnelId}`);
         }
       } catch (e) {
         send(ws, { type: 'error', id: m.id, msg: `隧道操作失败: ${e.message}` });

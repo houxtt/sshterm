@@ -1560,8 +1560,12 @@ $('btn-tunnel-add').onclick = () => {
   const type = $('tn-type').value;
   const localPort = Number($('tn-local').value);
   const remoteHost = $('tn-remote').value.trim();
-  if (!localPort || !remoteHost) return setStatus('请填写端口和远端目标');
-  send({ type: 'tunnel', id: tab.id, action: 'add', tunnelType: type, localPort, remoteHost, remotePort: remoteHost.split(':')[1] || 80 });
+  if (!localPort || (type !== 'dynamic' && !remoteHost)) return setStatus(type === 'dynamic' ? '请填写本地 SOCKS 端口' : '请填写端口和远端目标');
+  const splitAt = remoteHost.lastIndexOf(':');
+  const host = splitAt > 0 ? remoteHost.slice(0, splitAt) : remoteHost;
+  const remotePort = splitAt > 0 ? Number(remoteHost.slice(splitAt + 1)) : 80;
+  send({ type: 'tunnel', id: tab.id, action: 'add', tunnelType: type, localPort,
+    remoteHost: type === 'dynamic' ? 'SOCKS5' : host, remotePort: type === 'dynamic' ? 0 : remotePort });
 };
 $('btn-killall').onclick = () => {
   if (!tabs.length) return setStatus('没有打开的会话');
