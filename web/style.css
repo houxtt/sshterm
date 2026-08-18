@@ -232,6 +232,11 @@ button.mini { padding: 2px 8px; font-size: 11px; }
 }
 #sftp-progress-fill.done { background: #22c55e; }
 #sftp-progress-text { color: #a9b1d6; white-space: nowrap; min-width: 120px; text-align: right; }
+#sftp-tasks { max-height: 96px; overflow:auto; padding:4px 10px; border-bottom:1px solid #2a2b3a; font-size:11px; }
+#sftp-tasks.hidden { display:none; }
+.sftp-task { display:flex; gap:6px; padding:2px 0; }
+.sftp-task-name { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.sftp-task.failed { color:#f87171; }.sftp-task.done { color:#86efac; }
 
 #dlg-occ-mask {
   position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 115;

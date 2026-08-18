@@ -944,12 +944,13 @@ function renderSftpList(entries) {
         ? apiUrl('/api/sftp/download-dir', { conn: sftpConnId, path: full })
         : apiUrl('/api/sftp/download', { conn: sftpConnId, path: full });
       const dlName = e.isDir ? e.name + '.zip' : e.name;
+      const task = newTransferTask('下载', dlName);
       showProgress(`下载: ${dlName} 准备中...`, 0);
       try {
         const blob = await xhrDownload(url, (loaded, total) => {
           if (total > 0) {
             showProgress(`下载: ${dlName} ${(loaded / total * 100).toFixed(0)}% (${fmtSize(loaded)}/${fmtSize(total)})`,
-              loaded / total * 100);
+              loaded / total * 100); updateTransferTask(task, loaded / total * 100);
           } else {
             showProgress(`下载: ${dlName} ${fmtSize(loaded)}`, undefined);
           }
@@ -957,12 +958,14 @@ function renderSftpList(entries) {
         if (blob && blob.size > 0) {
           saveBlob(blob, dlName);
           doneProgress(`✅ 已下载: ${dlName} (${fmtSize(blob.size)})`);
+          updateTransferTask(task, 100, 'done', '完成');
         } else {
           throw new Error('响应为空');
         }
       } catch (err) {
         $('sftp-progress').classList.add('hidden');
         $('sftp-status').textContent = `下载失败: ${err.message}`;
+        updateTransferTask(task, undefined, 'failed', '失败');
       }
     });
     el.appendChild(row);
@@ -1462,15 +1465,26 @@ function openLogPanel() {
   $('dlg-log-mask').classList.remove('hidden');
   send({ type: 'logs' });
 }
+let lastLogs = [], lastLogFile = '';
 function renderLogs(list, file) {
+  lastLogs = list; lastLogFile = file || lastLogFile;
   if (file) $('log-file').textContent = `日志文件: ${file}`;
   const el = $('log-list');
+  const saved = new Set(JSON.parse(localStorage.getItem('sshterm.log.bookmarks') || '[]'));
+  const onlyBookmarks = $('log-bookmarks')?.dataset.only === '1';
+  const visible = onlyBookmarks ? list.filter(l => saved.has(`${l.t}|${l.msg}`)) : list;
   el.innerHTML = list.length
-    ? list.map(l => `<div class="log-line ${l.level === 'error' ? 'log-err' : ''}">
+    ? visible.map(l => { const key = `${l.t}|${l.msg}`; return `<div class="log-line ${l.level === 'error' ? 'log-err' : ''}">
         <span class="log-t">${esc(l.t)}</span>
         <span class="log-lv">[${esc(l.level)}]</span>
-        <span class="log-msg">${esc(l.msg)}</span></div>`).join('')
+        <span class="log-msg">${esc(l.msg)}</span><button class="mini log-star" data-key="${esc(key)}">${saved.has(key) ? '★' : '☆'}</button></div>`; }).join('')
     : '<div class="muted">(暂无日志)</div>';
+  el.querySelectorAll('.log-star').forEach(btn => btn.onclick = () => {
+    const key = btn.dataset.key; const next = new Set(JSON.parse(localStorage.getItem('sshterm.log.bookmarks') || '[]'));
+    if (next.has(key)) next.delete(key); else next.add(key);
+    localStorage.setItem('sshterm.log.bookmarks', JSON.stringify([...next].slice(-200)));
+    renderLogs(list, file);
+  });
   el.scrollTop = el.scrollHeight;
 }
 
@@ -1564,6 +1578,10 @@ $('mi-capture').onclick = () => {
   }
 };
 $('log-close').onclick = () => $('dlg-log-mask').classList.add('hidden');
+$('log-bookmarks').onclick = () => {
+  const b = $('log-bookmarks'); b.dataset.only = b.dataset.only === '1' ? '0' : '1';
+  b.textContent = b.dataset.only === '1' ? '★ 显示全部' : '★ 仅看书签'; renderLogs(lastLogs, lastLogFile);
+};
 $('btn-sftp').onclick = toggleSftpPanel;
 $('btn-tunnel').onclick = () => {
   const tab = tabs.find(t => t.id === activeTabId);
@@ -1605,6 +1623,20 @@ $('sftp-up').onclick = () => {
 $('sftp-refresh').onclick = sftpLoad;
 // ---------- SFTP 传输 (XHR + 进度条, 大文件不卡页面) ----------
 let _progLast = 0;
+const transferTasks = [];
+function newTransferTask(kind, name) {
+  const task = { id: Date.now() + Math.random(), kind, name, state: 'running', pct: 0 };
+  transferTasks.unshift(task); renderTransferTasks(); return task;
+}
+function updateTransferTask(task, pct, state, detail = '') {
+  if (!task) return; if (pct !== undefined) task.pct = pct;
+  if (state) task.state = state; task.detail = detail; renderTransferTasks();
+}
+function renderTransferTasks() {
+  const el = $('sftp-tasks'); if (!el) return;
+  const list = transferTasks.slice(0, 12); el.classList.toggle('hidden', !list.length);
+  el.innerHTML = list.map(t => `<div class="sftp-task ${esc(t.state)}"><span>${t.kind}</span><span class="sftp-task-name">${esc(t.name)}</span><span>${t.state === 'running' ? Math.round(t.pct) + '%' : esc(t.detail || t.state)}</span></div>`).join('');
+}
 function showProgress(text, pct) {
   const now = Date.now();
   if (now - _progLast < 80 && pct !== undefined && pct < 100) return;  // 节流 80ms
@@ -1717,16 +1749,19 @@ $('sftp-upload').onclick = () => $('sftp-file-input').click();
 $('sftp-file-input').onchange = async (e) => {
   const file = e.target.files && e.target.files[0];
   if (!file) return;
+  const task = newTransferTask('上传', file.name);
   showProgress(`上传: ${file.name} 0%`, 0);
   try {
     const status = await uploadFileSmart(sftpConnId, sftpPath, file.name, file,
-      (p) => showProgress(`上传: ${file.name} ${(p * 100).toFixed(0)}%`, p * 100));
+      (p) => { showProgress(`上传: ${file.name} ${(p * 100).toFixed(0)}%`, p * 100); updateTransferTask(task, p * 100); });
     if (status !== 200) throw new Error('服务端返回 ' + status);
     doneProgress(`✅ 已上传: ${file.name}`);
+    updateTransferTask(task, 100, 'done', '完成');
     sftpLoad();
   } catch (err) {
     $('sftp-progress').classList.add('hidden');
     $('sftp-status').textContent = `上传失败: ${err.message}`;
+    updateTransferTask(task, undefined, 'failed', '失败');
   }
   e.target.value = '';
 };
