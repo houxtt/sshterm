@@ -1637,6 +1637,17 @@ function renderTransferTasks() {
   const list = transferTasks.slice(0, 12); el.classList.toggle('hidden', !list.length);
   el.innerHTML = list.map(t => `<div class="sftp-task ${esc(t.state)}"><span>${t.kind}</span><span class="sftp-task-name">${esc(t.name)}</span><span>${t.state === 'running' ? Math.round(t.pct) + '%' : esc(t.detail || t.state)}</span></div>`).join('');
 }
+async function sha256File(file) {
+  if (!window.crypto?.subtle || file.size > 256 * 1024 * 1024) return null;
+  const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
+  return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+async function verifyRemoteSha256(connId, remotePath, file) {
+  const local = await sha256File(file); if (!local) return '已上传（文件过大，跳过本地校验）';
+  const resp = await fetch(apiUrl('/api/sftp/checksum', { conn: connId, path: remotePath }));
+  if (!resp.ok) throw new Error('远端校验失败');
+  return (await resp.json()).hash === local ? 'SHA-256 已校验' : 'SHA-256 不匹配';
+}
 function showProgress(text, pct) {
   const now = Date.now();
   if (now - _progLast < 80 && pct !== undefined && pct < 100) return;  // 节流 80ms
@@ -1756,7 +1767,10 @@ $('sftp-file-input').onchange = async (e) => {
       (p) => { showProgress(`上传: ${file.name} ${(p * 100).toFixed(0)}%`, p * 100); updateTransferTask(task, p * 100); });
     if (status !== 200) throw new Error('服务端返回 ' + status);
     doneProgress(`✅ 已上传: ${file.name}`);
-    updateTransferTask(task, 100, 'done', '完成');
+    updateTransferTask(task, 100, 'running', '校验中');
+    const remotePath = sftpPath.endsWith('/') ? sftpPath + file.name : `${sftpPath}/${file.name}`;
+    const verified = await verifyRemoteSha256(sftpConnId, remotePath, file);
+    updateTransferTask(task, 100, verified.includes('不匹配') ? 'failed' : 'done', verified);
     sftpLoad();
   } catch (err) {
     $('sftp-progress').classList.add('hidden');

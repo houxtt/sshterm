@@ -260,6 +260,23 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // SHA-256 is calculated server-side from the remote SFTP stream so uploads
+  // can be verified without running shell commands on the remote machine.
+  if (url.startsWith('/api/sftp/checksum')) {
+    const qs = new URLSearchParams(req.url.split('?')[1] || '');
+    const conn = connections.get(parseInt(qs.get('conn'), 10));
+    const rpath = qs.get('path') || '';
+    if (!conn || !conn.getSftpInst() || !rpath) { res.writeHead(400); return res.end('SFTP 通道未就绪'); }
+    const hash = require('crypto').createHash('sha256');
+    const rs = conn.getSftpInst().createReadStream(rpath);
+    rs.on('data', d => hash.update(d));
+    rs.on('error', e => { res.writeHead(500); res.end(e.message); });
+    rs.on('end', () => {
+      if (!res.writableEnded) { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ algorithm: 'sha256', hash: hash.digest('hex') })); }
+    });
+    return;
+  }
+
   // SFTP 目录下载 (递归打包 zip, 流式): /api/sftp/download-dir?conn=<id>&path=<远端目录>
   if (url.startsWith('/api/sftp/download-dir')) {
     const qs = new URLSearchParams(req.url.split('?')[1] || '');
