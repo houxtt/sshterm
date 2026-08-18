@@ -971,12 +971,18 @@ async function handle(ws, m) {
             remoteHost: m.remoteHost,
             remotePort: m.remotePort,
           });
+          if (conn.config.id && sessions[conn.config.id]) {
+            const saved = sessions[conn.config.id];
+            saved.tunnels = [...(saved.tunnels || []), { type: item.type, localPort: item.localPort, remoteHost: item.remoteHost, remotePort: item.remotePort }];
+            saveSessions(sessions);
+          }
           send(ws, { type: 'tunnel', id: m.id, action: 'add', tunnel: item });
           log('audit', `创建 ${item.type} 隧道: ${item.localPort} → ${item.remoteHost}:${item.remotePort}`);
         } else if (m.action === 'remove') {
           const ok = conn.removeTunnel ? conn.removeTunnel(m.tunnelId) : false;
           send(ws, { type: 'tunnel', id: m.id, action: 'remove', ok, tunnelId: m.tunnelId });
           if (ok) log('audit', `删除 SSH 隧道 ${m.tunnelId}`);
+          if (ok && conn.config.id && sessions[conn.config.id]) { sessions[conn.config.id].tunnels = conn.listTunnels().map(t => ({ type: t.type, localPort: t.localPort, remoteHost: t.remoteHost, remotePort: t.remotePort })); saveSessions(sessions); }
         }
       } catch (e) {
         send(ws, { type: 'error', id: m.id, msg: `隧道操作失败: ${e.message}` });
@@ -1047,6 +1053,9 @@ async function doConnect(ws, cfg, tabId) {
     console.log(`[conn] ${cfg.type} ${tabId} open`);
     log('info', `[${cfg.name || cfg.type}] 已连接`);
     send(ws, { type: 'status', id: connId, state: 'connected', msg: '已连接' });
+    if (cfg.type === 'ssh' && Array.isArray(cfg.tunnels)) {
+      (async () => { for (const tunnel of cfg.tunnels) { try { await conn.addTunnel(tunnel); } catch (e) { log('error', `隧道恢复失败 ${tunnel.localPort}: ${e.message}`); send(ws, { type: 'tunnel-alert', id: connId, msg: `隧道恢复失败 ${tunnel.localPort}: ${e.message}` }); } } })();
+    }
   });
   conn.on('host-key', (info) => {
     send(ws, { type: 'host-key', id: connId, ...info });

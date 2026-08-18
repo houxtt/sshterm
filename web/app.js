@@ -307,6 +307,7 @@ function handleMsg(m) {
       if (m.action === 'list' || m.action === 'add' || m.action === 'remove') renderTunnelList(m);
       break;
     }
+    case 'tunnel-alert': { if (m.id === activeTabId) setStatus(`⚠ ${m.msg}`); break; }
   }
 }
 
@@ -1637,7 +1638,7 @@ function renderTunnelList(m) {
         <div style="display:flex; justify-content:space-between; align-items:center;">
           <div>
             <strong>${typeLabel}</strong><br>
-            <span class="muted">本地:${t.localPort} → ${t.remoteHost}:${t.remotePort}</span>
+            <span class="muted">本地:${t.localPort} → ${t.remoteHost}:${t.remotePort}<br>状态:${t.state || 'active'} · 连接:${t.connections || 0} · RX:${t.rxBytes || 0}B · TX:${t.txBytes || 0}B${t.lastError ? `<br>错误:${esc(t.lastError)}` : ''}</span>
           </div>
           <button class="mini danger tunnel-del" data-id="${t.id}" title="删除">🗑</button>
         </div>
@@ -1656,10 +1657,13 @@ function renderTunnelList(m) {
 
 // 保存当前激活的 SSH 标签 (隧道面板使用)
 let tunnelTab = null;
+let tunnelRefreshTimer = null;
 function openTunnelPanel(tab) {
   tunnelTab = tab;
   $('dlg-tunnel-mask').classList.remove('hidden');
   send({ type: 'tunnel', id: tab.id, action: 'list' });
+  clearInterval(tunnelRefreshTimer);
+  tunnelRefreshTimer = setInterval(() => { if (tunnelTab && !$('dlg-tunnel-mask').classList.contains('hidden')) send({ type: 'tunnel', id: tunnelTab.id, action: 'list' }); }, 2000);
 }
 
 // ---------- 事件绑定 ----------
@@ -1817,7 +1821,7 @@ $('btn-tunnel').onclick = () => {
   if (!tab || tab.cfg.type !== 'ssh') return setStatus('隧道仅适用于 SSH 会话');
   openTunnelPanel(tab);
 };
-$('tunnel-close').onclick = () => $('dlg-tunnel-mask').classList.add('hidden');
+$('tunnel-close').onclick = () => { $('dlg-tunnel-mask').classList.add('hidden'); clearInterval(tunnelRefreshTimer); tunnelRefreshTimer = null; };
 $('btn-tunnel-refresh').onclick = () => {
   const tab = tunnelTab;
   if (tab) send({ type: 'tunnel', id: tab.id, action: 'list' });

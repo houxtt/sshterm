@@ -321,6 +321,16 @@ class SSHConnection extends BaseConnection {
   // 单会话上限由服务端控制
   _nextTunnelId = 1;
   get tunnels() { return this._tunnels || (this._tunnels = new Map()); }
+  _pipeTunnel(tunnel, socket, stream) {
+    tunnel.connections++;
+    const count = (field) => chunk => { tunnel[field] += chunk.length; };
+    socket.on('data', count('txBytes'));
+    stream.on('data', count('rxBytes'));
+    const done = () => { tunnel.connections = Math.max(0, tunnel.connections - 1); };
+    socket.once('close', done);
+    stream.once('close', done);
+    socket.pipe(stream).pipe(socket);
+  }
 
   async addTunnel({ type = 'local', localPort, remoteHost, remotePort }) {
     if (this.tunnels.size >= 8) throw new Error('单会话隧道已达上限 8');
@@ -342,11 +352,11 @@ class SSHConnection extends BaseConnection {
         socket.once('error', () => { try { reject(); } catch {} });
         socket.once('connect', () => {
           const stream = accept();
-          socket.pipe(stream).pipe(socket);
+          this._pipeTunnel(tunnel, socket, stream);
         });
       };
       this.client.on('tcp connection', handler);
-      const tunnel = { id, type, localPort: port, remoteHost: '127.0.0.1', remotePort: targetPort, handler };
+      const tunnel = { id, type, localPort: port, remoteHost: '127.0.0.1', remotePort: targetPort, handler, state: 'active', createdAt: Date.now(), rxBytes: 0, txBytes: 0, connections: 0, lastError: '' };
       this.tunnels.set(id, tunnel);
       return { id, type, localPort: port, remoteHost: '127.0.0.1', remotePort: targetPort };
     }
@@ -355,7 +365,7 @@ class SSHConnection extends BaseConnection {
       // RFC 1928 CONNECT-only SOCKS5 proxy.  It deliberately listens only on
       // loopback, exposes no UDP/BIND modes, and forwards each approved TCP
       // stream through the already authenticated SSH connection.
-      const tunnel = { id, type, localPort: port, remoteHost: 'SOCKS5', remotePort: 0, server: null };
+      const tunnel = { id, type, localPort: port, remoteHost: 'SOCKS5', remotePort: 0, server: null, state: 'active', createdAt: Date.now(), rxBytes: 0, txBytes: 0, connections: 0, lastError: '' };
       await new Promise((resolve, reject) => {
         const server = net.createServer(socket => {
           let buffer = Buffer.alloc(0);
@@ -396,7 +406,7 @@ class SSHConnection extends BaseConnection {
               if (err) return fail();
               socket.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
               if (rest.length) stream.write(rest);
-              socket.pipe(stream).pipe(socket);
+              this._pipeTunnel(tunnel, socket, stream);
             });
           };
           socket.setTimeout(15000, () => socket.destroy());
@@ -414,12 +424,12 @@ class SSHConnection extends BaseConnection {
       return { id, type, localPort: port, remoteHost: 'SOCKS5', remotePort: 0 };
     }
     if (type !== 'local') throw new Error('未知隧道类型');
-    const tunnel = { id, type, localPort: port, remoteHost, remotePort: targetPort, server: null };
+    const tunnel = { id, type, localPort: port, remoteHost, remotePort: targetPort, server: null, state: 'active', createdAt: Date.now(), rxBytes: 0, txBytes: 0, connections: 0, lastError: '' };
     await new Promise((resolve, reject) => {
       const server = net.createServer(socket => {
         this.client.forwardOut(socket.remoteAddress || '127.0.0.1', socket.remotePort || 0, remoteHost, targetPort, (err, stream) => {
           if (err) return socket.destroy();
-          socket.pipe(stream).pipe(socket);
+          this._pipeTunnel(tunnel, socket, stream);
         });
       });
       server.once('error', reject);
@@ -453,7 +463,9 @@ class SSHConnection extends BaseConnection {
   listTunnels() {
     return Array.from(this.tunnels.values()).map(t => ({
       id: t.id, type: t.type, localPort: t.localPort,
-      remoteHost: t.remoteHost, remotePort: t.remotePort
+      remoteHost: t.remoteHost, remotePort: t.remotePort, state: t.state,
+      createdAt: t.createdAt, rxBytes: t.rxBytes, txBytes: t.txBytes,
+      connections: t.connections, lastError: t.lastError
     }));
   }
 

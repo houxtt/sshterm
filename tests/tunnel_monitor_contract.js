@@ -1,0 +1,12 @@
+const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
+const ssh = fs.readFileSync(path.join(__dirname, '..', 'server', 'connections', 'ssh.js'), 'utf8');
+const server = fs.readFileSync(path.join(__dirname, '..', 'server', 'index.js'), 'utf8');
+const ui = fs.readFileSync(path.join(__dirname, '..', 'web', 'app.js'), 'utf8');
+for (const field of ['state', 'createdAt', 'rxBytes', 'txBytes', 'connections', 'lastError']) assert(ssh.includes(field), `tunnel metric missing: ${field}`);
+assert(ssh.includes('_pipeTunnel'), 'tunnel byte accounting missing');
+assert(server.includes('saved.tunnels'), 'tunnel persistence missing');
+assert(server.includes('隧道恢复失败'), 'tunnel recovery alert missing');
+assert(ui.includes('tunnelRefreshTimer') && ui.includes('RX:${t.rxBytes'), 'tunnel monitoring UI missing');
+console.log('✅ tunnel monitoring contract passed');

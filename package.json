@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server/index.js",
     "test": "node tests/run_all.js",
-    "test:static": "node tests/static_security_contract.js && node tests/recording_contract.js",
+    "test:static": "node tests/static_security_contract.js && node tests/recording_contract.js && node tests/tunnel_monitor_contract.js",
     "test:workspace-security": "node tests/ui_workspace_credentials.js",
     "check": "node --check server/index.js && node --check server/session-backup.js && node --check web/app.js && npm run test:static",
     "test:integration": "node tests/integration_session_transfer.js && node tests/integration_sftp_transport.js",
