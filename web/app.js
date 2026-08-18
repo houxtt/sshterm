@@ -1758,25 +1758,21 @@ async function uploadFileSmart(tabId, dirPath, name, file, onProg) {
 // 文件上传 (带断点续传/多线程 + 进度条)
 $('sftp-upload').onclick = () => $('sftp-file-input').click();
 $('sftp-file-input').onchange = async (e) => {
-  const file = e.target.files && e.target.files[0];
-  if (!file) return;
-  const task = newTransferTask('上传', file.name);
-  showProgress(`上传: ${file.name} 0%`, 0);
-  try {
-    const status = await uploadFileSmart(sftpConnId, sftpPath, file.name, file,
-      (p) => { showProgress(`上传: ${file.name} ${(p * 100).toFixed(0)}%`, p * 100); updateTransferTask(task, p * 100); });
-    if (status !== 200) throw new Error('服务端返回 ' + status);
-    doneProgress(`✅ 已上传: ${file.name}`);
-    updateTransferTask(task, 100, 'running', '校验中');
-    const remotePath = sftpPath.endsWith('/') ? sftpPath + file.name : `${sftpPath}/${file.name}`;
-    const verified = await verifyRemoteSha256(sftpConnId, remotePath, file);
-    updateTransferTask(task, 100, verified.includes('不匹配') ? 'failed' : 'done', verified);
-    sftpLoad();
-  } catch (err) {
-    $('sftp-progress').classList.add('hidden');
-    $('sftp-status').textContent = `上传失败: ${err.message}`;
-    updateTransferTask(task, undefined, 'failed', '失败');
+  const files = [...(e.target.files || [])]; if (!files.length) return;
+  $('sftp-local-list').innerHTML = files.map(f => `<div class="sftp-item"><span class="sftp-ico">📄</span><span class="sftp-name">${esc(f.name)}</span><span class="sftp-size">${fmtSize(f.size)}</span></div>`).join('');
+  for (const file of files) {
+    const task = newTransferTask('上传', file.name); showProgress(`上传: ${file.name} 0%`, 0);
+    try {
+      const status = await uploadFileSmart(sftpConnId, sftpPath, file.name, file,
+        p => { showProgress(`上传: ${file.name} ${(p * 100).toFixed(0)}%`, p * 100); updateTransferTask(task, p * 100); });
+      if (status !== 200) throw new Error('服务端返回 ' + status);
+      updateTransferTask(task, 100, 'running', '校验中');
+      const remotePath = sftpPath.endsWith('/') ? sftpPath + file.name : `${sftpPath}/${file.name}`;
+      const verified = await verifyRemoteSha256(sftpConnId, remotePath, file);
+      updateTransferTask(task, 100, verified.includes('不匹配') ? 'failed' : 'done', verified);
+    } catch (err) { updateTransferTask(task, undefined, 'failed', '失败'); }
   }
+  doneProgress(`上传队列完成：${files.length} 项`); sftpLoad();
   e.target.value = '';
 };
 
