@@ -338,11 +338,14 @@ function toggleLang() {
 
 // ---------- 标签持久化 (刷新页面自动恢复打开的会话 + 终端内容) ----------
 const LS_TABS = 'sshterm.tabs';
+const LS_WORKSPACE = 'sshterm.workspace.default';
 const BUF_MAX = 200 * 1024;   // 每标签保留最近 200KB 输出, 刷新后重放
 function saveTabs() {
   try {
     localStorage.setItem(LS_TABS, JSON.stringify(tabs.map(t => ({
       cfg: t.cfg, hex: !!t.hex, buf: (t.recParts || []).join(''),
+      panes: (t.extraPanes || []).length,
+      split: { dir: splitDirection(t), ratio: splitRatio(t) },
     }))));
   } catch (e) { /* 存储失败忽略 */ }
 }
@@ -354,7 +357,9 @@ function restoreTabs() {
     if (!Array.isArray(list)) return;
     for (const item of list) {
       if (item && item.cfg && item.cfg.type) {
-        newTab(item.cfg, { connect: true, hex: item.hex, replay: item.buf });
+        const tab = newTab(item.cfg, { connect: true, hex: item.hex, replay: item.buf });
+        const split = item.split || { dir: 'row', ratio: 0.5 };
+        for (let n = 0; n < Math.min(Number(item.panes) || 0, SPLIT_MAX - 1); n++) addPane(tab, split.dir, split.ratio);
       }
     }
     setStatus(`已恢复 ${list.length} 个会话`);
@@ -362,6 +367,12 @@ function restoreTabs() {
 }
 // 刷新/关闭页面前保存最新终端内容
 window.addEventListener('beforeunload', () => saveTabs());
+
+function saveWorkspace() {
+  saveTabs();
+  try { localStorage.setItem(LS_WORKSPACE, localStorage.getItem(LS_TABS) || '[]'); setStatus(`工作区已保存：${tabs.length} 个标签`); }
+  catch { setStatus('工作区保存失败'); }
+}
 
 // ---------- 标签管理 ----------
 function newTab(cfg, opts = {}) {
@@ -412,7 +423,7 @@ function newTab(cfg, opts = {}) {
     } catch (e) {}
   }
 
-  term.onData((d) => sendInput(id, d));
+  term.onData((d) => safeSendInput(id, d));
   term.onResize(({ cols, rows }) => send({ type: 'resize', id, cols, rows }));
 
   // 窗口尺寸变化 → 重新适配
@@ -457,6 +468,15 @@ function pasteClipboard(term) {
   navigator.clipboard.readText().then(
     (t) => { clearTimeout(timer); _clipBusy = false; if (t) term.paste(t); },
     () => { clearTimeout(timer); _clipBusy = false; setStatus('剪贴板读取被拒, 可用 Ctrl+Shift+V 粘贴'); });
+}
+function safeSendInput(id, data) {
+  // xterm delivers a pasted block as one data event; require confirmation for
+  // blocks containing more than one line before anything reaches a server.
+  const lines = String(data).split(/[\r\n]/).filter(Boolean).length;
+  if (lines > 1 && !confirm(`即将粘贴 ${lines} 行内容到远程会话。确认发送？`)) {
+    setStatus('已取消多行粘贴'); return;
+  }
+  sendInput(id, data);
 }
 function bindClipboard(tab) {
   const { term, host } = tab;
@@ -1291,7 +1311,7 @@ function createTerminal(host, tabOrPane) {
   term.open(host);
   setTimeout(() => fitAddon.fit(), 0);
   bindClipboard(tabOrPane);
-  term.onData((d) => sendInput(tabOrPane.connId, d));
+  term.onData((d) => safeSendInput(tabOrPane.connId, d));
   term.onResize(({ cols, rows }) => send({ type: 'resize', id: tabOrPane.connId, cols, rows }));
   return { term, fitAddon };
 }
@@ -1567,6 +1587,7 @@ $('btn-tunnel-add').onclick = () => {
   send({ type: 'tunnel', id: tab.id, action: 'add', tunnelType: type, localPort,
     remoteHost: type === 'dynamic' ? 'SOCKS5' : host, remotePort: type === 'dynamic' ? 0 : remotePort });
 };
+$('btn-workspace').onclick = saveWorkspace;
 $('btn-killall').onclick = () => {
   if (!tabs.length) return setStatus('没有打开的会话');
   if (!confirm(`关闭全部 ${tabs.length} 个会话? (将断开所有连接)`)) return;
