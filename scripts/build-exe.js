@@ -23,10 +23,9 @@ console.log(`│ 输出: ${TARGET}`);
 console.log('│ 打包中 (可能需要几分钟)…');
 try {
   execSync(
-    `npx caxa --directory "${ROOT}"` +
+    `npx caxa --input "${ROOT}"` +
     ` --output "${TARGET}"` +
-    ` --command "{{caxa}}/node_modules/.bin/node"` +
-    ` -- "{{caxa}}/server/index.js" "--no-open"`,
+    ` -- "{{caxa}}/node_modules/.bin/node" "{{caxa}}/server/index.js" "--no-open"`,
     { stdio: 'inherit', cwd: ROOT }
   );
   console.log('│ ✅ 构建成功');
@@ -38,5 +37,6 @@ try {
   console.log('│   1. 确保已安装 Node.js');
   console.log('│   2. 双击 run.bat 即可启动 (无需 EXE)');
   console.log('│   3. 或创建桌面快捷方式指向 run.bat');
+  process.exitCode = 1;
 }
 console.log('└──────────────────────────────────────┘');

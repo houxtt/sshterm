@@ -27,6 +27,7 @@ jobs:
       - run: npm ci
       - run: node tests/static_security_contract.js
       - run: node scripts/build-exe.js
+      - run: node tests/smoke_packaged_exe.js
       - name: Require release-signing credentials
         shell: pwsh
         run: |
