@@ -34,5 +34,6 @@ jobs:
       - run: node tests/session_backup.js
       - run: node tests/integration_session_transfer.js
       - run: node tests/integration_sftp_transport.js
+      - run: node tests/integration_multiwindow_ownership.js
       - run: node tests/ui_workspace_credentials.js
       - run: npm audit --omit=dev

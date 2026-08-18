@@ -47,9 +47,10 @@ function configForBrowserStorage(cfg) {
 
 // ---------- 全局状态 ----------
 const clientToken = window.__SSHTERM_TOKEN || '';
+let windowId = '';
 const ws = new WebSocket(`ws://${location.host}/?token=${encodeURIComponent(clientToken)}`);
 const apiUrl = (pathname, params = {}) => {
-  const q = new URLSearchParams({ ...params, token: clientToken });
+  const q = new URLSearchParams({ ...params, token: clientToken, window: windowId });
   return `${pathname}?${q.toString()}`;
 };
 let tabs = [];            // {id, cfg, term, host, state, hex}
@@ -145,6 +146,7 @@ function sendInput(tabId, str) {
 
 function handleMsg(m) {
   switch (m.type) {
+    case 'window-id': { windowId = m.windowId || ''; break; }
     case 'ssh-hosts': {
       const list = m.list || [];
       const tbody = $('sshcfg-list').querySelector('tbody');

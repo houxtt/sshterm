@@ -15,6 +15,15 @@ const CONN_FILE = path.join(CONN_DIR, 'sessions.json');
 const MAX_SFTP_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
 
 const connections = new Map();   // connId -> BaseConnection
+const windows = new Map();       // opaque window capability -> WebSocket
+function connectionKey(ws, id) { return `${ws.windowId}:${id}`; }
+function getConnection(ws, id) { return connections.get(connectionKey(ws, id)); }
+function getHttpConnection(qs) {
+  const ws = windows.get(String(qs.get('window') || ''));
+  if (ws) return getConnection(ws, parseInt(qs.get('conn'), 10));
+  // Isolated fixture has no browser window; never enabled in normal startup.
+  return process.env.SSHTERM_TEST_SFTP_ROOT ? connections.get(parseInt(qs.get('conn'), 10)) : null;
+}
 const liveByConfig = new Map();  // 配置指纹 -> connId (去重: 同一配置只开一个)
 // Enables an isolated local SFTP fixture for transport integration tests only.
 // The variable is intentionally undocumented for end users and is never set by
@@ -286,7 +295,7 @@ const server = http.createServer((req, res) => {
   // PUT /api/sftp/upload?conn=<id>&path=<dir>&name=<file>&offset=N → 从 N 偏移续写
   if (req.method === 'HEAD' && url.startsWith('/api/sftp/upload')) {
     const qs = new URLSearchParams(req.url.split('?')[1] || '');
-    const conn = connections.get(parseInt(qs.get('conn'), 10));
+    const conn = getHttpConnection(qs);
     const dir = qs.get('path') || '.';
     const name = qs.get('name') || '';
     if (!conn || !conn.getSftpInst() || !name) { res.writeHead(400); return res.end(); }
@@ -301,7 +310,7 @@ const server = http.createServer((req, res) => {
   }
   if (req.method === 'PUT' && url.startsWith('/api/sftp/upload')) {
     const qs = new URLSearchParams(req.url.split('?')[1] || '');
-    const conn = connections.get(parseInt(qs.get('conn'), 10));
+    const conn = getHttpConnection(qs);
     const dir = qs.get('path') || '.';
     const name = qs.get('name') || '';
     const rawOffset = qs.get('offset');
@@ -413,7 +422,7 @@ const server = http.createServer((req, res) => {
   // can be verified without running shell commands on the remote machine.
   if (url.startsWith('/api/sftp/checksum')) {
     const qs = new URLSearchParams(req.url.split('?')[1] || '');
-    const conn = connections.get(parseInt(qs.get('conn'), 10));
+    const conn = getHttpConnection(qs);
     const rpath = qs.get('path') || '';
     if (!conn || !conn.getSftpInst() || !rpath) { res.writeHead(400); return res.end('SFTP 通道未就绪'); }
     const hash = require('crypto').createHash('sha256');
@@ -429,7 +438,7 @@ const server = http.createServer((req, res) => {
   // SFTP 目录下载 (递归打包 zip, 流式): /api/sftp/download-dir?conn=<id>&path=<远端目录>
   if (url.startsWith('/api/sftp/download-dir')) {
     const qs = new URLSearchParams(req.url.split('?')[1] || '');
-    const conn = connections.get(parseInt(qs.get('conn'), 10));
+    const conn = getHttpConnection(qs);
     const rdir = qs.get('path') || '';
     if (!conn || !conn.getSftpInst()) {
       res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
@@ -480,7 +489,7 @@ const server = http.createServer((req, res) => {
   // bytes already received.
   if (url.startsWith('/api/sftp/download')) {
     const qs = new URLSearchParams(req.url.split('?')[1] || '');
-    const conn = connections.get(parseInt(qs.get('conn'), 10));
+    const conn = getHttpConnection(qs);
     const rpath = qs.get('path') || '';
     if (!conn || !conn.getSftpInst()) {
       res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
@@ -590,32 +599,24 @@ const wss = new WebSocketServer({
     } catch { return false; }
   },
 });
-let activeWs = null;
 wss.on('connection', (ws) => {
-  // The protocol uses compact, UI-local 16-bit tab IDs.  Permit a single UI
-  // client rather than accidentally sharing those IDs and terminal streams.
-  if (activeWs && activeWs.readyState === 1) activeWs.close(4001, '已在另一窗口打开 sshterm');
-  activeWs = ws;
+  ws.windowId = randomBytes(24).toString('base64url');
+  windows.set(ws.windowId, ws);
+  send(ws, { type: 'window-id', windowId: ws.windowId });
   wsCount++;
   clearTimeout(idleExitTimer);
   ws.on('close', () => {
     wsCount--;
     scheduleIdleExit();
-    if (ws !== activeWs) return;
-    activeWs = null;
-    // 浏览器离开 → 关闭该客户端发起的全部连接, 防止僵尸连接
-    for (const [id, conn] of connections) {
-      conn.close();
-    }
-    connections.clear();
-    liveByConfig.clear();
+    windows.delete(ws.windowId);
+    for (const [key, conn] of connections) if (key.startsWith(`${ws.windowId}:`)) conn.close();
   });
   ws.on('message', (msg, isBinary) => {
     if (isBinary) {
       // binary: [connId: 2B LE][data...] → 路由到连接的 write
       if (msg.length < 2) return;
       const id = msg.readUInt16LE(0);
-      const conn = connections.get(id);
+      const conn = getConnection(ws, id);
       if (conn && conn.state === 'connected') conn.write(msg.subarray(2));
       return;
     }
@@ -684,6 +685,14 @@ function sendBinary(ws, id, data) {
 
 async function handle(ws, m) {
   switch (m.type) {
+    case 'test-sftp-claim': {
+      if (!process.env.SSHTERM_TEST_SFTP_ROOT || !Number.isInteger(m.id)) return;
+      const fixture = connections.get(9900);
+      if (!fixture) return;
+      connections.set(connectionKey(ws, m.id), { ...fixture, id: m.id });
+      send(ws, { type: 'test-sftp-claimed', id: m.id });
+      break;
+    }
     case 'list': {
       send(ws, { type: 'sessions', list: sessionsList() });
       break;
@@ -851,9 +860,7 @@ async function handle(ws, m) {
     }
     case 'cleanup': {
       // 页面加载兜底: 强制关闭该客户端全部连接 (刷新时 close 事件可能未触发导致残留)
-      for (const [id, conn] of connections) conn.close();
-      connections.clear();
-      liveByConfig.clear();
+      for (const [key, conn] of connections) if (key.startsWith(`${ws.windowId}:`)) conn.close();
       break;
     }
     case 'ssh-hosts': {
@@ -891,7 +898,7 @@ async function handle(ws, m) {
       break;
     }
     case 'host-key-decision': {
-      const conn = connections.get(m.id);
+      const conn = getConnection(ws, m.id);
       if (!conn || conn.config.type !== 'ssh' || !conn.resolveHostKey) {
         return send(ws, { type: 'error', id: m.id, msg: '没有等待确认的 SSH 主机密钥' });
       }
@@ -908,17 +915,17 @@ async function handle(ws, m) {
       break;
     }
     case 'disconnect': {
-      const conn = connections.get(m.id);
+      const conn = getConnection(ws, m.id);
       if (conn) { conn.close(); }
       break;
     }
     case 'resize': {
-      const conn = connections.get(m.id);
+      const conn = getConnection(ws, m.id);
       if (conn && conn.resize) conn.resize(m.cols, m.rows);
       break;
     }
     case 'serial-control': {
-      const conn = connections.get(m.id);
+      const conn = getConnection(ws, m.id);
       if (!conn || conn.config.type !== 'serial') {
         return send(ws, { type: 'error', id: m.id, msg: '不是串口连接' });
       }
@@ -937,7 +944,7 @@ async function handle(ws, m) {
       break;
     }
     case 'sftp': {
-      const conn = connections.get(m.id);
+      const conn = getConnection(ws, m.id);
       if (!conn || conn.config.type !== 'ssh') {
         return send(ws, { type: 'error', id: m.id, msg: 'SFTP 需要活跃的 SSH 连接' });
       }
@@ -956,7 +963,7 @@ async function handle(ws, m) {
       break;
     }
     case 'tunnel': {
-      const conn = connections.get(m.id);
+      const conn = getConnection(ws, m.id);
       if (!conn || conn.config.type !== 'ssh') {
         return send(ws, { type: 'error', id: m.id, msg: '隧道需要活跃的 SSH 连接' });
       }
@@ -995,8 +1002,9 @@ async function handle(ws, m) {
 async function doConnect(ws, cfg, tabId) {
   // 串口物理独占, 保留去重; SSH/Telnet 允许同 IP 开多个会话
   const fpKey = cfg.type + '|' + (cfg.host || '') + '|' + (cfg.port || '') + '|' + (cfg.baudRate || '');
-  if (cfg.type === 'serial' && liveByConfig.has(fpKey)) {
-    return send(ws, { type: 'reuse', id: tabId, connId: liveByConfig.get(fpKey) });
+  const ownerFpKey = `${ws.windowId}|${fpKey}`;
+  if (cfg.type === 'serial' && liveByConfig.has(ownerFpKey)) {
+    return send(ws, { type: 'reuse', id: tabId, connId: liveByConfig.get(ownerFpKey) });
   }
 
   const ConnCls = { ssh: require('./connections/ssh'),
@@ -1007,8 +1015,8 @@ async function doConnect(ws, cfg, tabId) {
   const conn = new ConnCls(cfg);
   const connId = tabId;   // 前端 tab 即连接 id, 简化路由
   conn.id = connId;
-  connections.set(connId, conn);
-  liveByConfig.set(fpKey, connId);
+  connections.set(connectionKey(ws, connId), conn);
+  liveByConfig.set(ownerFpKey, connId);
 
   send(ws, { type: 'status', id: tabId, state: 'connecting', msg: '连接中…' });
   log('info', `连接 ${cfg.name || cfg.type}:${cfg.host || cfg.port || cfg.port} (${cfg.type})`);
@@ -1046,8 +1054,8 @@ async function doConnect(ws, cfg, tabId) {
         try { sessionLogStream.end(); } catch {}
         sessionLogStream = null;
       }
-      connections.delete(connId);
-      if (liveByConfig.get(fpKey) === connId) liveByConfig.delete(fpKey);
+      connections.delete(connectionKey(ws, connId));
+      if (liveByConfig.get(ownerFpKey) === connId) liveByConfig.delete(ownerFpKey);
     });
   conn.on('open', () => {
     console.log(`[conn] ${cfg.type} ${tabId} open`);
@@ -1071,8 +1079,8 @@ async function doConnect(ws, cfg, tabId) {
   } catch (e) {
     // 连接失败: 状态已由 error/close 事件发出, 这里兜底
     send(ws, { type: 'status', id: connId, state: 'closed', msg: e.message });
-    connections.delete(connId);
-    if (liveByConfig.get(fpKey) === connId) liveByConfig.delete(fpKey);
+    connections.delete(connectionKey(ws, connId));
+    if (liveByConfig.get(ownerFpKey) === connId) liveByConfig.delete(ownerFpKey);
   }
 }
 
