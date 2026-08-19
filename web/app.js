@@ -992,6 +992,7 @@ function toggleSftpPanel() {
     $('sftp-status').textContent = '定位当前目录…';
     // 先请求 shell 当前目录, 拿到后定位再列目录 (cwd 失败则默认 home)
     send({ type: 'sftp', id: sftpConnId, action: 'cwd' });
+    setTimeout(constrainSftpColumns, 0);
   }
 }
 
@@ -1134,8 +1135,11 @@ function initSftpDragger() {
     const onMouseMove = (ev) => {
       if (!sftpDragging) return;
       const delta = ev.clientX - sftpStartX;
-      const newWidth = Math.max(280, Math.min(600, sftpStartWidth + delta));
       const panel = document.getElementById('sftp-panel');
+      const workspaceWidth = panel.parentElement ? panel.parentElement.clientWidth : window.innerWidth;
+      const maxWidth = Math.max(280, Math.min(1000, workspaceWidth - 160));
+      // 面板贴在右侧，左侧分隔条向左拖动时应扩大面板。
+      const newWidth = Math.max(280, Math.min(maxWidth, sftpStartWidth - delta));
       panel.style.width = newWidth + 'px';
       $('terms').style.marginRight = '0';
     };
@@ -1149,8 +1153,97 @@ function initSftpDragger() {
     document.addEventListener('mouseup', onMouseUp);
   });
 }
+
+// ---------- 可调节侧栏与 SFTP 双栏 ----------
+const SIDEBAR_WIDTH_STORAGE = 'sshterm.sidebarWidth';
+const SFTP_LOCAL_WIDTH_STORAGE = 'sshterm.sftpLocalWidth';
+const SIDEBAR_MIN_WIDTH = 180;
+const SFTP_COLUMN_MIN_WIDTH = 140;
+
+function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
+
+function fitActiveTerminal() {
+  const tab = tabs.find(t => t.id === activeTabId);
+  if (tab) setTimeout(() => fitTerm(tab), 0);
+}
+
+function initSidebarDragger() {
+  const sidebar = $('sidebar');
+  const divider = $('sidebar-divider');
+  const main = $('main');
+  if (!sidebar || !divider || !main) return;
+  const savedWidth = Number(localStorage.getItem(SIDEBAR_WIDTH_STORAGE));
+  if (Number.isFinite(savedWidth)) {
+    const maxWidth = Math.max(SIDEBAR_MIN_WIDTH, Math.min(520, main.clientWidth - 320));
+    sidebar.style.width = `${clamp(savedWidth, SIDEBAR_MIN_WIDTH, maxWidth)}px`;
+  }
+
+  divider.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    divider.classList.add('dragging');
+    const onMouseMove = (ev) => {
+      const bounds = main.getBoundingClientRect();
+      const maxWidth = Math.max(SIDEBAR_MIN_WIDTH, Math.min(520, bounds.width - 320));
+      sidebar.style.width = `${clamp(ev.clientX - bounds.left, SIDEBAR_MIN_WIDTH, maxWidth)}px`;
+      fitActiveTerminal();
+    };
+    const onMouseUp = () => {
+      divider.classList.remove('dragging');
+      localStorage.setItem(SIDEBAR_WIDTH_STORAGE, String(Math.round(sidebar.getBoundingClientRect().width)));
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    };
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  });
+}
+
+function constrainSftpColumns() {
+  const columns = $('sftp-columns');
+  const localColumn = $('sftp-local-column');
+  const divider = $('sftp-columns-divider');
+  const savedWidth = Number(localStorage.getItem(SFTP_LOCAL_WIDTH_STORAGE));
+  if (!columns || !localColumn || !divider || !Number.isFinite(savedWidth) || !columns.clientWidth) return;
+  const maxWidth = Math.max(SFTP_COLUMN_MIN_WIDTH, columns.clientWidth - divider.offsetWidth - SFTP_COLUMN_MIN_WIDTH);
+  localColumn.style.flex = `0 0 ${clamp(savedWidth, SFTP_COLUMN_MIN_WIDTH, maxWidth)}px`;
+}
+
+function initSftpColumnsDragger() {
+  const columns = $('sftp-columns');
+  const localColumn = $('sftp-local-column');
+  const remoteColumn = $('sftp-remote-column');
+  const divider = $('sftp-columns-divider');
+  if (!columns || !localColumn || !remoteColumn || !divider) return;
+  constrainSftpColumns();
+
+  divider.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    divider.classList.add('dragging');
+    const startX = e.clientX;
+    const startWidth = localColumn.getBoundingClientRect().width;
+    const onMouseMove = (ev) => {
+      const maxWidth = Math.max(SFTP_COLUMN_MIN_WIDTH, columns.clientWidth - divider.offsetWidth - SFTP_COLUMN_MIN_WIDTH);
+      const width = clamp(startWidth + ev.clientX - startX, SFTP_COLUMN_MIN_WIDTH, maxWidth);
+      localColumn.style.flex = `0 0 ${width}px`;
+      remoteColumn.style.flex = '1 1 0';
+    };
+    const onMouseUp = () => {
+      divider.classList.remove('dragging');
+      localStorage.setItem(SFTP_LOCAL_WIDTH_STORAGE, String(Math.round(localColumn.getBoundingClientRect().width)));
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    };
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  });
+}
+
 // 初始化拖拽 (页面加载后)
-setTimeout(initSftpDragger, 100);
+setTimeout(() => {
+  initSftpDragger();
+  initSidebarDragger();
+  initSftpColumnsDragger();
+}, 100);
 let _timerHandle = null;
 $('btn-tm-cancel').onclick = () => $('dlg-timer-mask').classList.add('hidden');
 $('btn-tm-start').onclick = () => {

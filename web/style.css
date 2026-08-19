@@ -35,9 +35,13 @@ button.mini { padding: 2px 8px; font-size: 11px; }
 
 /* 侧栏 */
 #sidebar {
-  width: 220px; background: #16161e; border-right: 1px solid #2a2b3a;
+  width: 220px; flex: 0 0 auto; background: #16161e; border-right: 1px solid #2a2b3a;
   display: flex; flex-direction: column;
 }
+#sidebar-divider {
+  width: 6px; flex: 0 0 6px; cursor: ew-resize; background: #2a2b3a; z-index: 10;
+}
+#sidebar-divider:hover, #sidebar-divider.dragging { background: #3b82f6; }
 .side-head {
   display: flex; justify-content: space-between; align-items: center;
   padding: 8px 10px; border-bottom: 1px solid #2a2b3a; font-weight: 600;
@@ -168,7 +172,9 @@ button.mini { padding: 2px 8px; font-size: 11px; }
 
 /* SFTP 面板 */
 #sftp-panel {
-  position: absolute; top: 0; right: 0; bottom: 0; min-width: 280px; max-width: 600px;  /* P2 FIX: 可拉伸宽度 */
+  position: absolute; top: 0; right: 0; bottom: 0;
+  width: min(600px, calc(100% - 160px)); min-width: 280px;
+  max-width: min(1000px, calc(100% - 160px));
   background: #16161e; border-left: 1px solid #2a2b3a; z-index: 5;
   display: flex; flex-direction: column;
 }
@@ -177,12 +183,12 @@ button.mini { padding: 2px 8px; font-size: 11px; }
 
 /* P2 FIX: SFTP 面板分隔线 - 可拖拽调整宽度 */
 #sftp-divider {
-  position: absolute; top: 0; right: 0; bottom: 0; width: 6px;
+  position: absolute; top: 0; left: -6px; bottom: 0; width: 6px;
   background: #2a2b3a; cursor: ew-resize; z-index: 10;
   display: flex; align-items: center; justify-content: center;
 }
 #sftp-divider::before {
-  content: '⏱'; font-size: 12px; color: #565f89;
+  content: '⋮'; font-size: 12px; color: #565f89;
 }
 #sftp-divider.dragging {
   background: #3b82f6; opacity: 0.8;
@@ -196,8 +202,12 @@ button.mini { padding: 2px 8px; font-size: 11px; }
   border-radius: 4px; padding: 3px 6px; font-size: 12px;
 }
 #sftp-columns { flex:1; display:flex; min-height:0; }
-.sftp-column { flex:1; min-width:0; display:flex; flex-direction:column; border-right:1px solid #2a2b3a; }
+.sftp-column { flex:1 1 0; min-width:0; display:flex; flex-direction:column; border-right:1px solid #2a2b3a; }
 .sftp-column:last-child { border-right:0; }
+#sftp-columns-divider {
+  width: 6px; flex: 0 0 6px; cursor: ew-resize; background: #2a2b3a; z-index: 1;
+}
+#sftp-columns-divider:hover, #sftp-columns-divider.dragging { background: #3b82f6; }
 .sftp-col-title { padding:4px 7px; font-size:11px; color:#7dcfff; border-bottom:1px solid #2a2b3a; }
 #sftp-list,#sftp-local-list { flex:1; overflow-y:auto; }
 .sftp-item {

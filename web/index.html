@@ -61,6 +61,7 @@
       </div>
       <div class="side-foot muted">双击连接 · 悬停可编辑/删除</div>
     </aside>
+    <div id="sidebar-divider" title="拖动调整已保存会话宽度"></div>
 
     <!-- 右侧: 标签 + 终端 -->
     <div id="workspace">
@@ -94,8 +95,9 @@
         </div>
         <div id="sftp-tasks" class="hidden"><button id="sftp-queue-toggle" class="mini">⏸ 暂停队列</button></div>
         <div id="sftp-columns">
-          <section class="sftp-column"><div class="sftp-col-title">本地待传文件</div><div id="sftp-local-list"></div></section>
-          <section class="sftp-column"><div class="sftp-col-title">远端目录</div><div id="sftp-list"></div></section>
+          <section id="sftp-local-column" class="sftp-column"><div class="sftp-col-title">本地待传文件</div><div id="sftp-local-list"></div></section>
+          <div id="sftp-columns-divider" title="拖动调整本地与远端目录宽度"></div>
+          <section id="sftp-remote-column" class="sftp-column"><div class="sftp-col-title">远端目录</div><div id="sftp-list"></div></section>
         </div>
         <div class="sftp-status" id="sftp-status"></div>
       </div>
