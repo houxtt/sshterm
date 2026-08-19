@@ -1470,6 +1470,7 @@ function addPane(tab, dir = 'row', ratio = 0.5) {
     hex: !!tab.hex, recParts: [], recLen: 0, logging: false, logBuf: ''
   };
   tab.extraPanes.push(pane);
+  tab.host.appendChild(host);
   const { term, fitAddon } = createTerminal(host, pane);
   pane.term = term;
   pane.fitAddon = fitAddon;
@@ -1491,20 +1492,27 @@ function removePane(tab, pane) {
 }
 
 function applySplitLayout(tab, dir, ratio) {
-  const container = tab.host.querySelector('.split-container');
-  const main = tab.host.querySelector('.term-host.main-pane');
+  const container = tab.host;
+  const main = container.querySelector('.term-host.main-pane');
   if (!container || !main) return;
   const n = countPanes(tab);
   if (n <= 1 || dir === 'none') {
     main.style.display = '';
-    (tab.extraPanes[0] && tab.extraPanes[0].host)?.classList.add('hidden');
-    container.classList.add('hidden');
+    main.style.flex = '';
+    main.style.gridColumn = '';
+    main.style.gridRow = '';
+    container.style.display = '';
+    container.style.flexDirection = '';
+    container.style.gridTemplateColumns = '';
+    container.style.gridTemplateRows = '';
     return;
   }
-  container.classList.remove('hidden');
   main.style.display = '';
   tab.extraPanes.forEach(p => p.host.classList.remove('hidden'));
   if (n === 2) {
+    container.style.display = '';
+    container.style.gridTemplateColumns = '';
+    container.style.gridTemplateRows = '';
     container.style.flexDirection = dir === 'col' ? 'column' : 'row';
     main.style.flex = `${ratio} 1 0`;
     tab.extraPanes[0].host.style.flex = `${1 - ratio} 1 0`;
@@ -1514,11 +1522,10 @@ function applySplitLayout(tab, dir, ratio) {
     container.style.display = 'grid';
     container.style.gridTemplateColumns = '1fr 1fr';
     container.style.gridTemplateRows = '1fr 1fr';
-    main.style.flex = '';
-    tab.extraPanes.slice(0, 3).forEach((p, idx) => {
-      p.host.style.flex = '';
-      p.host.style.gridColumn = (idx % 2) + 1;
-      p.host.style.gridRow = Math.floor(idx / 2) + 1;
+    [main, ...tab.extraPanes].forEach((host, idx) => {
+      host.style.flex = '';
+      host.style.gridColumn = (idx % 2) + 1;
+      host.style.gridRow = Math.floor(idx / 2) + 1;
     });
   }
   // save prefs for first pane dir/ratio
