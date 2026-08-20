@@ -693,12 +693,35 @@ function scheduleReconnect(tab, reason) {
   }, delay);
 }
 
+let draggingTabId = null;
+
+function moveOpenTab(dragId, targetId, after = false) {
+  if (!dragId || dragId === targetId) return;
+  const dragged = tabs.find(t => t.id === dragId);
+  if (!dragged) return;
+  const next = tabs.filter(t => t.id !== dragId);
+  const targetIndex = next.findIndex(t => t.id === targetId);
+  if (targetIndex < 0) return;
+  next.splice(targetIndex + (after ? 1 : 0), 0, dragged);
+  tabs = next;
+  renderTabbar();
+  // saveTabs already stores the tabs array in display order, so a refresh
+  // restores the order the user chose as well.
+  saveTabs();
+}
+
+function clearTabDropTargets() {
+  document.querySelectorAll('.tab.dragging, .tab.drop-before, .tab.drop-after')
+    .forEach(el => el.classList.remove('dragging', 'drop-before', 'drop-after'));
+}
+
 function renderTabbar() {
   const bar = $('tabbar');
   bar.innerHTML = '';
   for (const t of tabs) {
     const el = document.createElement('div');
     el.className = 'tab' + (t.id === activeTabId ? ' active' : '');
+    el.draggable = true;
     const dot = t.state === 'connected' ? '🟢' : t.state === 'connecting' ? '🟡' : '🔴';
     el.innerHTML = `
       <span class="t-state" title="${esc(t.stateMsg || '')}">${dot}</span>
@@ -707,6 +730,36 @@ function renderTabbar() {
     el.querySelector('.t-close').onclick = (e) => { e.stopPropagation(); requestCloseTab(t.id); };
     el.onclick = () => activateTab(t.id);
     el.onauxclick = (e) => { if (e.button === 1) requestCloseTab(t.id); };
+    el.addEventListener('dragstart', (e) => {
+      if (e.target.closest('.t-close')) {
+        e.preventDefault();
+        return;
+      }
+      draggingTabId = t.id;
+      el.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', String(t.id));
+    });
+    el.addEventListener('dragover', (e) => {
+      if (!draggingTabId || draggingTabId === t.id) return;
+      e.preventDefault();
+      const after = e.clientX > el.getBoundingClientRect().left + el.offsetWidth / 2;
+      el.classList.toggle('drop-before', !after);
+      el.classList.toggle('drop-after', after);
+      e.dataTransfer.dropEffect = 'move';
+    });
+    el.addEventListener('dragleave', () => el.classList.remove('drop-before', 'drop-after'));
+    el.addEventListener('drop', (e) => {
+      if (!draggingTabId || draggingTabId === t.id) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const after = e.clientX > el.getBoundingClientRect().left + el.offsetWidth / 2;
+      moveOpenTab(draggingTabId, t.id, after);
+    });
+    el.addEventListener('dragend', () => {
+      draggingTabId = null;
+      clearTabDropTargets();
+    });
     bar.appendChild(el);
   }
   if (!tabs.length) $('tabbar').innerHTML = '<span class="muted" style="padding:8px 12px">无连接 — 双击左侧会话或新建</span>';
@@ -717,6 +770,35 @@ function updateWelcome() { $('welcome').classList.toggle('hidden', tabs.length >
 // ---------- 会话列表 ----------
 let batchMode = false;
 const batchSel = new Set();
+let draggingSessionId = null;
+
+function persistSessionOrder() {
+  send({
+    type: 'reorder-sessions',
+    order: sessions.map(s => s.id),
+    groups: Object.fromEntries(sessions.map(s => [s.id, s.group || ''])),
+  });
+}
+
+function moveSession(dragId, beforeId = null, destinationGroup = '') {
+  if (!dragId || dragId === beforeId) return;
+  const dragged = sessions.find(s => s.id === dragId);
+  if (!dragged) return;
+  const next = sessions.filter(s => s.id !== dragId);
+  const targetIndex = beforeId ? next.findIndex(s => s.id === beforeId) : next.length;
+  next.splice(targetIndex < 0 ? next.length : targetIndex, 0, {
+    ...dragged,
+    group: destinationGroup === '默认' ? undefined : (destinationGroup || undefined),
+  });
+  sessions = next;
+  renderSessionList();
+  persistSessionOrder();
+}
+
+function clearSessionDropTargets() {
+  document.querySelectorAll('.s-row.drop-before, .group-head.drop-target, .group-body.drop-target')
+    .forEach(el => el.classList.remove('drop-before', 'drop-target'));
+}
 
 function renderSessionList() {
   const ul = $('session-list');
@@ -732,8 +814,9 @@ function renderSessionList() {
     if (!groups.has(g)) groups.set(g, []);
     groups.get(g).push(s);
   }
-  const sorted = [...groups.keys()].sort((a, b) => a === '默认' ? 1 : b === '默认' ? -1 : a.localeCompare(b));
-  for (const g of sorted) {
+  // Map preserves the user-established order instead of alphabetically
+  // pinning groups in place.
+  for (const g of groups.keys()) {
     const items = groups.get(g);
     const li = document.createElement('li');
     li.className = 'group-head';
@@ -745,16 +828,45 @@ function renderSessionList() {
         li.querySelector('.group-caret').textContent = hidden ? '▶' : '▼';
       }
     };
+    li.addEventListener('dragover', (e) => {
+      if (!draggingSessionId) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      li.classList.add('drop-target');
+    });
+    li.addEventListener('dragleave', () => li.classList.remove('drop-target'));
+    li.addEventListener('drop', (e) => {
+      e.preventDefault();
+      moveSession(draggingSessionId, null, g);
+      clearSessionDropTargets();
+    });
     ul.appendChild(li);
     const body = document.createElement('div');
     body.className = 'group-body';
+    body.addEventListener('dragover', (e) => {
+      if (!draggingSessionId) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      body.classList.add('drop-target');
+    });
+    body.addEventListener('dragleave', (e) => {
+      if (!body.contains(e.relatedTarget)) body.classList.remove('drop-target');
+    });
+    body.addEventListener('drop', (e) => {
+      if (e.target.closest('.s-row')) return;
+      e.preventDefault();
+      moveSession(draggingSessionId, null, g);
+      clearSessionDropTargets();
+    });
     for (const s of items) {
       const row = document.createElement('div');
       row.className = 's-row';
+      row.draggable = !batchMode;
       const sub = s.type === 'serial' ? `${s.port} @ ${s.baudRate}` : `${s.host}:${s.port}`;
       const checked = batchSel.has(s.id) ? 'checked' : '';
       row.innerHTML = `
         ${batchMode ? `<input type="checkbox" class="b-cb" data-id="${esc(s.id)}" ${checked}>` : ''}
+        ${batchMode ? '' : '<span class="session-drag-handle" title="拖动排序" aria-hidden="true">⠿</span>'}
         <span class="type-icon">${TYPE_ICON[s.type] || '❔'}</span>
         <span class="s-name">${esc(s.name)}</span>
         <span class="s-sub">${esc(sub)}</span>
@@ -763,6 +875,35 @@ function renderSessionList() {
           <button title="删除" data-act="del" class="danger">🗑</button>
         </span>`;
       row.ondblclick = () => { if (!batchMode) connectTo(s); };
+      row.addEventListener('dragstart', (e) => {
+        if (batchMode || !e.target.closest('.session-drag-handle')) {
+          e.preventDefault();
+          return;
+        }
+        draggingSessionId = s.id;
+        row.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', s.id);
+      });
+      row.addEventListener('dragend', () => {
+        draggingSessionId = null;
+        row.classList.remove('dragging');
+        clearSessionDropTargets();
+      });
+      row.addEventListener('dragover', (e) => {
+        if (!draggingSessionId || draggingSessionId === s.id) return;
+        e.preventDefault();
+        e.stopPropagation();
+        e.dataTransfer.dropEffect = 'move';
+        row.classList.add('drop-before');
+      });
+      row.addEventListener('dragleave', () => row.classList.remove('drop-before'));
+      row.addEventListener('drop', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        moveSession(draggingSessionId, s.id, g);
+        clearSessionDropTargets();
+      });
       row.querySelector('.b-cb')?.addEventListener('change', (e) => {
         if (e.target.checked) batchSel.add(s.id); else batchSel.delete(s.id);
         updateBatchBar();

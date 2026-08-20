@@ -645,7 +645,20 @@ function sanitize(s) {
   }
   return rest;
 }
-function sessionsList() { return Object.values(sessions).map(sanitize); }
+function sessionSortOrder(session, fallback) {
+  const value = Number(session && session.sortOrder);
+  return Number.isSafeInteger(value) && value >= 0 ? value : fallback;
+}
+function sessionsList() {
+  return Object.values(sessions)
+    .map((session, index) => ({ session, index }))
+    .sort((a, b) => sessionSortOrder(a.session, a.index) - sessionSortOrder(b.session, b.index))
+    .map(({ session }) => sanitize(session));
+}
+function nextSessionSortOrder() {
+  return Object.values(sessions).reduce(
+    (max, session, index) => Math.max(max, sessionSortOrder(session, index)), -1) + 1;
+}
 function importSessionEntries(entries, source) {
   if (!Array.isArray(entries) || entries.length > 500) throw new Error('导入会话数量无效（最多 500 个）');
   const names = new Set(Object.values(sessions).map(s => s.name));
@@ -665,6 +678,7 @@ function importSessionEntries(entries, source) {
     // Imported OpenSSH IdentityFile paths use the existing DPAPI-backed key
     // path field; a portable backup retains its own rememberPassword choice.
     if (source === 'openssh' && session.privateKey) session.rememberPassword = true;
+    session.sortOrder = nextSessionSortOrder();
     sessions[session.id] = session;
     count++;
   }
@@ -713,14 +727,43 @@ async function handle(ws, m) {
             if (!s.jumpAuth[k] && sessions[s.id].jumpAuth[k]) s.jumpAuth[k] = sessions[s.id].jumpAuth[k];
           }
         }
+        // The dialog does not expose order, so an edit must retain the
+        // position established by drag-and-drop.
+        s.sortOrder = sessionSortOrder(sessions[s.id], nextSessionSortOrder());
         sessions[s.id] = s;
         log('info', `更新会话「${s.name}」`);
       } else {
         s.id = randomUUID();
+        s.sortOrder = nextSessionSortOrder();
         sessions[s.id] = s;
         log('info', `新建会话「${s.name}」(${s.type})`);
       }
       saveSessions(sessions);
+      send(ws, { type: 'sessions', list: sessionsList() });
+      break;
+    }
+    case 'reorder-sessions': {
+      const order = Array.isArray(m.order) ? m.order : [];
+      const ids = Object.keys(sessions);
+      const expected = new Set(ids);
+      if (order.length !== ids.length || new Set(order).size !== ids.length || order.some(id => !expected.has(id))) {
+        return send(ws, { type: 'error', msg: '会话排序数据无效，请刷新后重试' });
+      }
+      const groups = m.groups && typeof m.groups === 'object' && !Array.isArray(m.groups) ? m.groups : null;
+      const reordered = {};
+      for (let index = 0; index < order.length; index++) {
+        const id = order[index];
+        const session = { ...sessions[id], sortOrder: index };
+        if (groups && Object.prototype.hasOwnProperty.call(groups, id)) {
+          const group = typeof groups[id] === 'string' ? groups[id].trim().slice(0, 120) : '';
+          if (group) session.group = group;
+          else delete session.group;
+        }
+        reordered[id] = session;
+      }
+      sessions = reordered;
+      saveSessions(sessions);
+      log('info', `调整会话排序（${order.length} 个）`);
       send(ws, { type: 'sessions', list: sessionsList() });
       break;
     }
