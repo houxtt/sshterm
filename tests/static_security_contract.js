@@ -23,6 +23,11 @@ assert(server.includes('const activeUploadKeys = new Set()'), 'server-side per-f
 assert(server.includes('activeUploads >= MAX_CONCURRENT_UPLOADS'), 'server-side upload concurrency limit is missing');
 assert(server.includes("'Accept-Ranges': 'bytes'"), 'SFTP download range support is missing');
 assert(app.includes('function resumableDownload'), 'resumable browser download is missing');
+assert(app.includes('const LARGE_DOWNLOAD_STREAM_THRESHOLD = 256 * 1024 * 1024'),
+  'large download direct-to-disk threshold is missing');
+assert(app.includes('function streamDownloadToFile') && app.includes('await handle.createWritable()'),
+  'large downloads must stream to disk instead of accumulating a full Blob');
+assert(app.includes("Range: `bytes=${received}-`"), 'direct-to-disk downloads must retain Range retry');
 assert(html.includes('id="log-export"'), 'audit log export control is missing');
 assert(html.includes('id="backup-export"') && html.includes('id="openssh-import"'), 'session migration UI is missing');
 assert(server.includes("case 'export-sessions':") && server.includes("case 'import-sessions-backup':"), 'encrypted session migration handlers are missing');

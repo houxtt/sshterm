@@ -69,7 +69,7 @@ Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8787/
 | 协议 | 支持 | 说明 |
 |---|---|---|
 | SSH | 密码 / 密钥认证 | 交互式 shell,支持 resize |
-| SSH 文件 | **SFTP 浏览 + 下载** | 连接后点"📁 文件"打开面板,浏览目录;文件⬇单文件下载,目录📦打包 zip 下载 |
+| SSH 文件 | **SFTP 浏览 + 上传/下载** | 支持进度、断点续传；大文件及目录 ZIP 直接流式写盘，不占用整文件内存 |
 | Telnet | 基本 + 自动登录 | IAC 协商,login/Password 自动填充 |
 | 串口 | 全参数 + HEX 模式 | COM 口自动枚举,波特率至 921600 |
 

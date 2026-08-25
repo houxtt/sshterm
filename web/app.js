@@ -1101,6 +1101,9 @@ let sftpOpen = false;
 let sftpConnId = null;
 let sftpPath = '.';
 let sftpBusy = false;          // 加载锁: 防止双击/连点导致路径重复拼接
+// Blob 下载在结束时会同时保留分块和合并后的 Blob。大文件改为直接
+// 写入磁盘，避免 Chromium 渲染进程因峰值内存过高而失败。
+const LARGE_DOWNLOAD_STREAM_THRESHOLD = 256 * 1024 * 1024;
 
 function fmtSize(n) {
   if (n < 1024) return n + 'B';
@@ -1190,10 +1193,29 @@ function renderSftpList(entries) {
       const dlName = e.isDir ? e.name + '.zip' : e.name;
       const task = newTransferTask('下载', dlName);
       showProgress(`下载: ${dlName} 准备中...`, 0);
+      const needsDiskStream = e.isDir || e.size >= LARGE_DOWNLOAD_STREAM_THRESHOLD;
+      // 必须在用户点击事件尚有 transient activation 时立即调用文件
+      // 选择器；不能等 fetch/HEAD 完成后再调用。
+      const fileHandlePromise = needsDiskStream && window.showSaveFilePicker
+        ? window.showSaveFilePicker({ suggestedName: dlName })
+        : null;
+      if (needsDiskStream && !fileHandlePromise) {
+        startNativeDownload(url, dlName);
+        doneProgress(`已交给浏览器下载管理器: ${dlName}`);
+        updateTransferTask(task, undefined, 'external', '请查看浏览器下载');
+        $('sftp-status').textContent = '当前浏览器不支持直接流式写盘，已使用浏览器原生下载';
+        return;
+      }
       try {
         // ZIP 输出字节数受压缩率影响，不能拿它除以原文件总大小。轮询
         // 服务端实际读取的远端字节数，扫描目录时也显示不定进度状态。
-        const dirDownload = async () => {
+        const dirDownload = async (handlePromise) => {
+          let writable = null;
+          let committed = false;
+          if (handlePromise) {
+            const handle = await handlePromise;
+            writable = await handle.createWritable();
+          }
           const controller = new AbortController();
           const cancel = $('sftp-cancel-transfer');
           activeDownload = { controller };
@@ -1231,13 +1253,26 @@ function renderSftpList(entries) {
             if (!resp.ok) throw new Error(`下载请求失败: ${resp.status}`);
             if (!resp.body) throw new Error('浏览器不支持流式下载');
             const reader = resp.body.getReader();
-            const parts = [];
+            const parts = writable ? null : [];
+            let outputBytes = 0;
             while (true) {
               const { done, value } = await reader.read();
               if (done) break;
-              parts.push(value);
+              outputBytes += value.byteLength;
+              if (writable) await writable.write(value);
+              else parts.push(value);
+            }
+            if (writable) {
+              await writable.close();
+              committed = true;
+              return { saved: true, size: outputBytes };
             }
             return new Blob(parts, { type: 'application/zip' });
+          } catch (error) {
+            if (writable && !committed) {
+              try { await writable.abort(); } catch {}
+            }
+            throw error;
           } finally {
             polling = false;
             await pollingPromise;
@@ -1246,20 +1281,28 @@ function renderSftpList(entries) {
             cancel.onclick = null;
           }
         };
-        const download = e.isDir ? dirDownload() : resumableDownload(url, (loaded, total) => {
+        const reportFileProgress = (loaded, total) => {
           if (total > 0) {
             showProgress(`下载: ${dlName} ${(loaded / total * 100).toFixed(0)}% (${fmtSize(loaded)}/${fmtSize(total)})`,
               loaded / total * 100); updateTransferTask(task, loaded / total * 100);
           } else {
             showProgress(`下载: ${dlName} ${fmtSize(loaded)}`, undefined);
           }
-        });
-        const blob = await download;
-        if (blob && blob.size > 0) {
+        };
+        const download = e.isDir
+          ? dirDownload(fileHandlePromise)
+          : fileHandlePromise
+            ? streamDownloadToFile(url, fileHandlePromise, reportFileProgress)
+            : resumableDownload(url, reportFileProgress);
+        const result = await download;
+        if (result?.saved) {
+          doneProgress(`✅ 已下载: ${dlName} (${fmtSize(result.size)})`);
+          updateTransferTask(task, 100, 'done', '完成');
+        } else if (result instanceof Blob) {
           // SSH 已对传输数据做 MAC/AEAD 完整性校验。过去这里再次从远端
           // 完整读取文件计算 SHA-256，导致下载网络流量和耗时翻倍。
-          saveBlob(blob, dlName);
-          doneProgress(`✅ 已下载: ${dlName} (${fmtSize(blob.size)})`);
+          saveBlob(result, dlName);
+          doneProgress(`✅ 已下载: ${dlName} (${fmtSize(result.size)})`);
           updateTransferTask(task, 100, 'done', '完成');
         } else {
           throw new Error('响应为空');
@@ -1268,7 +1311,8 @@ function renderSftpList(entries) {
         $('sftp-progress').classList.add('hidden');
         const cancelled = err && err.name === 'AbortError';
         $('sftp-status').textContent = cancelled ? '下载已取消' : `下载失败: ${err.message}`;
-        updateTransferTask(task, undefined, cancelled ? 'cancelled' : 'failed', cancelled ? '已取消' : '失败');
+        updateTransferTask(task, undefined, cancelled ? 'cancelled' : 'failed',
+          cancelled ? '已取消' : (err.message || '失败'));
       }
     });
     el.appendChild(row);
@@ -2242,9 +2286,62 @@ let activeDownload = null;
 function cancelActiveDownload() {
   if (activeDownload) activeDownload.controller.abort();
 }
+// 大文件直接写入 File System Access API 提供的临时文件。close() 前由
+// 浏览器原子提交；失败/取消时 abort()，不会留下伪装成完整文件的结果。
+async function streamDownloadToFile(url, handlePromise, onProg, retries = 3) {
+  const handle = await handlePromise;
+  const writable = await handle.createWritable();
+  const controller = new AbortController();
+  const cancel = $('sftp-cancel-transfer');
+  let received = 0;
+  let total = 0;
+  let committed = false;
+  activeDownload = { controller };
+  cancel.classList.remove('hidden');
+  cancel.onclick = cancelActiveDownload;
+  try {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const headers = received ? { Range: `bytes=${received}-` } : {};
+        const response = await fetch(url, { headers, signal: controller.signal });
+        if (!response.ok || !response.body) throw new Error(`下载请求失败: ${response.status}`);
+        if (received && response.status !== 206) throw new Error('服务端未接受断点续传');
+        const range = response.headers.get('Content-Range');
+        const length = Number(response.headers.get('Content-Length') || 0);
+        total = range ? Number(range.split('/')[1]) : (length || total);
+        if (received) await writable.seek(received);
+        const reader = response.body.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          await writable.write(value);
+          received += value.byteLength;
+          if (onProg) onProg(received, total);
+        }
+        if (total > 0 && received !== total) {
+          throw new Error(`下载不完整: ${fmtSize(received)}/${fmtSize(total)}`);
+        }
+        await writable.close();
+        committed = true;
+        return { saved: true, size: received };
+      } catch (error) {
+        if (error.name === 'AbortError' || attempt >= retries) throw error;
+        setStatus(`下载中断，已从 ${fmtSize(received)} 处自动续传 ${attempt + 1}/${retries}`);
+        await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
+      }
+    }
+  } finally {
+    if (!committed) {
+      try { await writable.abort(); } catch {}
+    }
+    activeDownload = null;
+    cancel.classList.add('hidden');
+    cancel.onclick = null;
+  }
+}
 // Keep partial data in memory for the current operation and retry a failed
-// request from the byte offset already received. Browser download files cannot
-// be appended safely, so final disk persistence still happens only on success.
+// request from the byte offset already received. This Blob fallback is only
+// used below the direct-to-disk threshold.
 async function resumableDownload(url, onProg, retries = 3) {
   const chunks = [];
   let received = 0;
@@ -2330,6 +2427,16 @@ async function uploadFileSmart(tabId, dirPath, name, file, onProg) {
   });
   result.resumed = offset > 0;
   return result;
+}
+// Non-Chromium fallback: hand the response to the browser download manager,
+// which also streams to disk instead of buffering the complete file in JS.
+function startNativeDownload(url, name) {
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 // 文件上传 (带断点续传/多线程 + 进度条)
 $('sftp-upload').onclick = () => $('sftp-file-input').click();
