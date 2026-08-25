@@ -192,6 +192,8 @@ class SSHConnection extends BaseConnection {
     return new Promise((resolve, reject) => {
       if (this._sftp) return resolve(this._sftp);
       if (!this.client) return reject(new Error('SSH 未连接'));
+      // ssh2 的首个参数是子系统环境变量，并不能调整 SFTP 通道窗口。
+      // 文件传输吞吐由 server/sftp-transfer.js 的并发读写请求提升。
       this.client.sftp((err, sftp) => {
         if (err) return reject(err);
         this._sftp = sftp;

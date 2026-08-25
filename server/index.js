@@ -4,9 +4,10 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { randomUUID, randomBytes } = require('crypto');
+const { randomUUID, randomBytes, createHash } = require('crypto');
 const { WebSocketServer } = require('ws');
 const { createBackup, readBackup, parseOpenSSHConfig } = require('./session-backup');
+const { createParallelReadStream, receiveParallelUpload } = require('./sftp-transfer');
 
 const ROOT = path.join(__dirname, '..');
 const WEB = path.join(ROOT, 'web');
@@ -36,6 +37,14 @@ if (process.env.SSHTERM_TEST_SFTP_ROOT) {
 const MAX_CONCURRENT_UPLOADS = 3;  // 最大并发上传数
 let activeUploads = 0;
 const activeUploadKeys = new Set(); // connId:remotePath; prevents overlapping r+/w writes
+const directoryDownloads = new Map();
+const directoryDownloadCleanup = setInterval(() => {
+  const cutoff = Date.now() - 5 * 60 * 1000;
+  for (const [id, job] of directoryDownloads) {
+    if (job.updatedAt < cutoff) directoryDownloads.delete(id);
+  }
+}, 60 * 1000);
+directoryDownloadCleanup.unref();
 // A random per-process capability prevents arbitrary web pages from controlling
 // the loopback service.  Loopback is not an authentication boundary by itself.
 const CLIENT_TOKEN = randomBytes(32).toString('base64url');
@@ -319,7 +328,7 @@ const server = http.createServer((req, res) => {
     const contentLength = Number(req.headers['content-length'] || 0);
     if (!conn || !conn.getSftpInst() || !name || !Number.isSafeInteger(offset) || offset < 0 ||
         segments.some(p => !p || p === '.' || p === '..' || p.includes('\0')) ||
-        (contentLength && (!Number.isSafeInteger(contentLength) || contentLength > MAX_SFTP_UPLOAD_BYTES))) {
+        (contentLength && (!Number.isSafeInteger(contentLength) || offset + contentLength > MAX_SFTP_UPLOAD_BYTES))) {
       res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
       return res.end('上传参数错误(连接或文件名无效)');
     }
@@ -365,54 +374,32 @@ const server = http.createServer((req, res) => {
       next(0);
     });
     mkdirs(parent).then(() => {
-      // offset>0 用 r+ 模式续写, offset=0 用 w 新建。一个远端文件同
-      // 一时间仅允许一个请求，避免分块上传之间的创建/覆盖竞态。
-      const ws = sftp.createWriteStream(remotePath, {
-        flags: offset > 0 ? 'r+' : 'w',
+      // createWriteStream 每次只保持一个约 32 KiB 的 WRITE 在途，高延迟
+      // 网络会被 RTT 严重限速。这里使用有界并发随机写，同时保持偏移
+      // 有序且仍然只允许一个请求写同一远端文件。
+      const hash = offset === 0 ? createHash('sha256') : null;
+      const transfer = receiveParallelUpload(req, sftp, remotePath, {
         start: offset,
+        flags: offset > 0 ? 'r+' : 'w',
+        maxBytes: MAX_SFTP_UPLOAD_BYTES - offset,
+        onData: hash ? chunk => hash.update(chunk) : undefined,
       });
-      let received = 0;
-      let aborted = false;
       req.setTimeout(30 * 60 * 1000, () => {
-        aborted = true;
-        req.destroy(new Error('上传超时'));
-        ws.destroy(new Error('上传超时'));
+        const error = new Error('上传超时');
+        transfer.abort(error);
+        req.destroy(error);
       });
-      req.on('data', (chunk) => {
-        received += chunk.length;
-        if (received > MAX_SFTP_UPLOAD_BYTES) {
-          aborted = true;
-          req.destroy(new Error('上传文件超过大小上限'));
-          ws.destroy(new Error('上传文件超过大小上限'));
-        }
-      });
-      req.on('aborted', () => { aborted = true; try { ws.destroy(); } catch {} });
-      req.on('error', () => { aborted = true; try { ws.destroy(); } catch {} });
-      req.pipe(ws);
-      ws.on('close', () => {
-        if (aborted) return finish(499, '上传已取消或超时');
-        // A complete remote hash is calculated exactly once, after the only
-        // writer closes. It is used by the UI to verify the local file.
-        const crypto = require('crypto');
-        const hash = crypto.createHash('sha256');
-        const rs = conn.getSftpInst().createReadStream(remotePath);
-        rs.on('data', d => hash.update(d));
-        rs.on('error', (e) => {
-          console.log('[sftp-upload] 校验错误:', e.message);
-          finish(500, `校验文件哈希失败: ${e.message}`);
+      transfer.promise.then(({ received }) => {
+        req.setTimeout(0);
+        const fileHash = hash ? hash.digest('hex') : null;
+        console.log(`[sftp-upload] ${remotePath} 完成, size=${received}${fileHash ? `, hash=${fileHash.substring(0, 16)}...` : ''}`);
+        finish(200, '', {
+          ok: true, size: received, hash: fileHash,
+          message: offset > 0 ? '续写完成' : '上传完成',
         });
-        rs.on('end', () => {
-          const fileHash = hash.digest('hex');
-          console.log(`[sftp-upload] ${remotePath} 完成, size=${received}, hash=${fileHash.substring(0, 16)}...`);
-          finish(200, '', {
-            ok: true, size: received, hash: fileHash,
-            message: offset > 0 ? '续写完成' : '上传完成',
-          });
-        });
-      });
-      ws.on('error', (e) => {
+      }).catch((e) => {
         console.log('[sftp-upload] 错误:', e.message);
-        finish(500, e.message);
+        finish(req.aborted ? 499 : 500, e.message);
       });
     }).catch((e) => finish(500, `创建远端目录失败: ${e.message}`));
     return;
@@ -435,51 +422,163 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // 目录 ZIP 的 HTTP 字节数与压缩前文件字节数不是同一口径。前端通过
+  // 此轻量接口读取服务端实际已读取的远端字节数，扫描和压缩阶段均可
+  // 显示真实进度。
+  if (url.startsWith('/api/sftp/download-progress')) {
+    const qs = new URLSearchParams(req.url.split('?')[1] || '');
+    const conn = getHttpConnection(qs);
+    const jobId = qs.get('job') || '';
+    const job = directoryDownloads.get(jobId);
+    if (!conn || !job || job.conn !== conn) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ error: '下载任务不存在' }));
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    return res.end(JSON.stringify({
+      phase: job.phase, loaded: job.loaded, total: job.total,
+      filesDone: job.filesDone, filesTotal: job.filesTotal,
+      error: job.error || '',
+    }));
+  }
+
   // SFTP 目录下载 (递归打包 zip, 流式): /api/sftp/download-dir?conn=<id>&path=<远端目录>
   if (url.startsWith('/api/sftp/download-dir')) {
     const qs = new URLSearchParams(req.url.split('?')[1] || '');
     const conn = getHttpConnection(qs);
     const rdir = qs.get('path') || '';
+    const jobId = qs.get('job') || '';
     if (!conn || !conn.getSftpInst()) {
       res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
       return res.end('SFTP 通道未就绪(连接可能已断开)');
     }
+    if (jobId && !/^[a-zA-Z0-9_-]{8,80}$/.test(jobId)) {
+      res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+      return res.end('下载任务标识无效');
+    }
+    const job = {
+      conn, phase: 'scanning', loaded: 0, total: 0,
+      filesDone: 0, filesTotal: 0, error: '', updatedAt: Date.now(),
+    };
+    if (jobId) directoryDownloads.set(jobId, job);
     const dirName = path.basename(rdir) || 'download';
-    res.writeHead(200, {
-      'Content-Type': 'application/zip',
-      'Content-Disposition': `attachment; filename="${encodeURIComponent(dirName)}.zip"`,
-      'Cache-Control': 'no-cache',
-    });
     conn.sftpCollectFiles(rdir).then(async (files) => {
       try {
+        const totalBytes = files.reduce((s, f) => s + f.size, 0);
+        job.phase = 'transferring';
+        job.total = totalBytes;
+        job.filesTotal = files.length;
+        job.updatedAt = Date.now();
+        res.writeHead(200, {
+          'Content-Type': 'application/zip',
+          'Content-Disposition': `attachment; filename="${encodeURIComponent(dirName)}.zip"`,
+          'Cache-Control': 'no-cache',
+          'X-Total-Size': String(totalBytes),
+          'X-File-Count': String(files.length),
+        });
         const { ZipArchive } = require('archiver');
         const archive = new ZipArchive({ zlib: { level: 1 } });   // 低压缩快打包
-        archive.on('error', (e) => { console.log('[sftp-zip]', e.message); res.end(); });
-        archive.pipe(res);
-        // worker 限流: 同时只读 16 个文件流, 防止 SFTP 通道过载 (大目录 1.3 万文件)
-        const MAX_STREAMS = 16;
-        let idx = 0;
-        const worker = () => new Promise((resolve) => {
-          const next = () => {
-            const f = files[idx++];
-            if (!f) return resolve();
-            const rs = conn.getSftpInst().createReadStream(f.path);
-            rs.on('error', () => next());          // 单文件失败跳过
-            rs.on('end', next);
-            archive.append(rs, { name: f.name });
-          };
-          next();
+        const activeStreams = new Set();
+        const entryWaiters = new Map();
+        let archiveFailed = false;
+        const rejectEntryWaiters = (error) => {
+          for (const waiter of entryWaiters.values()) waiter.reject(error);
+          entryWaiters.clear();
+        };
+        const failArchive = (e) => {
+          if (archiveFailed) return;
+          archiveFailed = true;
+          console.log('[sftp-zip]', e.message);
+          job.phase = 'failed'; job.error = e.message; job.updatedAt = Date.now();
+          rejectEntryWaiters(e);
+          for (const stream of activeStreams) stream.destroy();
+          if (!res.destroyed) res.destroy(e);
+        };
+        archive.on('error', failArchive);
+        archive.on('entry', entry => {
+          const waiter = entryWaiters.get(entry.name);
+          if (!waiter) return;
+          entryWaiters.delete(entry.name);
+          waiter.resolve();
         });
+        archive.on('end', () => {
+          job.phase = 'done'; job.loaded = job.total;
+          job.filesDone = job.filesTotal; job.updatedAt = Date.now();
+        });
+        archive.pipe(res);
+        req.on('aborted', () => {
+          job.phase = 'cancelled'; job.error = '下载已取消'; job.updatedAt = Date.now();
+          rejectEntryWaiters(new Error('下载已取消'));
+          for (const stream of activeStreams) stream.destroy();
+          archive.abort();
+        });
+        // 小文件先由多个 worker 并发预取，隐藏每个文件的
+        // open/read/close 往返延迟；每个大文件内部则保持 32 个 READ
+        // 请求在途。仅预取固定数量的小文件，内存有明确上限。
+        const MAX_STREAMS = 8;
+        const SMALL_FILE_BUFFER = 512 * 1024;
+        let idx = 0;
+        const appendBuffer = (buffer, name) => new Promise((resolve, reject) => {
+          entryWaiters.set(name, { resolve, reject });
+          archive.append(buffer, { name });
+        });
+        const worker = async () => {
+          while (idx < files.length) {
+            const f = files[idx++];
+            const rs = createParallelReadStream(conn.getSftpInst(), f.path, {
+              start: 0, end: Math.max(-1, f.size - 1),
+              concurrency: f.size <= SMALL_FILE_BUFFER ? 4 : 32,
+            });
+            activeStreams.add(rs);
+            rs.on('error', failArchive);
+            if (f.size <= SMALL_FILE_BUFFER) {
+              const chunks = [];
+              await new Promise((resolve, reject) => {
+                rs.on('data', chunk => {
+                  chunks.push(chunk);
+                  job.loaded += chunk.length;
+                  job.updatedAt = Date.now();
+                });
+                rs.on('error', reject);
+                rs.on('end', resolve);
+              });
+              activeStreams.delete(rs);
+              job.filesDone++;
+              job.updatedAt = Date.now();
+              await appendBuffer(Buffer.concat(chunks, f.size), f.name);
+            } else {
+              await new Promise((resolve, reject) => {
+                rs.on('data', chunk => {
+                  job.loaded += chunk.length;
+                  job.updatedAt = Date.now();
+                });
+                rs.on('error', reject);
+                rs.on('end', resolve);
+                archive.append(rs, { name: f.name });
+              });
+              activeStreams.delete(rs);
+              job.filesDone++;
+              job.updatedAt = Date.now();
+            }
+          }
+        };
         await Promise.all(Array.from({ length: Math.min(MAX_STREAMS, files.length) }, worker));
-        archive.finalize();
+        job.phase = 'packing'; job.updatedAt = Date.now();
+        await archive.finalize();
         console.log(`[sftp-zip] ${rdir} → ${files.length} 文件打包完成`);
       } catch (e) {
         console.log('[sftp-zip] 异常:', e.message);
-        res.end(`\n[目录打包失败] ${e.message}`);
+        job.phase = 'failed'; job.error = e.message; job.updatedAt = Date.now();
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end(`目录打包失败: ${e.message}`);
+        } else if (!res.destroyed) res.destroy(e);
       }
     }).catch((e) => {
       console.log('[sftp-zip] 收集失败:', e.message);
-      res.end(`\n[目录打包失败] ${e.message}`);
+      job.phase = 'failed'; job.error = e.message; job.updatedAt = Date.now();
+      if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end(`目录扫描失败: ${e.message}`);
     });
     return;
   }
@@ -533,7 +632,7 @@ const server = http.createServer((req, res) => {
       if (partial) headers['Content-Range'] = `bytes ${start}-${end}/${size}`;
       res.writeHead(partial ? 206 : 200, headers);
       if (size === 0) return res.end();
-      const rs = sftp.createReadStream(rpath, { start, end });
+      const rs = createParallelReadStream(sftp, rpath, { start, end });
       rs.on('error', (e) => { if (!res.writableEnded) res.destroy(e); });
       req.on('aborted', () => { try { rs.destroy(); } catch {} });
       rs.pipe(res);

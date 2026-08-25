@@ -5,17 +5,64 @@
 
 ## 快速开始
 
+### 首次运行
+
+首次运行建议双击 `run.bat`。它会检查 Node.js、在缺少 `node_modules` 时自动安装依赖，然后启动服务并打开浏览器：
+
 ```bat
-run.bat          :: 双击运行(首次自动装依赖, 自动开浏览器)
+run.bat
 ```
 
-或手动:
+`run.bat` 是前台诊断启动方式，因此会保留一个命令窗口；关闭该窗口会停止服务。
+
+### 无命令窗口启动（推荐日常使用）
+
+完成首次依赖安装后，双击：
+
+```text
+launcher.vbs
+```
+
+启动器会：
+
+- 从项目所在目录调用 `launch.ps1`，不依赖写死的安装路径；
+- 在后台隐藏启动 Node 服务，不显示命令窗口；
+- 等待服务就绪后自动打开 `http://127.0.0.1:8787/`；
+- 如果服务已经运行，直接打开现有服务页面，不重复启动；
+- 所有浏览器页面关闭约 10 秒后自动结束后台服务。
+
+也可以手动执行隐藏启动脚本：
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "D:\sshterm\launch.ps1"
+```
+
+或在终端前台手动启动：
 
 ```bash
-npm install      # 首次
-node server/index.js
+npm install      # 仅首次或依赖发生变化时需要
+npm start
 # 浏览器打开 http://127.0.0.1:8787
 ```
+
+### 启动故障排查
+
+隐藏启动不会弹出错误窗口。如果双击 `launcher.vbs` 后没有打开页面，请检查：
+
+```text
+%USERPROFILE%\.sshterm\logs\launcher.log
+%USERPROFILE%\.sshterm\logs\server-stderr.log
+%USERPROFILE%\.sshterm\logs\server-stdout.log
+```
+
+常用检查命令：
+
+```powershell
+where.exe node
+Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8787/
+```
+
+如果 `where.exe node` 找不到 Node.js，请先安装 Node.js；如果依赖尚未安装，请运行一次 `run.bat` 或 `npm install`。
 
 ## 功能
 
@@ -73,12 +120,16 @@ server/               Node 服务端
 web/                  前端 (index.html / app.js / style.css)
 tests/                e2e 测试 (SSH/Telnet/串口)
 perf-proto/           链路压测原型 (性能验证)
+run.bat               前台启动/首次安装依赖/故障诊断
+launcher.vbs          Windows 无窗口启动入口
+launch.ps1            隐藏 Node、健康检查、打开浏览器及记录启动日志
 ```
 
 ## 已知边界
 
 - 串口收发回环需对端设备(或安装 com0com 虚拟串口对,见下);
-- 关浏览器后服务自动清理连接;关闭 run.bat 窗口即停止服务;
+- 使用 `launcher.vbs` 时，所有浏览器页面关闭约 10 秒后后台服务自动退出；
+- 使用 `run.bat` 时，关闭命令窗口即停止服务；
 - 需要独立 exe 时,后续可用 Tauri/WebView2 套壳,核心不变。
 
 ### 串口回环验证(可选)

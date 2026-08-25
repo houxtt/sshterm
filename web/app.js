@@ -1181,16 +1181,72 @@ function renderSftpList(entries) {
     };
     row.querySelector('.sftp-dl')?.addEventListener('click', async (ev) => {
       ev.stopPropagation();
-      if (!e.isDir && activeDownload) return setStatus('已有下载进行中，请先完成或取消');
+      if (activeDownload) return setStatus('已有下载进行中，请先完成或取消');
       const full = sftpJoin(sftpPath, e.name);
+      const jobId = e.isDir ? `dir_${Date.now()}_${Math.random().toString(36).slice(2)}` : '';
       const url = e.isDir
-        ? apiUrl('/api/sftp/download-dir', { conn: sftpConnId, path: full })
+        ? apiUrl('/api/sftp/download-dir', { conn: sftpConnId, path: full, job: jobId })
         : apiUrl('/api/sftp/download', { conn: sftpConnId, path: full });
       const dlName = e.isDir ? e.name + '.zip' : e.name;
       const task = newTransferTask('下载', dlName);
       showProgress(`下载: ${dlName} 准备中...`, 0);
       try {
-        const download = e.isDir ? xhrDownload(url, undefined) : resumableDownload(url, (loaded, total) => {
+        // ZIP 输出字节数受压缩率影响，不能拿它除以原文件总大小。轮询
+        // 服务端实际读取的远端字节数，扫描目录时也显示不定进度状态。
+        const dirDownload = async () => {
+          const controller = new AbortController();
+          const cancel = $('sftp-cancel-transfer');
+          activeDownload = { controller };
+          cancel.classList.remove('hidden');
+          cancel.onclick = cancelActiveDownload;
+          let polling = true;
+          const pollProgress = async () => {
+            while (polling) {
+              try {
+                const progressResp = await fetch(apiUrl('/api/sftp/download-progress', {
+                  conn: sftpConnId, job: jobId,
+                }), { cache: 'no-store', signal: controller.signal });
+                if (progressResp.ok) {
+                  const progress = await progressResp.json();
+                  if (progress.phase === 'scanning') {
+                    showProgress(`下载: ${dlName} 正在扫描目录…`, undefined);
+                  } else if (progress.total > 0) {
+                    const pct = Math.min(100, progress.loaded / progress.total * 100);
+                    showProgress(`下载: ${dlName} ${pct.toFixed(0)}% (${fmtSize(progress.loaded)}/${fmtSize(progress.total)}，${progress.filesDone}/${progress.filesTotal} 文件)`, pct);
+                    updateTransferTask(task, pct);
+                  } else if (progress.filesTotal === 0 && progress.phase === 'transferring') {
+                    showProgress(`下载: ${dlName} 正在创建空目录压缩包…`, undefined);
+                  }
+                  if (progress.phase === 'failed') throw new Error(progress.error || '目录下载失败');
+                }
+              } catch (error) {
+                if (error.name === 'AbortError') return;
+              }
+              await new Promise(resolve => setTimeout(resolve, 250));
+            }
+          };
+          const pollingPromise = pollProgress();
+          try {
+            const resp = await fetch(url, { signal: controller.signal });
+            if (!resp.ok) throw new Error(`下载请求失败: ${resp.status}`);
+            if (!resp.body) throw new Error('浏览器不支持流式下载');
+            const reader = resp.body.getReader();
+            const parts = [];
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              parts.push(value);
+            }
+            return new Blob(parts, { type: 'application/zip' });
+          } finally {
+            polling = false;
+            await pollingPromise;
+            activeDownload = null;
+            cancel.classList.add('hidden');
+            cancel.onclick = null;
+          }
+        };
+        const download = e.isDir ? dirDownload() : resumableDownload(url, (loaded, total) => {
           if (total > 0) {
             showProgress(`下载: ${dlName} ${(loaded / total * 100).toFixed(0)}% (${fmtSize(loaded)}/${fmtSize(total)})`,
               loaded / total * 100); updateTransferTask(task, loaded / total * 100);
@@ -1200,11 +1256,8 @@ function renderSftpList(entries) {
         });
         const blob = await download;
         if (blob && blob.size > 0) {
-          if (!e.isDir) {
-            const verification = await verifyDownloadedSha256(sftpConnId, full, blob);
-            if (verification === 'mismatch') throw new Error('SHA-256 校验失败，文件未保存');
-            if (verification === 'verified') setStatus('SHA-256 校验通过，正在保存文件');
-          }
+          // SSH 已对传输数据做 MAC/AEAD 完整性校验。过去这里再次从远端
+          // 完整读取文件计算 SHA-256，导致下载网络流量和耗时翻倍。
           saveBlob(blob, dlName);
           doneProgress(`✅ 已下载: ${dlName} (${fmtSize(blob.size)})`);
           updateTransferTask(task, 100, 'done', '完成');
@@ -2145,24 +2198,20 @@ async function sha256File(file) {
   const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
   return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
-async function verifyRemoteSha256(connId, remotePath, file) {
-  const local = await sha256File(file); if (!local) return '已上传（文件过大，跳过本地校验）';
-  const resp = await fetch(apiUrl('/api/sftp/checksum', { conn: connId, path: remotePath }));
-  if (!resp.ok) throw new Error('远端校验失败');
-  return (await resp.json()).hash === local ? 'SHA-256 已校验' : 'SHA-256 不匹配';
-}
 function showProgress(text, pct) {
   const now = Date.now();
   if (now - _progLast < 80 && pct !== undefined && pct < 100) return;  // 节流 80ms
   _progLast = now;
   $('sftp-progress').classList.remove('hidden');
   $('sftp-progress-text').textContent = text;
+  $('sftp-progress-fill').classList.toggle('indeterminate', pct === undefined);
   if (pct !== undefined) {
     $('sftp-progress-fill').style.width = Math.min(100, Math.round(pct)) + '%';
   }
 }
 function doneProgress(text) {
   _progLast = 0;
+  $('sftp-progress-fill').classList.remove('indeterminate');
   $('sftp-progress-fill').classList.add('done');
   $('sftp-progress-fill').style.width = '100%';
   $('sftp-progress-text').textContent = text;
@@ -2180,35 +2229,14 @@ function xhrUpload(url, file, onProg) {
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && onProg) onProg(e.loaded, e.total);
     };
-    xhr.onload = () => resolve(xhr.status);
+    xhr.onload = () => {
+      let payload = null;
+      try { payload = xhr.responseText ? JSON.parse(xhr.responseText) : null; } catch {}
+      resolve({ status: xhr.status, payload });
+    };
     xhr.onerror = () => reject(new Error('网络错误'));
     xhr.send(file);
   });
-}
-// XHR 下载 (带进度) → resolve(blob)
-function xhrDownload(url, onProg) {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open('GET', url);
-    xhr.responseType = 'blob';
-    xhr.onprogress = (e) => {
-      if (onProg) onProg(e.loaded, e.lengthComputable ? e.total : 0);
-    };
-    xhr.onload = () => resolve(xhr.response);
-    xhr.onerror = () => reject(new Error('网络错误'));
-    xhr.send();
-  });
-}
-async function verifyDownloadedSha256(connId, remotePath, blob) {
-  // WebCrypto is one-shot; avoid duplicating very large files in renderer
-  // memory. The server still protects transfer integrity through Range retry.
-  if (!window.crypto?.subtle || blob.size > 256 * 1024 * 1024) return 'skipped';
-  const resp = await fetch(apiUrl('/api/sftp/checksum', { conn: connId, path: remotePath }));
-  if (!resp.ok) throw new Error('无法读取远端 SHA-256');
-  const expected = (await resp.json()).hash;
-  const digest = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer());
-  const actual = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
-  return actual === expected ? 'verified' : 'mismatch';
 }
 let activeDownload = null;
 function cancelActiveDownload() {
@@ -2289,14 +2317,19 @@ function remoteSize(url) {
 async function uploadFileSmart(tabId, dirPath, name, file, onProg) {
   const base = apiUrl('/api/sftp/upload', { conn: tabId, path: dirPath, name });
   const remote = await remoteSize(base);
-  let offset = remote;
-  if (offset >= file.size) { onProg(1); return 200; }   // 已完整存在
+  let offset = remote > file.size ? 0 : remote;
+  if (file.size > 0 && offset === file.size) {
+    onProg(1);
+    return { status: 200, payload: null, skipped: true };
+  }
 
   // 单线程续传: 从 offset 继续
   const blob = file.slice(offset);
-  return xhrUpload(`${base}&offset=${offset}`, blob, (loaded, t) => {
+  const result = await xhrUpload(`${base}&offset=${offset}`, blob, (loaded, t) => {
     onProg((offset + loaded) / file.size);
   });
+  result.resumed = offset > 0;
+  return result;
 }
 // 文件上传 (带断点续传/多线程 + 进度条)
 $('sftp-upload').onclick = () => $('sftp-file-input').click();
@@ -2307,12 +2340,15 @@ $('sftp-file-input').onchange = async (e) => {
     await waitForUploadQueue();
     const task = newTransferTask('上传', file.name); showProgress(`上传: ${file.name} 0%`, 0);
     try {
-      const status = await uploadFileSmart(sftpConnId, sftpPath, file.name, file,
+      const result = await uploadFileSmart(sftpConnId, sftpPath, file.name, file,
         p => { showProgress(`上传: ${file.name} ${(p * 100).toFixed(0)}%`, p * 100); updateTransferTask(task, p * 100); });
-      if (status !== 200) throw new Error('服务端返回 ' + status);
+      if (result.status !== 200) throw new Error('服务端返回 ' + result.status);
       updateTransferTask(task, 100, 'running', '校验中');
-      const remotePath = sftpPath.endsWith('/') ? sftpPath + file.name : `${sftpPath}/${file.name}`;
-      const verified = await verifyRemoteSha256(sftpConnId, remotePath, file);
+      let verified = result.skipped ? '远端已存在完整文件' : (result.resumed ? '续传完成（SSH 完整性已校验）' : 'SSH 完整性已校验');
+      if (result.payload?.hash) {
+        const localHash = await sha256File(file);
+        if (localHash) verified = localHash === result.payload.hash ? 'SHA-256 已校验' : 'SHA-256 不匹配';
+      }
       updateTransferTask(task, 100, verified.includes('不匹配') ? 'failed' : 'done', verified);
     } catch (err) { updateTransferTask(task, undefined, 'failed', '失败'); }
   }
@@ -2326,19 +2362,36 @@ $('sftp-dir-input').onchange = async (e) => {
   const files = [...(e.target.files || [])];
   if (!files.length) return;
   const total = files.length;
+  const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
+  const progressByFile = new Array(total).fill(0);
+  const rootName = (files[0].webkitRelativePath || files[0].name).split('/')[0];
+  const task = newTransferTask('上传目录', rootName);
   let ok = 0, fail = 0;
-  for (let i = 0; i < files.length; i++) {
-    const f = files[i];
-    const rel = f.webkitRelativePath || f.name;
-    const url = apiUrl('/api/sftp/upload', { conn: sftpConnId, path: sftpPath, name: rel });
-    try {
-      const status = await xhrUpload(url, f, (loaded, ftotal) => {
-        const pct = (i + loaded / ftotal) / total * 100;
-        showProgress(`上传 ${i + 1}/${total}: ${rel} ${(loaded / ftotal * 100).toFixed(0)}%`, pct);
-      });
-      if (status === 200) ok++; else fail++;
-    } catch (err) { fail++; }
-  }
+  let nextFile = 0;
+  const updateOverallProgress = (i, filePct, rel) => {
+    progressByFile[i] = filePct;
+    const transferred = progressByFile.reduce((sum, value, index) => sum + value * files[index].size, 0);
+    const pct = totalBytes ? transferred / totalBytes * 100 : progressByFile.filter(value => value >= 1).length / total * 100;
+    showProgress(`上传目录: ${rel} ${(filePct * 100).toFixed(0)}%（总计 ${pct.toFixed(0)}%）`, pct);
+    updateTransferTask(task, pct);
+  };
+  const worker = async () => {
+    while (nextFile < total) {
+      await waitForUploadQueue();
+      const i = nextFile++;
+      const f = files[i];
+      const rel = f.webkitRelativePath || f.name;
+      try {
+        const result = await uploadFileSmart(sftpConnId, sftpPath, rel, f,
+          filePct => updateOverallProgress(i, filePct, rel));
+        if (result.status === 200) { ok++; updateOverallProgress(i, 1, rel); } else fail++;
+      } catch (err) { fail++; }
+    }
+  };
+  // 与服务端的三文件资源上限一致。对大量小文件而言，并行 open/write
+  // 可隐藏每个文件的多次网络往返延迟。
+  await Promise.all(Array.from({ length: Math.min(3, total) }, worker));
+  updateTransferTask(task, 100, fail ? 'failed' : 'done', `${ok}/${total} 成功${fail ? `，${fail} 失败` : ''}`);
   doneProgress(`✅ 文件夹上传完成: ${ok}/${total} 成功${fail ? `, ${fail} 失败` : ''}`);
   sftpLoad();
   e.target.value = '';
@@ -2391,13 +2444,14 @@ $('terms').addEventListener('drop', async (e) => {
   }
   const dir = sftpPath || '.';
   for (const f of files) {
-    const buf = await f.arrayBuffer();
-    setStatus(`上传: ${f.name} (${fmtSize(buf.byteLength)})...`);
+    setStatus(`上传: ${f.name} (${fmtSize(f.size)})...`);
     try {
-      const url = apiUrl('/api/sftp/upload', { conn: tab.id, path: dir, name: f.name });
-      const resp = await fetch(url, { method: 'PUT', body: buf });
-      if (!resp.ok) throw new Error(await resp.text());
+      const result = await uploadFileSmart(tab.id, dir, f.name, f, progress => {
+        showProgress(`上传: ${f.name} ${(progress * 100).toFixed(0)}%`, progress * 100);
+      });
+      if (result.status !== 200) throw new Error(`服务端返回 ${result.status}`);
       setStatus(`✅ 已上传: ${f.name}`);
+      doneProgress(`✅ 已上传: ${f.name}`);
       setTimeout(() => { if (sftpOpen) sftpLoad(); }, 500);
     } catch (err) { setStatus(`上传失败: ${f.name} — ${err.message}`); }
   }

@@ -16,6 +16,9 @@ const fixture = path.join(temp, 'remote');
 let clientToken = '';
 fs.mkdirSync(fixture, { recursive: true });
 fs.writeFileSync(path.join(fixture, 'range.txt'), '0123456789');
+fs.mkdirSync(path.join(fixture, 'folder'), { recursive: true });
+fs.writeFileSync(path.join(fixture, 'folder', 'one.bin'), Buffer.alloc(4096, 1));
+fs.writeFileSync(path.join(fixture, 'folder', 'two.bin'), Buffer.alloc(8192, 2));
 
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 async function waitForServer(deadline = Date.now() + 10000) {
@@ -86,6 +89,15 @@ function pendingUpload(name) {
     const completed = await Promise.all([first.done, second.done, third.done]);
     assert(completed.every(result => result.status === 200), 'reserved uploads must complete');
     assert.strictEqual(fs.readFileSync(path.join(fixture, 'same.bin'), 'utf8'), 'xy', 'upload result content');
+    const job = 'progress_test_123';
+    const archive = await request('GET', `/api/sftp/download-dir?conn=9900&path=folder&job=${job}`);
+    assert.strictEqual(archive.status, 200, 'directory archive status');
+    assert.strictEqual(archive.body.subarray(0, 2).toString(), 'PK', 'directory archive format');
+    const progress = await request('GET', `/api/sftp/download-progress?conn=9900&job=${job}`);
+    const jobState = JSON.parse(progress.body.toString());
+    assert.strictEqual(jobState.phase, 'done', 'directory progress completion');
+    assert.strictEqual(jobState.loaded, 12288, 'directory progress uses uncompressed remote bytes');
+    assert.strictEqual(jobState.filesDone, 2, 'directory progress file count');
     console.log('✅ SFTP range and upload resource integration passed');
   } finally {
     server.kill();

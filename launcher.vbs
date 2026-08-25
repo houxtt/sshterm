@@ -1,4 +1,12 @@
 ' sshterm launcher - hidden start
-' double-click or desktop shortcut
 Set ws = CreateObject("WScript.Shell")
-ws.Run """C:\Users\Administrator\sshterm\run.bat"" --auto-exit", 0, False
+Set fso = CreateObject("Scripting.FileSystemObject")
+base = fso.GetParentFolderName(WScript.ScriptFullName)
+script = base & "\launch.ps1"
+
+If Not fso.FileExists(script) Then
+  MsgBox "Launcher script not found: " & script, 16, "sshterm"
+  WScript.Quit 1
+End If
+
+ws.Run "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File """ & script & """", 0, False
