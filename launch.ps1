@@ -23,17 +23,64 @@ function Write-LauncherLog([string]$message) {
 function Test-SshtermReady {
   try {
     $response = Invoke-WebRequest -UseBasicParsing -Uri $appUrl -TimeoutSec 1
-    return $response.StatusCode -eq 200
+    return $response.StatusCode -eq 200 -and $response.Content -match '<title>sshterm\b'
   } catch {
     return $false
   }
 }
 
+function Get-SourceBuildId {
+  $sourceFiles = @(
+    Get-ChildItem -LiteralPath (Join-Path $scriptDir 'server') -Recurse -File -Filter '*.js'
+    Get-Item -LiteralPath (Join-Path $scriptDir 'package.json')
+  )
+  $latest = ($sourceFiles | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1).LastWriteTimeUtc
+  return [DateTimeOffset]::new($latest).ToUnixTimeMilliseconds().ToString()
+}
+
+function Get-RunningInfo {
+  try {
+    $response = Invoke-WebRequest -UseBasicParsing -Uri ($appUrl + 'launcher-info') -TimeoutSec 1
+    if ($response.StatusCode -ne 200) { return $null }
+    $info = $response.Content | ConvertFrom-Json
+    if ($info.app -ne 'sshterm') { return $null }
+    return $info
+  } catch {
+    return $null
+  }
+}
+
+function Get-ListeningProcessId {
+  foreach ($line in (& netstat.exe -ano -p tcp)) {
+    if ($line -match '^\s*TCP\s+127\.0\.0\.1:8787\s+\S+\s+LISTENING\s+(\d+)\s*$') {
+      return [int]$Matches[1]
+    }
+  }
+  return $null
+}
+
+function Stop-StaleServer([object]$info) {
+  $processId = if ($null -ne $info -and $info.pid) { [int]$info.pid } else { Get-ListeningProcessId }
+  if (-not $processId) { throw 'Cannot identify the stale sshterm server process.' }
+  Write-LauncherLog "Source updated; restarting stale server PID $processId."
+  Stop-Process -Id $processId -ErrorAction Stop
+  for ($i = 0; $i -lt 40; $i++) {
+    Start-Sleep -Milliseconds 100
+    if (-not (Test-SshtermReady)) { return }
+  }
+  throw "Stale sshterm server PID $processId did not stop."
+}
+
 try {
   if (Test-SshtermReady) {
-    Write-LauncherLog 'Server already running; opening browser.'
-    if (-not $NoBrowser) { Start-Process $appUrl }
-    exit 0
+    $sourceBuildId = Get-SourceBuildId
+    $runningInfo = Get-RunningInfo
+    if ($null -ne $runningInfo -and [string]$runningInfo.buildId -eq $sourceBuildId) {
+      Write-LauncherLog 'Server already running with current source; opening browser.'
+      if (-not $NoBrowser) { Start-Process $appUrl }
+      exit 0
+    }
+    Stop-StaleServer $runningInfo
   }
 
   if (-not (Test-Path -LiteralPath $serverScript)) {

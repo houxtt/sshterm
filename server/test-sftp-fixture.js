@@ -39,10 +39,21 @@ function installLocalSftpFixture(connections, root, id = 9900) {
         for (const e of fs.readdirSync(path.join(localDir, base), { withFileTypes: true })) {
           const full = base ? `${base}/${e.name}` : e.name;
           if (e.isDirectory()) walk(full);
-          else files.push({ path: `${String(dir).replace(/\/$/, '')}/${full}`, name: full, size: fs.statSync(path.join(localDir, full)).size });
+          else files.push({
+            path: `${String(dir).replace(/\/$/, '')}/${full}`,
+            name: full,
+            size: fs.statSync(path.join(localDir, full)).size,
+            isSymlink: e.isSymbolicLink(),
+          });
         }
       };
       walk('');
+      if (process.env.SSHTERM_TEST_SFTP_MISSING_ENTRY) {
+        files.push({
+          path: `${String(dir).replace(/\/$/, '')}/removed-after-scan.bin`,
+          name: 'removed-after-scan.bin', size: 123, isSymlink: false,
+        });
+      }
       return files;
     },
   });

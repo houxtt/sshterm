@@ -11,6 +11,23 @@ const { createParallelReadStream, receiveParallelUpload } = require('./sftp-tran
 
 const ROOT = path.join(__dirname, '..');
 const WEB = path.join(ROOT, 'web');
+function newestSourceMtimeMs(dir) {
+  let latest = 0;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const file = path.join(dir, entry.name);
+    if (entry.isDirectory()) latest = Math.max(latest, newestSourceMtimeMs(file));
+    else if (entry.isFile() && entry.name.endsWith('.js')) latest = Math.max(latest, fs.statSync(file).mtimeMs);
+  }
+  return latest;
+}
+// Captured once at process startup.  The desktop launcher compares this value
+// with the source tree so an already-running process cannot silently keep using
+// stale transfer code after an update.
+const SERVER_BUILD_ID = String(Math.trunc(Math.max(
+  newestSourceMtimeMs(__dirname),
+  fs.statSync(path.join(ROOT, 'package.json')).mtimeMs,
+)));
+const SERVER_STARTED_AT = new Date().toISOString();
 const CONN_DIR = path.join(os.homedir(), '.sshterm');
 const CONN_FILE = path.join(CONN_DIR, 'sessions.json');
 const MAX_SFTP_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
@@ -266,6 +283,18 @@ const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css
 const server = http.createServer((req, res) => {
   let url = decodeURIComponent(req.url.split('?')[0]);
 
+  // Public, read-only loopback identity used only by the desktop launcher.
+  // It intentionally contains no session data or control capability.
+  if (req.method === 'GET' && url === '/launcher-info') {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    return res.end(JSON.stringify({
+      app: 'sshterm',
+      buildId: SERVER_BUILD_ID,
+      pid: process.pid,
+      startedAt: SERVER_STARTED_AT,
+    }));
+  }
+
   // The UI obtains this only from the loopback bootstrap script.  State-changing
     // and file-transfer endpoints require it; static assets remain public but
     // cannot perform privileged actions.
@@ -438,7 +467,7 @@ const server = http.createServer((req, res) => {
     return res.end(JSON.stringify({
       phase: job.phase, loaded: job.loaded, total: job.total,
       filesDone: job.filesDone, filesTotal: job.filesTotal,
-      error: job.error || '',
+      skipped: job.skipped || 0, warning: job.warning || '', error: job.error || '',
     }));
   }
 
@@ -458,23 +487,31 @@ const server = http.createServer((req, res) => {
     }
     const job = {
       conn, phase: 'scanning', loaded: 0, total: 0,
-      filesDone: 0, filesTotal: 0, error: '', updatedAt: Date.now(),
+      filesDone: 0, filesTotal: 0, skipped: 0,
+      warning: '', error: '', updatedAt: Date.now(),
     };
     if (jobId) directoryDownloads.set(jobId, job);
     const dirName = path.basename(rdir) || 'download';
     conn.sftpCollectFiles(rdir).then(async (files) => {
       try {
+        const collectedCount = files.length;
+        const skippedLinks = files.filter(file => file.isSymlink);
+        files = files.filter(file => !file.isSymlink);
         const totalBytes = files.reduce((s, f) => s + f.size, 0);
         job.phase = 'transferring';
         job.total = totalBytes;
-        job.filesTotal = files.length;
+        job.filesTotal = collectedCount;
+        job.filesDone = skippedLinks.length;
+        job.skipped = skippedLinks.length;
+        if (skippedLinks.length) job.warning = `已跳过 ${skippedLinks.length} 个符号链接`;
         job.updatedAt = Date.now();
         res.writeHead(200, {
           'Content-Type': 'application/zip',
           'Content-Disposition': `attachment; filename="${encodeURIComponent(dirName)}.zip"`,
           'Cache-Control': 'no-cache',
           'X-Total-Size': String(totalBytes),
-          'X-File-Count': String(files.length),
+          'X-File-Count': String(collectedCount),
+          'X-Skipped-Count': String(skippedLinks.length),
         });
         const { ZipArchive } = require('archiver');
         const archive = new ZipArchive({ zlib: { level: 1 } });   // 低压缩快打包
@@ -522,6 +559,16 @@ const server = http.createServer((req, res) => {
           entryWaiters.set(name, { resolve, reject });
           archive.append(buffer, { name });
         });
+        const skipUnreadableFile = (file, error, loadedForFile) => {
+          activeStreams.delete(file.stream);
+          job.loaded = Math.max(0, job.loaded - loadedForFile);
+          job.total = Math.max(0, job.total - file.size);
+          job.filesDone++;
+          job.skipped++;
+          job.warning = `${file.name}: ${error.message}`;
+          job.updatedAt = Date.now();
+          console.log(`[sftp-zip] 跳过无法读取的文件 ${file.path}: ${error.message}`);
+        };
         const worker = async () => {
           while (idx < files.length) {
             const f = files[idx++];
@@ -529,33 +576,54 @@ const server = http.createServer((req, res) => {
               start: 0, end: Math.max(-1, f.size - 1),
               concurrency: f.size <= SMALL_FILE_BUFFER ? 4 : 32,
             });
+            f.stream = rs;
             activeStreams.add(rs);
-            rs.on('error', failArchive);
+            let fileLoaded = 0;
             if (f.size <= SMALL_FILE_BUFFER) {
               const chunks = [];
-              await new Promise((resolve, reject) => {
-                rs.on('data', chunk => {
-                  chunks.push(chunk);
-                  job.loaded += chunk.length;
-                  job.updatedAt = Date.now();
+              try {
+                await new Promise((resolve, reject) => {
+                  rs.on('data', chunk => {
+                    chunks.push(chunk);
+                    fileLoaded += chunk.length;
+                    job.loaded += chunk.length;
+                    job.updatedAt = Date.now();
+                  });
+                  rs.on('error', reject);
+                  rs.on('end', resolve);
                 });
-                rs.on('error', reject);
-                rs.on('end', resolve);
-              });
+              } catch (error) {
+                skipUnreadableFile(f, error, fileLoaded);
+                continue;
+              }
               activeStreams.delete(rs);
               job.filesDone++;
               job.updatedAt = Date.now();
               await appendBuffer(Buffer.concat(chunks, f.size), f.name);
             } else {
-              await new Promise((resolve, reject) => {
-                rs.on('data', chunk => {
-                  job.loaded += chunk.length;
-                  job.updatedAt = Date.now();
+              let opened = false;
+              try {
+                await new Promise((resolve, reject) => {
+                  rs.once('open', () => {
+                    opened = true;
+                    archive.append(rs, { name: f.name });
+                  });
+                  rs.on('data', chunk => {
+                    fileLoaded += chunk.length;
+                    job.loaded += chunk.length;
+                    job.updatedAt = Date.now();
+                  });
+                  rs.on('error', reject);
+                  rs.on('end', resolve);
                 });
-                rs.on('error', reject);
-                rs.on('end', resolve);
-                archive.append(rs, { name: f.name });
-              });
+              } catch (error) {
+                if (opened) {
+                  failArchive(error);
+                  throw error;
+                }
+                skipUnreadableFile(f, error, fileLoaded);
+                continue;
+              }
               activeStreams.delete(rs);
               job.filesDone++;
               job.updatedAt = Date.now();
@@ -565,7 +633,7 @@ const server = http.createServer((req, res) => {
         await Promise.all(Array.from({ length: Math.min(MAX_STREAMS, files.length) }, worker));
         job.phase = 'packing'; job.updatedAt = Date.now();
         await archive.finalize();
-        console.log(`[sftp-zip] ${rdir} → ${files.length} 文件打包完成`);
+        console.log(`[sftp-zip] ${rdir} → ${files.length - (job.skipped - skippedLinks.length)} 文件打包完成, 跳过 ${job.skipped}`);
       } catch (e) {
         console.log('[sftp-zip] 异常:', e.message);
         job.phase = 'failed'; job.error = e.message; job.updatedAt = Date.now();

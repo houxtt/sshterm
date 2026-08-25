@@ -1222,24 +1222,38 @@ function renderSftpList(entries) {
           cancel.classList.remove('hidden');
           cancel.onclick = cancelActiveDownload;
           let polling = true;
+          let progressError = null;
+          let skippedFiles = 0;
+          const progressUrl = apiUrl('/api/sftp/download-progress', {
+            conn: sftpConnId, job: jobId,
+          });
+          const applyDirectoryProgress = (progress) => {
+            skippedFiles = progress.skipped || 0;
+            const skippedText = skippedFiles ? `，跳过 ${skippedFiles} 项` : '';
+            if (progress.phase === 'scanning') {
+              showProgress(`下载: ${dlName} 正在扫描目录…`, undefined);
+            } else if (progress.total > 0) {
+              const pct = Math.min(100, progress.loaded / progress.total * 100);
+              showProgress(`下载: ${dlName} ${pct.toFixed(0)}% (${fmtSize(progress.loaded)}/${fmtSize(progress.total)}，${progress.filesDone}/${progress.filesTotal} 文件${skippedText})`, pct);
+              updateTransferTask(task, pct);
+            } else if (progress.phase === 'transferring') {
+              showProgress(`下载: ${dlName} 正在处理空目录或不可读项${skippedText}…`, undefined);
+            }
+            if (progress.phase === 'failed') {
+              progressError = new Error(progress.error || '目录下载失败');
+            }
+          };
           const pollProgress = async () => {
             while (polling) {
               try {
-                const progressResp = await fetch(apiUrl('/api/sftp/download-progress', {
-                  conn: sftpConnId, job: jobId,
-                }), { cache: 'no-store', signal: controller.signal });
+                const progressResp = await fetch(progressUrl, { cache: 'no-store', signal: controller.signal });
                 if (progressResp.ok) {
                   const progress = await progressResp.json();
-                  if (progress.phase === 'scanning') {
-                    showProgress(`下载: ${dlName} 正在扫描目录…`, undefined);
-                  } else if (progress.total > 0) {
-                    const pct = Math.min(100, progress.loaded / progress.total * 100);
-                    showProgress(`下载: ${dlName} ${pct.toFixed(0)}% (${fmtSize(progress.loaded)}/${fmtSize(progress.total)}，${progress.filesDone}/${progress.filesTotal} 文件)`, pct);
-                    updateTransferTask(task, pct);
-                  } else if (progress.filesTotal === 0 && progress.phase === 'transferring') {
-                    showProgress(`下载: ${dlName} 正在创建空目录压缩包…`, undefined);
+                  applyDirectoryProgress(progress);
+                  if (progressError) {
+                    controller.abort();
+                    return;
                   }
-                  if (progress.phase === 'failed') throw new Error(progress.error || '目录下载失败');
                 }
               } catch (error) {
                 if (error.name === 'AbortError') return;
@@ -1265,14 +1279,23 @@ function renderSftpList(entries) {
             if (writable) {
               await writable.close();
               committed = true;
-              return { saved: true, size: outputBytes };
+              return { saved: true, size: outputBytes, skipped: skippedFiles };
             }
             return new Blob(parts, { type: 'application/zip' });
           } catch (error) {
+            // A destroyed chunked ZIP response is reported by fetch only as a
+            // generic network error. Query the job once more to surface the
+            // real SFTP/archive failure recorded by the server.
+            if (!progressError && error.name !== 'AbortError') {
+              try {
+                const progressResp = await fetch(progressUrl, { cache: 'no-store' });
+                if (progressResp.ok) applyDirectoryProgress(await progressResp.json());
+              } catch {}
+            }
             if (writable && !committed) {
               try { await writable.abort(); } catch {}
             }
-            throw error;
+            throw progressError || error;
           } finally {
             polling = false;
             await pollingPromise;
@@ -1296,8 +1319,9 @@ function renderSftpList(entries) {
             : resumableDownload(url, reportFileProgress);
         const result = await download;
         if (result?.saved) {
-          doneProgress(`✅ 已下载: ${dlName} (${fmtSize(result.size)})`);
-          updateTransferTask(task, 100, 'done', '完成');
+          const skippedText = result.skipped ? `，跳过 ${result.skipped} 项` : '';
+          doneProgress(`✅ 已下载: ${dlName} (${fmtSize(result.size)}${skippedText})`);
+          updateTransferTask(task, 100, 'done', result.skipped ? `完成，跳过 ${result.skipped} 项` : '完成');
         } else if (result instanceof Blob) {
           // SSH 已对传输数据做 MAC/AEAD 完整性校验。过去这里再次从远端
           // 完整读取文件计算 SHA-256，导致下载网络流量和耗时翻倍。

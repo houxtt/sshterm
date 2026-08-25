@@ -256,7 +256,10 @@ class SSHConnection extends BaseConnection {
           if (e.attrs.isDirectory()) {
             if (!seen.has(full)) { seen.add(full); sub.dirs.push({ dir: full, base: name }); }
           } else {
-            sub.files.push({ path: full, name, size: e.attrs.size });
+            sub.files.push({
+              path: full, name, size: e.attrs.size,
+              isSymlink: typeof e.attrs.isSymbolicLink === 'function' && e.attrs.isSymbolicLink(),
+            });
           }
         }
         return sub;

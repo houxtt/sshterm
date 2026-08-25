@@ -63,7 +63,8 @@ function pendingUpload(name) {
 (async () => {
   const server = spawn(process.execPath, ['server/index.js', '--port', String(PORT), '--no-open'], {
     cwd: ROOT,
-    env: { ...process.env, USERPROFILE: profile, HOME: profile, SSHTERM_TEST_SFTP_ROOT: fixture },
+    env: { ...process.env, USERPROFILE: profile, HOME: profile,
+      SSHTERM_TEST_SFTP_ROOT: fixture, SSHTERM_TEST_SFTP_MISSING_ENTRY: '1' },
     stdio: 'ignore',
   });
   try {
@@ -97,7 +98,8 @@ function pendingUpload(name) {
     const jobState = JSON.parse(progress.body.toString());
     assert.strictEqual(jobState.phase, 'done', 'directory progress completion');
     assert.strictEqual(jobState.loaded, 12288, 'directory progress uses uncompressed remote bytes');
-    assert.strictEqual(jobState.filesDone, 2, 'directory progress file count');
+    assert.strictEqual(jobState.filesDone, 3, 'directory progress includes skipped files');
+    assert.strictEqual(jobState.skipped, 1, 'directory download skips files removed after scanning');
     console.log('✅ SFTP range and upload resource integration passed');
   } finally {
     server.kill();

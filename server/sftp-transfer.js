@@ -37,6 +37,7 @@ class ParallelSftpReadStream extends Readable {
       this.opening = false;
       if (error) return this.destroy(error);
       this.handle = handle;
+      this.emit('open', handle);
       this._pump();
     });
   }
