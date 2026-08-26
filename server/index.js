@@ -8,6 +8,7 @@ const { randomUUID, randomBytes, createHash } = require('crypto');
 const { WebSocketServer } = require('ws');
 const { createBackup, readBackup, parseOpenSSHConfig } = require('./session-backup');
 const { createParallelReadStream, receiveParallelUpload } = require('./sftp-transfer');
+const { connectionConfigForRequest } = require('./connection-config');
 
 const ROOT = path.join(__dirname, '..');
 const WEB = path.join(ROOT, 'web');
@@ -1168,7 +1169,12 @@ async function handle(ws, m) {
         attachExistingConnection(ws, existing, m.id);
         break;
       }
-      const sess = { ...m.session };
+      const source = Number.isInteger(m.sourceId) ? getConnection(ws, m.sourceId) : null;
+      // Split panes are independent shells/connections, but their browser-side
+      // config is intentionally redacted. Clone the full in-memory config from
+      // the already-authenticated main connection without exposing credentials
+      // back to the browser.
+      const sess = connectionConfigForRequest(source, m.session);
       // 双击列表重连时前端只有脱敏副本, 从存储补全敏感字段
       if (sess.id && sessions[sess.id]) {
         const stored = sessions[sess.id];

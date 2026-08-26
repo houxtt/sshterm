@@ -1905,7 +1905,10 @@ function addPane(tab, dir = 'row', ratio = 0.5, opts = {}) {
   pane.term = term;
   pane.fitAddon = fitAddon;
   host.querySelector('.pane-close').onclick = () => removePane(tab, pane);
-  send({ type: 'connect', session: pane.cfg, id: paneId });
+  // The browser deliberately holds only a redacted session config after a
+  // refresh. Ask the server to clone credentials from the authenticated main
+  // connection instead of trying to reconnect with a missing password/key.
+  send({ type: 'connect', session: pane.cfg, id: paneId, sourceId: tab.id });
   setStatus('已分屏');
   applySplitLayout(tab, dir, ratio);
   setTimeout(() => { if (tabs.includes(tab)) tab.term.focus(); }, 100);

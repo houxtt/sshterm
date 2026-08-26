@@ -46,6 +46,15 @@ function waitForServer(deadline = Date.now() + 10000) {
     // credentials or network availability.
     await page.evaluate(() => {
       localStorage.clear();
+      window.__splitMessages = [];
+      const originalSend = ws.send.bind(ws);
+      ws.send = data => {
+        try {
+          const message = typeof data === 'string' ? JSON.parse(data) : null;
+          if (message?.type === 'connect') window.__splitMessages.push(message);
+        } catch {}
+        return originalSend(data);
+      };
       newTab({
         type: 'ssh', name: '布局测试', host: '127.0.0.1', port: 1,
         username: 'nobody', reconnect: false,
@@ -68,6 +77,8 @@ function waitForServer(deadline = Date.now() + 10000) {
     assert.deepStrictEqual(split, {
       panes: 1, terminalReady: true, direction: 'row', dividerVisible: true,
     });
+    const splitConnect = await page.evaluate(() => window.__splitMessages.find(message => message.id === 2));
+    assert.strictEqual(splitConnect.sourceId, 1, 'split must identify its authenticated main connection');
     assert.deepStrictEqual(pageErrors, [], `split raised page errors: ${pageErrors.join('; ')}`);
 
     // The divider must resize terminal panes rather than resizing itself.
