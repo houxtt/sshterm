@@ -9,6 +9,7 @@ const { WebSocketServer } = require('ws');
 const { createBackup, readBackup, parseOpenSSHConfig } = require('./session-backup');
 const { createParallelReadStream, receiveParallelUpload } = require('./sftp-transfer');
 const { connectionConfigForRequest } = require('./connection-config');
+const { writeSecrets, readSecrets } = require('./dpapi');
 
 const ROOT = path.join(__dirname, '..');
 const WEB = path.join(ROOT, 'web');
@@ -31,6 +32,7 @@ const SERVER_BUILD_ID = String(Math.trunc(Math.max(
 const SERVER_STARTED_AT = new Date().toISOString();
 const CONN_DIR = path.join(os.homedir(), '.sshterm');
 const CONN_FILE = path.join(CONN_DIR, 'sessions.json');
+const CONN_BACKUP_FILE = `${CONN_FILE}.bak`;
 const MAX_SFTP_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
 
 const connections = new Map();   // connId -> BaseConnection
@@ -166,6 +168,7 @@ function log(level, msg) {
 
 // ---------- 会话持久化 ----------
 let sessions = loadSessions();
+log('info', `已加载 ${Object.keys(sessions).length} 个保存会话`);
 
 // Retain both operation logs and terminal transcripts.  Session transcripts
 // used to grow without bound because only LOG_DIR was cleaned.
@@ -195,10 +198,35 @@ function cleanupOldLogs() {
 }
 // 启动时清理旧日志
 setTimeout(cleanupOldLogs, 1000);
-const { writeSecrets, readSecrets } = require('./dpapi');
-function loadSessions() {
+
+function writeSessionFile(data, backupExisting = true) {
+  fs.mkdirSync(CONN_DIR, { recursive: true });
+  const tempFile = `${CONN_FILE}.${process.pid}.tmp`;
+  fs.writeFileSync(tempFile, JSON.stringify(data, null, 2));
   try {
-    const raw = JSON.parse(fs.readFileSync(CONN_FILE, 'utf8'));
+    if (backupExisting && fs.existsSync(CONN_FILE)) fs.copyFileSync(CONN_FILE, CONN_BACKUP_FILE);
+    fs.renameSync(tempFile, CONN_FILE);
+    // A legacy file may contain plaintext credentials.  Its migration must
+    // never preserve that unsafe source as the backup.
+    if (!backupExisting) fs.copyFileSync(CONN_FILE, CONN_BACKUP_FILE);
+  } catch (error) {
+    try { fs.unlinkSync(tempFile); } catch {}
+    throw error;
+  }
+}
+
+function loadSessions() {
+  if (!fs.existsSync(CONN_FILE) && !fs.existsSync(CONN_BACKUP_FILE)) return {};
+  try {
+    let raw;
+    try {
+      raw = JSON.parse(fs.readFileSync(CONN_FILE, 'utf8'));
+    } catch (primaryError) {
+      if (!fs.existsSync(CONN_BACKUP_FILE)) throw primaryError;
+      raw = JSON.parse(fs.readFileSync(CONN_BACKUP_FILE, 'utf8'));
+      console.error(`[会话] 主文件读取失败，已从备份恢复: ${primaryError.message}`);
+      log('error', `会话主文件读取失败，已从备份恢复: ${primaryError.message}`);
+    }
     // Migrate older versions that persisted credentials. Credentials are
     // intentionally process-memory-only and must not survive a restart unless
     // the session opts in to DPAPI-backed "remember password".
@@ -213,8 +241,7 @@ function loadSessions() {
       return [id, safe];
     }));
     if (migrated) {
-      fs.mkdirSync(CONN_DIR, { recursive: true });
-      fs.writeFileSync(CONN_FILE, JSON.stringify(clean, null, 2));
+      writeSessionFile(clean, false);
     }
     // Load DPAPI-backed secrets for sessions that opted into "remember password"
     const secrets = readSecrets();
@@ -239,7 +266,11 @@ function loadSessions() {
     }
     return clean;
   }
-  catch { return {}; }
+  catch (error) {
+    console.error(`[会话] 启动读取失败: ${error.message}`);
+    log('error', `会话启动读取失败: ${error.message}`);
+    return {};
+  }
 }
 function saveSessions(data) {
   try {
@@ -275,7 +306,7 @@ function saveSessions(data) {
       }
       return [id, safe];
     }));
-    fs.writeFileSync(CONN_FILE, JSON.stringify(diskData, null, 2));
+    writeSessionFile(diskData);
   } catch (e) { console.error('[会话] 保存失败:', e.message); }
 }
 
@@ -983,6 +1014,7 @@ async function handle(ws, m) {
       }
       saveSessions(sessions);
       send(ws, { type: 'sessions', list: sessionsList() });
+      if (m.requestId) send(ws, { type: 'session-saved', requestId: m.requestId, id: s.id });
       break;
     }
     case 'reorder-sessions': {

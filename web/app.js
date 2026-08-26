@@ -72,6 +72,8 @@ let activeTabId = null;
 let sessions = [];        // 已保存会话列表
 let editingId = null;     // 对话框正在编辑的会话 id
 let serialPorts = [];
+const pendingSavedConnections = new Map();
+let saveRequestSeq = 0;
 
 // ---------- WS 连接 ----------
 ws.binaryType = 'arraybuffer';
@@ -191,6 +193,13 @@ function handleMsg(m) {
     case 'sessions': {
       sessions = m.list || [];
       renderSessionList();
+      break;
+    }
+    case 'session-saved': {
+      const cfg = pendingSavedConnections.get(m.requestId);
+      if (!cfg) break;
+      pendingSavedConnections.delete(m.requestId);
+      newTab({ ...cfg, id: m.id });
       break;
     }
     case 'session-export': {
@@ -2720,9 +2729,14 @@ $('batch-del').onclick = () => {
 function doConnect(save) {
   const cfg = collectDlg();
   if (!cfg.name) { alert('请填写会话名称'); return; }
-  if (save) send({ type: 'save', session: cfg });
   $('dlg-mask').classList.add('hidden');
-  newTab(cfg);
+  if (save) {
+    const requestId = `${Date.now()}-${++saveRequestSeq}`;
+    pendingSavedConnections.set(requestId, cfg);
+    send({ type: 'save', requestId, session: cfg });
+  } else {
+    newTab(cfg);
+  }
 }
 $('btn-dlg-conn').onclick = () => doConnect(false);
 $('btn-dlg-save').onclick = () => doConnect(true);
