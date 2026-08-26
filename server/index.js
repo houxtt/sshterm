@@ -307,7 +307,47 @@ function saveSessions(data) {
       return [id, safe];
     }));
     writeSessionFile(diskData);
-  } catch (e) { console.error('[会话] 保存失败:', e.message); }
+  } catch (e) {
+    console.error('[会话] 保存失败:', e.message);
+    log('error', `会话或加密凭据保存失败: ${e.message}`);
+    throw e;
+  }
+}
+
+function storedSessionForConfig(config) {
+  if (!config || !config.type) return null;
+  if (config.id && sessions[config.id]) return sessions[config.id];
+  if (config.type !== 'ssh' && config.type !== 'telnet') return null;
+  const defaultPort = config.type === 'telnet' ? 23 : 22;
+  const host = String(config.host || '').trim().toLowerCase();
+  const port = Number(config.port || defaultPort);
+  const username = String(config.username || config.user || '').trim();
+  if (!host) return null;
+  const matches = Object.values(sessions).filter(saved =>
+    saved?.type === config.type &&
+    String(saved.host || '').trim().toLowerCase() === host &&
+    Number(saved.port || defaultPort) === port &&
+    String(saved.username || saved.user || '').trim() === username);
+  // Never guess between duplicate endpoints that may intentionally use
+  // different credentials. The stable session id remains authoritative.
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function mergeStoredCredentials(config, stored) {
+  if (!stored) return config;
+  if (!config.id && stored.id) config.id = stored.id;
+  for (const key of ['password', 'privateKey', 'passphrase', 'loginPass']) {
+    if (!config[key]) config[key] = stored[key];
+  }
+  if (config.proxy && !config.proxy.password && stored.proxy?.password) {
+    config.proxy = { ...config.proxy, password: stored.proxy.password };
+  }
+  if (config.jumpAuth && stored.jumpAuth) {
+    for (const key of ['password', 'privateKey', 'passphrase']) {
+      if (!config.jumpAuth[key] && stored.jumpAuth[key]) config.jumpAuth[key] = stored.jumpAuth[key];
+    }
+  }
+  return config;
 }
 
 // ---------- SSH config 解析 ----------
@@ -818,21 +858,22 @@ function scheduleIdleExit() {
 // ---------- WebSocket 协议 ----------
 // The HTTP server is loopback-only; additionally cap a single WebSocket frame
 // so a malformed local client cannot allocate unbounded memory.
-const wss = new WebSocketServer({
-  server,
-  maxPayload: 8 * 1024 * 1024,
-  verifyClient: ({ origin, req }) => {
-    if (!hasClientToken(req)) return false;
-    // A browser UI must originate on the loopback server.  Non-browser test
-    // clients also need the per-process capability token.
-    if (!origin) return true;
-    try {
-      const u = new URL(origin);
-      return (u.hostname === '127.0.0.1' || u.hostname === 'localhost') &&
-        (u.protocol === 'http:' || u.protocol === 'https:');
-    } catch { return false; }
-  },
+const wss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 * 1024 });
+const vncWss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 * 1024 });
+
+function rejectUpgrade(socket, status = '403 Forbidden') {
+  try { socket.end(`HTTP/1.1 ${status}\r\nConnection: close\r\n\r\n`); } catch { try { socket.destroy(); } catch {} }
+}
+
+server.on('upgrade', (req, socket, head) => {
+  if (!hasClientToken(req) || !isTrustedOrigin(req)) return rejectUpgrade(socket);
+  let pathname;
+  try { pathname = new URL(req.url, 'http://127.0.0.1').pathname; } catch { return rejectUpgrade(socket, '400 Bad Request'); }
+  const target = pathname === '/vnc' ? vncWss : (pathname === '/' ? wss : null);
+  if (!target) return rejectUpgrade(socket, '404 Not Found');
+  target.handleUpgrade(req, socket, head, upgraded => target.emit('connection', upgraded, req));
 });
+
 wss.on('connection', (ws, req) => {
   ws.windowId = requestedWindowId(req) || randomBytes(24).toString('base64url');
   const previous = windows.get(ws.windowId);
@@ -871,6 +912,59 @@ wss.on('connection', (ws, req) => {
       occupied: !!e.sshtermOccupied,   // 串口被占用标记 (前端弹窗: 等待重试/强制释放)
     }));
   });
+});
+
+function vncConnectionForRequest(req) {
+  const query = new URL(req.url, 'http://127.0.0.1').searchParams;
+  const id = Number(query.get('conn'));
+  const remoteHost = String(query.get('host') || '127.0.0.1').toLowerCase();
+  const remotePort = Number(query.get('port') || 5901);
+  if (!Number.isInteger(id) || id < 1 || id > 0xffff) throw new Error('SSH 会话编号无效');
+  if (remoteHost !== '127.0.0.1' && remoteHost !== 'localhost') throw new Error('VNC 仅允许访问 SSH 主机的回环地址');
+  if (!Number.isInteger(remotePort) || remotePort < 1 || remotePort > 65535) throw new Error('VNC 端口无效');
+  const owner = windows.get(String(query.get('window') || ''));
+  const conn = owner ? getConnection(owner, id)
+    : (process.env.SSHTERM_TEST_SFTP_ROOT ? connections.get(id) : null);
+  if (!conn || conn.config?.type !== 'ssh' || conn.state !== 'connected' || typeof conn.openForward !== 'function') {
+    throw new Error('VNC 需要活跃的 SSH 会话');
+  }
+  return { conn, remoteHost, remotePort, id };
+}
+
+vncWss.on('connection', async (ws, req) => {
+  let stream = null;
+  const pending = [];
+  let pendingBytes = 0;
+  const closeStream = () => {
+    if (!stream) return;
+    try { stream.destroy(); } catch { try { stream.end(); } catch {} }
+    stream = null;
+  };
+  ws.on('close', closeStream);
+  ws.on('error', closeStream);
+  ws.on('message', (data) => {
+    const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data);
+    if (stream) return stream.write(chunk);
+    pendingBytes += chunk.length;
+    if (pendingBytes > 256 * 1024) return ws.close(1009, 'VNC 握手缓存过大');
+    pending.push(chunk);
+  });
+  try {
+    const { conn, remoteHost, remotePort, id } = vncConnectionForRequest(req);
+    stream = await conn.openForward(remoteHost, remotePort);
+    for (const chunk of pending) stream.write(chunk);
+    pending.length = 0;
+    stream.on('data', chunk => { if (ws.readyState === 1) ws.send(chunk, { binary: true }); });
+    stream.once('error', error => {
+      log('error', `[VNC ${id}] 转发失败: ${error.message}`);
+      if (ws.readyState < 2) ws.close(1011, 'VNC 转发失败');
+    });
+    stream.once('close', () => { if (ws.readyState < 2) ws.close(1000, 'VNC 已关闭'); });
+    log('audit', `VNC 通过 SSH 会话 ${id} 连接 ${remoteHost}:${remotePort}`);
+  } catch (error) {
+    log('error', `VNC 连接失败: ${error.message}`);
+    if (ws.readyState < 2) ws.close(1008, error.message.slice(0, 120));
+  }
 });
 
 function send(ws, obj) {
@@ -1207,21 +1301,10 @@ async function handle(ws, m) {
       // the already-authenticated main connection without exposing credentials
       // back to the browser.
       const sess = connectionConfigForRequest(source, m.session);
-      // 双击列表重连时前端只有脱敏副本, 从存储补全敏感字段
-      if (sess.id && sessions[sess.id]) {
-        const stored = sessions[sess.id];
-        for (const k of ['password', 'privateKey', 'passphrase', 'loginPass']) {
-          if (!sess[k]) sess[k] = stored[k];
-        }
-        if (sess.proxy && !sess.proxy.password && stored.proxy?.password) {
-          sess.proxy = { ...sess.proxy, password: stored.proxy.password };
-        }
-        if (sess.jumpAuth && stored.jumpAuth) {
-          for (const k of ['password', 'privateKey', 'passphrase']) {
-            if (!sess.jumpAuth[k] && stored.jumpAuth[k]) sess.jumpAuth[k] = stored.jumpAuth[k];
-          }
-        }
-      }
+      // Browser/workspace copies are deliberately redacted. Prefer the stable
+      // saved-session id, but recover legacy workspace tabs by a unique endpoint
+      // match so they also receive the Windows-encrypted credentials.
+      mergeStoredCredentials(sess, storedSessionForConfig(sess));
       await doConnect(ws, sess, m.id);
       break;
     }

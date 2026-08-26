@@ -18,6 +18,8 @@ assert(app.includes('const { password, privateKey, passphrase, ...jumpAuth } = s
 assert(html.includes('id="f-remember"'), 'remember-password UI control is missing');
 assert(app.includes('rememberPassword: type !== \'serial\' && $(\'f-remember\').checked'),
   'remember-password UI must feed the saved session');
+assert(app.includes("$('f-remember').checked = existing ? !!existing.rememberPassword : true"),
+  'new saved sessions must default to Windows-encrypted credential persistence');
 assert(!app.includes('Promise.all(pool)'), 'browser-side parallel SFTP chunks must not bypass upload limits');
 assert(server.includes('const activeUploadKeys = new Set()'), 'server-side per-file upload lock is missing');
 assert(server.includes('activeUploads >= MAX_CONCURRENT_UPLOADS'), 'server-side upload concurrency limit is missing');
@@ -33,7 +35,11 @@ assert(html.includes('id="backup-export"') && html.includes('id="openssh-import"
 assert(server.includes("case 'export-sessions':") && server.includes("case 'import-sessions-backup':"), 'encrypted session migration handlers are missing');
 assert(server.includes('cleanupLogDirectory(SESSION_LOG_DIR'), 'session transcript cleanup is missing');
 assert(!fs.existsSync(path.join(root, 'server', 'connections', 'tunnel.js')), 'unused unsafe tunnel implementation remains');
-assert(dpapi.includes("'-Command', '-'") && dpapi.includes('child.stdin.end(script)'),
-  'DPAPI protection must not expose plaintext through PowerShell command-line arguments');
+assert(dpapi.includes("'-EncodedCommand', encodedCommand") && dpapi.includes('input,'),
+  'DPAPI protection must pass credential data through stdin, not command-line arguments');
+assert(dpapi.includes("Buffer.from(String(text), 'utf8').toString('base64')"),
+  'DPAPI stdin payload must preserve arbitrary UTF-8 credentials');
+assert(dpapi.includes('fs.renameSync(tempPath, SECRETS_PATH)') && dpapi.includes('SECRETS_BACKUP_PATH'),
+  'DPAPI credential writes must be atomic and retain a recovery copy');
 
 console.log('✅ static security contract passed');

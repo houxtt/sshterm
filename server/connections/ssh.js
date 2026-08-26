@@ -70,6 +70,15 @@ function forwardThrough(client, host, port) {
 }
 
 class SSHConnection extends BaseConnection {
+  constructor(config) {
+    super(config);
+    this._ptySize = { cols: 120, rows: 32 };
+  }
+
+  _shellOptions() {
+    return { term: 'xterm-256color', ...this._ptySize };
+  }
+
   async connect() {
     this.state = 'connecting';
     const { host, port = 22, username, auth = 'password',
@@ -137,7 +146,10 @@ class SSHConnection extends BaseConnection {
         });
       }
       client.on('ready', () => {
-        client.shell({ term: 'xterm-256color', cols: 120, rows: 32 }, (err, stream) => {
+        // The browser commonly sends its fitted size while SSH is still
+        // authenticating.  Use the cached value when allocating the PTY so
+        // progress displays do not start at the obsolete 120x32 fallback.
+        client.shell(this._shellOptions(), (err, stream) => {
           if (err) { this._emitError(`shell: ${err.message}`); return reject(err); }
           this.stream = stream;
           this.state = 'connected';
@@ -308,7 +320,18 @@ class SSHConnection extends BaseConnection {
   }
 
   resize(cols, rows) {
-    if (this.stream) this.stream.setWindow(rows, cols);
+    const nextCols = Math.max(2, Math.min(1000, Math.trunc(Number(cols) || 120)));
+    const nextRows = Math.max(1, Math.min(500, Math.trunc(Number(rows) || 32)));
+    this._ptySize = { cols: nextCols, rows: nextRows };
+    if (this.stream) this.stream.setWindow(nextRows, nextCols);
+  }
+
+  openForward(remoteHost, remotePort) {
+    if (!this.client || this.state !== 'connected') return Promise.reject(new Error('SSH 未连接'));
+    return new Promise((resolve, reject) => {
+      this.client.forwardOut('127.0.0.1', 0, remoteHost, remotePort,
+        (error, stream) => error ? reject(error) : resolve(stream));
+    });
   }
 
   // ---------- SSH 隧道 / 端口转发 ----------

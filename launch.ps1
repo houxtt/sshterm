@@ -77,10 +77,14 @@ try {
     $runningInfo = Get-RunningInfo
     if ($null -ne $runningInfo -and [string]$runningInfo.buildId -eq $sourceBuildId) {
       Write-LauncherLog 'Server already running with current source; opening browser.'
-      if (-not $NoBrowser) { Start-Process $appUrl }
-      exit 0
+    } else {
+      # Never replace a live server from a second launcher click. Restarting it
+      # would discard credentials held only in the server process memory.
+      # Updated source is picked up after the user deliberately stops the app.
+      Write-LauncherLog 'Server already running; preserving active sessions and opening browser.'
     }
-    Stop-StaleServer $runningInfo
+    if (-not $NoBrowser) { Start-Process $appUrl }
+    exit 0
   }
 
   if (-not (Test-Path -LiteralPath $serverScript)) {
@@ -93,9 +97,11 @@ try {
   Write-LauncherLog "Using Node: $nodePath"
 
   # Keep Node hidden and redirect output so startup failures remain diagnosable.
-  # --auto-exit stops the server after all browser clients have disconnected.
+  # The server intentionally stays alive after the browser closes. This keeps
+  # saved-session credentials in process memory, so restored tabs can reconnect
+  # without asking for the password again.
   Start-Process -FilePath $nodePath `
-    -ArgumentList @("`"$serverScript`"", '--no-open', '--auto-exit') `
+    -ArgumentList @("`"$serverScript`"", '--no-open') `
     -WorkingDirectory $scriptDir `
     -WindowStyle Hidden `
     -RedirectStandardOutput $stdoutLog `

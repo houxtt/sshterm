@@ -6,10 +6,10 @@
   "scripts": {
     "start": "node server/index.js",
     "test": "node tests/run_all.js",
-    "test:static": "node tests/static_security_contract.js && node tests/recording_contract.js && node tests/tunnel_monitor_contract.js && node tests/zmodem_browser_contract.js",
+    "test:static": "node tests/static_security_contract.js && node tests/dpapi_roundtrip.js && node tests/recording_contract.js && node tests/tunnel_monitor_contract.js && node tests/zmodem_browser_contract.js && node tests/terminal_resize_contract.js && node tests/vnc_contract.js && node tests/launcher_persistence_contract.js",
     "test:workspace-security": "node tests/ui_workspace_credentials.js",
     "check": "node --check server/index.js && node --check server/session-backup.js && node --check web/app.js && npm run test:static",
-    "test:integration": "node tests/integration_session_transfer.js && node tests/integration_session_restart.js && node tests/sftp_parallel_transfer.js && node tests/integration_sftp_transport.js && node tests/integration_multiwindow_ownership.js && node tests/integration_refresh_reattach.js && node tests/split_connection_config.js && node tests/ui_large_download_stream.js && node tests/ui_split_workspace.js",
+    "test:integration": "node tests/integration_session_transfer.js && node tests/integration_session_restart.js && node tests/integration_credential_restart.js && node tests/sftp_parallel_transfer.js && node tests/integration_sftp_transport.js && node tests/integration_vnc_bridge.js && node tests/integration_multiwindow_ownership.js && node tests/integration_refresh_reattach.js && node tests/split_connection_config.js && node tests/ui_large_download_stream.js && node tests/ui_split_workspace.js",
     "build:exe": "node scripts/build-exe.js",
     "test:package": "node tests/smoke_packaged_exe.js"
   },
@@ -23,6 +23,7 @@
   "author": "Wei Peng",
   "license": "MIT",
   "dependencies": {
+    "@novnc/novnc": "^1.7.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-search": "^0.16.0",
     "@xterm/xterm": "^6.0.0",
