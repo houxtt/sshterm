@@ -30,7 +30,7 @@
       </div>
     </div>
     <button id="btn-split" title="分屏(当前标签左右分屏)">⊞ 分屏</button>
-    <button id="btn-workspace" title="保存当前标签与分屏布局">▣ 工作区</button>
+    <button id="btn-workspace" title="保存或恢复当前标签与分屏布局">▣ 工作区</button>
     <button id="btn-cmds" title="快捷命令(保存/执行/脚本)">⚡ 命令</button>
     <span class="sep"></span>
     <input id="quick-connect" placeholder="IP[:端口] 回车快速连接" style="width:180px; background:#1a1b2e; color:#c0caf5; border:1px solid #3a3b4d; border-radius:4px; padding:2px 8px; font-size:12px" autocomplete="off">
@@ -357,6 +357,20 @@
       <button id="btn-tm-stop">停止</button>
       <button id="btn-tm-cancel">取消</button>
     </div>
+  </div>
+</div>
+
+<!-- 默认工作区管理 -->
+<div id="dlg-workspace-mask" class="hidden">
+  <div id="dlg-workspace">
+    <h3>▣ 默认工作区 <button id="workspace-close" class="mini" style="float:right">✕</button></h3>
+    <p class="muted">保存或恢复当前打开的会话标签、标签顺序以及分屏布局。恢复时会关闭当前连接并重新建立已保存的会话。</p>
+    <div id="workspace-snapshot-summary" class="workspace-summary">尚未保存工作区</div>
+    <div class="dlg-actions">
+      <button id="workspace-save" class="primary">保存当前工作区</button>
+      <button id="workspace-restore">恢复已保存工作区</button>
+    </div>
+    <p class="muted cmd-foot">工作区不会把密码或私钥保存到浏览器；未记住凭据的会话恢复后可能需要重新认证。</p>
   </div>
 </div>
 

@@ -34,6 +34,9 @@ const MAX_SFTP_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
 
 const connections = new Map();   // connId -> BaseConnection
 const windows = new Map();       // opaque window capability -> WebSocket
+const windowCleanupTimers = new Map();
+const REFRESH_GRACE_MS = 10 * 1000;
+const REATTACH_BUFFER_BYTES = 256 * 1024;
 function connectionKey(ws, id) { return `${ws.windowId}:${id}`; }
 function getConnection(ws, id) { return connections.get(connectionKey(ws, id)); }
 function getHttpConnection(qs) {
@@ -41,6 +44,38 @@ function getHttpConnection(qs) {
   if (ws) return getConnection(ws, parseInt(qs.get('conn'), 10));
   // Isolated fixture has no browser window; never enabled in normal startup.
   return process.env.SSHTERM_TEST_SFTP_ROOT ? connections.get(parseInt(qs.get('conn'), 10)) : null;
+}
+
+function requestedWindowId(req) {
+  try {
+    const id = new URL(req.url, 'http://127.0.0.1').searchParams.get('window') || '';
+    return /^[A-Za-z0-9_-]{32,128}$/.test(id) ? id : '';
+  } catch { return ''; }
+}
+
+function cancelWindowCleanup(windowId) {
+  const timer = windowCleanupTimers.get(windowId);
+  if (timer) clearTimeout(timer);
+  windowCleanupTimers.delete(windowId);
+}
+
+function closeWindowConnections(windowId) {
+  cancelWindowCleanup(windowId);
+  for (const [key, conn] of connections) {
+    if (!key.startsWith(`${windowId}:`)) continue;
+    connections.delete(key);
+    try { conn.close(); } catch {}
+  }
+}
+
+function scheduleWindowCleanup(windowId) {
+  cancelWindowCleanup(windowId);
+  const timer = setTimeout(() => {
+    windowCleanupTimers.delete(windowId);
+    if (!windows.has(windowId)) closeWindowConnections(windowId);
+  }, REFRESH_GRACE_MS);
+  timer.unref();
+  windowCleanupTimers.set(windowId, timer);
 }
 const liveByConfig = new Map();  // 配置指纹 -> connId (去重: 同一配置只开一个)
 // Enables an isolated local SFTP fixture for transport integration tests only.
@@ -732,7 +767,7 @@ const server = http.createServer((req, res) => {
   });
 });
 
-// ---------- 空闲自动退出 (桌面启动器 --auto-exit 模式): 无 WS 连接 10 秒后退出 ----------
+// ---------- 空闲自动退出 (桌面启动器 --auto-exit 模式) ----------
 const AUTO_EXIT = process.argv.includes('--auto-exit');
 let wsCount = 0;
 let idleExitTimer = null;
@@ -744,7 +779,7 @@ function scheduleIdleExit() {
       console.log('[auto-exit] 无客户端连接, 服务自动退出');
       for (const c of connections.values()) c.close();
       process.exit(0);
-    }, 10000);
+    }, REFRESH_GRACE_MS + 2000);
   }
 }
 
@@ -766,8 +801,16 @@ const wss = new WebSocketServer({
     } catch { return false; }
   },
 });
-wss.on('connection', (ws) => {
-  ws.windowId = randomBytes(24).toString('base64url');
+wss.on('connection', (ws, req) => {
+  ws.windowId = requestedWindowId(req) || randomBytes(24).toString('base64url');
+  const previous = windows.get(ws.windowId);
+  if (previous && previous !== ws && previous.readyState < 2) {
+    // sessionStorage can be cloned with a duplicated browser tab. Only one
+    // live page may own a window capability; a refresh transfers ownership.
+    previous.replacedByRefresh = true;
+    previous.close(4001, '页面已刷新');
+  }
+  cancelWindowCleanup(ws.windowId);
   windows.set(ws.windowId, ws);
   send(ws, { type: 'window-id', windowId: ws.windowId });
   wsCount++;
@@ -775,8 +818,10 @@ wss.on('connection', (ws) => {
   ws.on('close', () => {
     wsCount--;
     scheduleIdleExit();
-    windows.delete(ws.windowId);
-    for (const [key, conn] of connections) if (key.startsWith(`${ws.windowId}:`)) conn.close();
+    if (windows.get(ws.windowId) === ws) {
+      windows.delete(ws.windowId);
+      scheduleWindowCleanup(ws.windowId);
+    }
   });
   ws.on('message', (msg, isBinary) => {
     if (isBinary) {
@@ -797,7 +842,7 @@ wss.on('connection', (ws) => {
 });
 
 function send(ws, obj) {
-  if (ws.readyState === 1) ws.send(JSON.stringify(obj));
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
 }
 function sanitize(s) {
   // 返回给前端时剥除敏感字段 (密码/私钥/口令)
@@ -864,13 +909,43 @@ function sendBinary(ws, id, data) {
   if (ws.readyState === 1) ws.send(frame, { binary: true });
 }
 
+function bufferDetachedOutput(conn, data) {
+  if (!conn._reattachBuffer) conn._reattachBuffer = [];
+  const chunk = Buffer.from(data);
+  conn._reattachBuffer.push(chunk);
+  conn._reattachBufferBytes = (conn._reattachBufferBytes || 0) + chunk.length;
+  while (conn._reattachBufferBytes > REATTACH_BUFFER_BYTES && conn._reattachBuffer.length) {
+    conn._reattachBufferBytes -= conn._reattachBuffer.shift().length;
+  }
+}
+
+function sendConnectionData(conn, id, data) {
+  if (conn.ownerWs && conn.ownerWs.readyState === 1) sendBinary(conn.ownerWs, id, data);
+  else bufferDetachedOutput(conn, data);
+}
+
+function attachExistingConnection(ws, conn, id) {
+  conn.ownerWs = ws;
+  const state = conn.state || 'connected';
+  const msg = state === 'connected' ? '已恢复原连接' : (conn._lastStateMsg || '连接中…');
+  send(ws, { type: 'status', id, state, msg, resumed: true, cfg: sanitize(conn.config || {}) });
+  if (state === 'connected' && conn._reattachBuffer?.length) {
+    for (const chunk of conn._reattachBuffer) sendBinary(ws, id, chunk);
+    conn._reattachBuffer = [];
+    conn._reattachBufferBytes = 0;
+  }
+}
+
 async function handle(ws, m) {
   switch (m.type) {
     case 'test-sftp-claim': {
       if (!process.env.SSHTERM_TEST_SFTP_ROOT || !Number.isInteger(m.id)) return;
       const fixture = connections.get(9900);
       if (!fixture) return;
-      connections.set(connectionKey(ws, m.id), { ...fixture, id: m.id });
+      connections.set(connectionKey(ws, m.id), {
+        ...fixture, id: m.id, state: 'connected', config: { type: 'ssh', name: 'fixture' },
+        ownerWs: ws, _reattachBuffer: [], _reattachBufferBytes: 0,
+      });
       send(ws, { type: 'test-sftp-claimed', id: m.id });
       break;
     }
@@ -1069,8 +1144,8 @@ async function handle(ws, m) {
       break;
     }
     case 'cleanup': {
-      // 页面加载兜底: 强制关闭该客户端全部连接 (刷新时 close 事件可能未触发导致残留)
-      for (const [key, conn] of connections) if (key.startsWith(`${ws.windowId}:`)) conn.close();
+      // Legacy clients sent this on every page load. It is intentionally a
+      // no-op now because refresh reattaches the existing connections.
       break;
     }
     case 'ssh-hosts': {
@@ -1088,6 +1163,11 @@ async function handle(ws, m) {
       break;
     }
     case 'connect': {
+      const existing = getConnection(ws, m.id);
+      if (existing && existing.state !== 'closed' && existing.state !== 'closing') {
+        attachExistingConnection(ws, existing, m.id);
+        break;
+      }
       const sess = { ...m.session };
       // 双击列表重连时前端只有脱敏副本, 从存储补全敏感字段
       if (sess.id && sessions[sess.id]) {
@@ -1225,6 +1305,10 @@ async function doConnect(ws, cfg, tabId) {
   const conn = new ConnCls(cfg);
   const connId = tabId;   // 前端 tab 即连接 id, 简化路由
   conn.id = connId;
+  conn.ownerWs = ws;
+  conn._reattachBuffer = [];
+  conn._reattachBufferBytes = 0;
+  conn._lastStateMsg = '连接中…';
   connections.set(connectionKey(ws, connId), conn);
   liveByConfig.set(ownerFpKey, connId);
 
@@ -1242,7 +1326,7 @@ async function doConnect(ws, cfg, tabId) {
   catch (e) { console.log('[session-log] 创建失败:', e.message); }
 
   conn.on('data', (d) => {
-    sendBinary(ws, connId, d);
+    sendConnectionData(conn, connId, d);
     if (sessionLogStream) {
       try {
         const text = Buffer.isBuffer(d) ? d.toString(enc) : String(d);
@@ -1253,44 +1337,51 @@ async function doConnect(ws, cfg, tabId) {
   conn.on('error', (msg, meta) => {
     console.log(`[conn] ${cfg.type} ${tabId} error:`, msg);
     log('error', `[${cfg.name || cfg.type}] ${msg}`);
-    send(ws, { type: 'error', id: connId, msg, occupied: !!(meta && meta.occupied) });
+    conn._lastStateMsg = msg;
+    send(conn.ownerWs, { type: 'error', id: connId, msg, occupied: !!(meta && meta.occupied) });
   });
   conn.on('close', (reason) => {
       console.log(`[conn] ${cfg.type} ${tabId} close:`, reason);
       log('info', `[${cfg.name || cfg.type}] 断开: ${reason}`);
-      send(ws, { type: 'status', id: connId, state: 'closed', msg: reason });
+      conn._lastStateMsg = reason;
+      send(conn.ownerWs, { type: 'status', id: connId, state: 'closed', msg: reason });
       // P1-3 FIX: 关闭会话日志文件句柄，防止 fd 溢出
       if (sessionLogStream) {
         try { sessionLogStream.end(); } catch {}
         sessionLogStream = null;
       }
-      connections.delete(connectionKey(ws, connId));
-      if (liveByConfig.get(ownerFpKey) === connId) liveByConfig.delete(ownerFpKey);
+      const key = connectionKey(ws, connId);
+      const ownsSlot = connections.get(key) === conn;
+      if (ownsSlot) connections.delete(key);
+      if (ownsSlot && liveByConfig.get(ownerFpKey) === connId) liveByConfig.delete(ownerFpKey);
     });
   conn.on('open', () => {
     console.log(`[conn] ${cfg.type} ${tabId} open`);
     log('info', `[${cfg.name || cfg.type}] 已连接`);
-    send(ws, { type: 'status', id: connId, state: 'connected', msg: '已连接' });
+    conn._lastStateMsg = '已连接';
+    send(conn.ownerWs, { type: 'status', id: connId, state: 'connected', msg: '已连接' });
     if (cfg.type === 'ssh' && Array.isArray(cfg.tunnels)) {
-      (async () => { for (const tunnel of cfg.tunnels) { try { await conn.addTunnel(tunnel); } catch (e) { log('error', `隧道恢复失败 ${tunnel.localPort}: ${e.message}`); send(ws, { type: 'tunnel-alert', id: connId, msg: `隧道恢复失败 ${tunnel.localPort}: ${e.message}` }); } } })();
+      (async () => { for (const tunnel of cfg.tunnels) { try { await conn.addTunnel(tunnel); } catch (e) { log('error', `隧道恢复失败 ${tunnel.localPort}: ${e.message}`); send(conn.ownerWs, { type: 'tunnel-alert', id: connId, msg: `隧道恢复失败 ${tunnel.localPort}: ${e.message}` }); } } })();
     }
   });
   conn.on('host-key', (info) => {
-    send(ws, { type: 'host-key', id: connId, ...info });
+    send(conn.ownerWs, { type: 'host-key', id: connId, ...info });
   });
   conn.on('zmodem-file', (filename, filePath, size) => {
     console.log(`[zmodem] 收到文件 ${filename} (${size}B)`);
     log('info', `Zmodem 收到文件 ${filename} (${size}B)`);
-    send(ws, { type: 'zmodem', id: connId, filename, filePath, size });
+    send(conn.ownerWs, { type: 'zmodem', id: connId, filename, filePath, size });
   });
 
   try {
     await conn.connect();
   } catch (e) {
     // 连接失败: 状态已由 error/close 事件发出, 这里兜底
-    send(ws, { type: 'status', id: connId, state: 'closed', msg: e.message });
-    connections.delete(connectionKey(ws, connId));
-    if (liveByConfig.get(ownerFpKey) === connId) liveByConfig.delete(ownerFpKey);
+    send(conn.ownerWs, { type: 'status', id: connId, state: 'closed', msg: e.message });
+    const key = connectionKey(ws, connId);
+    const ownsSlot = connections.get(key) === conn;
+    if (ownsSlot) connections.delete(key);
+    if (ownsSlot && liveByConfig.get(ownerFpKey) === connId) liveByConfig.delete(ownerFpKey);
   }
 }
 

@@ -47,8 +47,21 @@ function configForBrowserStorage(cfg) {
 
 // ---------- 全局状态 ----------
 const clientToken = window.__SSHTERM_TOKEN || '';
-let windowId = '';
-const ws = new WebSocket(`ws://${location.host}/?token=${encodeURIComponent(clientToken)}`);
+const WINDOW_ID_KEY = 'sshterm.window.id';
+function persistentWindowId() {
+  try {
+    let id = sessionStorage.getItem(WINDOW_ID_KEY) || '';
+    if (!/^[A-Za-z0-9_-]{32,128}$/.test(id)) {
+      id = crypto.randomUUID().replace(/[^A-Za-z0-9_-]/g, '') + crypto.randomUUID().replace(/[^A-Za-z0-9_-]/g, '');
+      sessionStorage.setItem(WINDOW_ID_KEY, id);
+    }
+    return id;
+  } catch {
+    return crypto.randomUUID().replace(/[^A-Za-z0-9_-]/g, '') + crypto.randomUUID().replace(/[^A-Za-z0-9_-]/g, '');
+  }
+}
+let windowId = persistentWindowId();
+const ws = new WebSocket(`ws://${location.host}/?token=${encodeURIComponent(clientToken)}&window=${encodeURIComponent(windowId)}`);
 const apiUrl = (pathname, params = {}) => {
   const q = new URLSearchParams({ ...params, token: clientToken, window: windowId });
   return `${pathname}?${q.toString()}`;
@@ -65,7 +78,6 @@ ws.binaryType = 'arraybuffer';
 ws.onopen = () => {
   $('conn-status').className = 'status-dot ok';
   $('conn-status-text').textContent = '服务器已连接';
-  send({ type: 'cleanup' });      // 兜底清理刷新残留的连接
   send({ type: 'list' });
   send({ type: 'serialports' });
   restoreTabs();                  // 恢复刷新前打开的会话 (重新连接)
@@ -215,8 +227,8 @@ function handleMsg(m) {
           if (!pane) {
             tab.everConnected = true;
             fitTerm(tab);
-            // 连接后自动执行 (Xshell 登录脚本风格): IP 命令集 auto + 会话 autoCmds
-            setTimeout(() => runAutoCmds(tab.cfg), 300);
+            // 刷新重挂接的是同一条远端 shell，不能重复执行登录命令。
+            if (!m.resumed) setTimeout(() => runAutoCmds(tab.cfg), 300);
           }
         }
       }
@@ -394,8 +406,9 @@ const BUF_MAX = 200 * 1024;   // 每标签保留最近 200KB 输出, 刷新后�
 function saveTabs() {
   try {
     localStorage.setItem(LS_TABS, JSON.stringify(tabs.map(t => ({
-      cfg: configForBrowserStorage(t.cfg), hex: !!t.hex, buf: (t.recParts || []).join(''),
+      id: t.id, cfg: configForBrowserStorage(t.cfg), hex: !!t.hex, buf: (t.recParts || []).join(''),
       panes: (t.extraPanes || []).length,
+      paneIds: (t.extraPanes || []).map(p => p.connId),
       split: { dir: splitDirection(t), ratio: splitRatio(t) },
     }))));
   } catch (e) { /* 存储失败忽略 */ }
@@ -406,28 +419,81 @@ function restoreTabs() {
     if (!raw) return;
     const list = JSON.parse(raw);
     if (!Array.isArray(list)) return;
-    for (const item of list) {
-      if (item && item.cfg && item.cfg.type) {
-        const tab = newTab(item.cfg, { connect: true, hex: item.hex, replay: item.buf });
-        const split = item.split || { dir: 'row', ratio: 0.5 };
-        for (let n = 0; n < Math.min(Number(item.panes) || 0, SPLIT_MAX - 1); n++) addPane(tab, split.dir, split.ratio);
-      }
-    }
+    restoreTabItems(list);
     setStatus(`已恢复 ${list.length} 个会话`);
   } catch (e) { /* 解析失败忽略 */ }
 }
 // 刷新/关闭页面前保存最新终端内容
 window.addEventListener('beforeunload', () => saveTabs());
 
+function restoreTabItems(list) {
+  for (const item of list) {
+    if (!item || !item.cfg || !item.cfg.type) continue;
+    const tab = newTab(item.cfg, { connect: true, hex: item.hex, replay: item.buf, id: item.id });
+    const split = item.split || { dir: 'row', ratio: 0.5 };
+    for (let n = 0; n < Math.min(Number(item.panes) || 0, SPLIT_MAX - 1); n++) {
+      addPane(tab, split.dir, split.ratio, { id: item.paneIds?.[n] });
+    }
+  }
+}
+
+function readWorkspaceSnapshot() {
+  try {
+    const value = JSON.parse(localStorage.getItem(LS_WORKSPACE) || 'null');
+    // Backward compatible with the old array-only save format.
+    if (Array.isArray(value)) return { version: 0, savedAt: null, tabs: value };
+    if (value && Array.isArray(value.tabs)) return value;
+  } catch {}
+  return null;
+}
+
+function renderWorkspaceSummary() {
+  const summary = $('workspace-snapshot-summary');
+  const restore = $('workspace-restore');
+  const snapshot = readWorkspaceSnapshot();
+  restore.disabled = !snapshot;
+  if (!snapshot) {
+    summary.textContent = '尚未保存工作区';
+    return;
+  }
+  const panes = snapshot.tabs.reduce((sum, item) => sum + (Number(item.panes) || 0), 0);
+  const when = snapshot.savedAt ? new Date(snapshot.savedAt).toLocaleString() : '旧版本工作区';
+  summary.textContent = `已保存：${snapshot.tabs.length} 个标签，${panes} 个附加分屏 · ${when}`;
+}
+
+function openWorkspacePanel() {
+  renderWorkspaceSummary();
+  $('dlg-workspace-mask').classList.remove('hidden');
+}
+
 function saveWorkspace() {
   saveTabs();
-  try { localStorage.setItem(LS_WORKSPACE, localStorage.getItem(LS_TABS) || '[]'); setStatus(`工作区已保存：${tabs.length} 个标签`); }
+  try {
+    const items = JSON.parse(localStorage.getItem(LS_TABS) || '[]');
+    localStorage.setItem(LS_WORKSPACE, JSON.stringify({ version: 1, savedAt: Date.now(), tabs: items }));
+    renderWorkspaceSummary();
+    setStatus(`工作区已保存：${tabs.length} 个标签`);
+  }
   catch { setStatus('工作区保存失败'); }
+}
+
+function restoreWorkspace() {
+  const snapshot = readWorkspaceSnapshot();
+  if (!snapshot) return setStatus('没有已保存的工作区');
+  if (tabs.length && !confirm(`恢复工作区将关闭当前 ${tabs.length} 个会话并重新连接，是否继续？`)) return;
+  for (const tab of [...tabs]) doCloseTab(tab.id);
+  restoreTabItems(snapshot.tabs);
+  saveTabs();
+  $('dlg-workspace-mask').classList.add('hidden');
+  setStatus(`工作区已恢复：${snapshot.tabs.length} 个标签`);
 }
 
 // ---------- 标签管理 ----------
 function newTab(cfg, opts = {}) {
-  const id = tabSeq++;
+  const restoredId = Number(opts.id);
+  const id = Number.isInteger(restoredId) && restoredId > 0 && restoredId <= 0xffff
+    ? restoredId : tabSeq++;
+  tabSeq = Math.max(tabSeq, id + 1);
   const container = document.createElement('div');
   container.className = 'split-container hidden';
   const host = document.createElement('div');
@@ -635,6 +701,7 @@ function doCloseTab(id) {
   }
   send({ type: 'disconnect', id });
   tabs.splice(idx, 1);
+  if (tab._splitCleanup) tab._splitCleanup();
   try { tab.term.dispose(); } catch (e) {}
   tab.host.remove();
   if (activeTabId === id) activeTabId = null;
@@ -1808,6 +1875,11 @@ function createTerminal(host, tabOrPane) {
   const fitAddon = new (FitAddonCtor)();
   term.loadAddon(fitAddon);
   term.open(host);
+  // Clipboard/key bindings need the concrete terminal object. Split panes
+  // previously reached bindClipboard while pane.term was still null, aborting
+  // creation before layout and connection setup completed.
+  tabOrPane.term = term;
+  tabOrPane.fitAddon = fitAddon;
   setTimeout(() => fitAddon.fit(), 0);
   bindClipboard(tabOrPane);
   term.onData((d) => safeSendInput(tabOrPane.connId, d));
@@ -1815,9 +1887,12 @@ function createTerminal(host, tabOrPane) {
   return { term, fitAddon };
 }
 
-function addPane(tab, dir = 'row', ratio = 0.5) {
+function addPane(tab, dir = 'row', ratio = 0.5, opts = {}) {
   if (countPanes(tab) >= SPLIT_MAX) { setStatus(`最多支持 ${SPLIT_MAX} 个分屏`); return; }
-  const paneId = tabSeq++;
+  const restoredId = Number(opts.id);
+  const paneId = Number.isInteger(restoredId) && restoredId > 0 && restoredId <= 0xffff
+    ? restoredId : tabSeq++;
+  tabSeq = Math.max(tabSeq, paneId + 1);
   const host = createPaneHost('pane-split');
   const pane = {
     connId: paneId, term: null, fitAddon: null, host,
@@ -1852,6 +1927,7 @@ function applySplitLayout(tab, dir, ratio) {
   if (!container || !main) return;
   const n = countPanes(tab);
   if (n <= 1 || dir === 'none') {
+    if (tab._dividers?.[0]) tab._dividers[0].style.display = 'none';
     main.style.display = '';
     main.style.flex = '';
     main.style.gridColumn = '';
@@ -1865,6 +1941,12 @@ function applySplitLayout(tab, dir, ratio) {
   main.style.display = '';
   tab.extraPanes.forEach(p => p.host.classList.remove('hidden'));
   if (n === 2) {
+    const divider = tab._dividers?.[0];
+    if (divider) {
+      divider.className = 'split-divider' + (dir === 'col' ? ' col' : '');
+      divider.dataset.dir = dir;
+      divider.style.display = '';
+    }
     container.style.display = '';
     container.style.gridTemplateColumns = '';
     container.style.gridTemplateRows = '';
@@ -1872,6 +1954,7 @@ function applySplitLayout(tab, dir, ratio) {
     main.style.flex = `${ratio} 1 0`;
     tab.extraPanes[0].host.style.flex = `${1 - ratio} 1 0`;
   } else if (n >= 3) {
+    if (tab._dividers?.[0]) tab._dividers[0].style.display = 'none';
     // 3-4 pane: 2x2 grid
     container.style.flexDirection = 'column';
     container.style.display = 'grid';
@@ -1924,23 +2007,21 @@ function installSplitDragger(tab) {
   let divider = makeDivider('row');
   container.appendChild(divider);
   tab._dividers.push(divider);
-  let dragging = false, startPos = 0, startFlex = 0, node = null;
-  const start = (e, n, dir) => {
-    dragging = true; node = n; startPos = dir === 'row' ? e.clientX : e.clientY;
-    const flex = n.style.flex || '1 1 0';
-    const base = parseFloat(flex.split(' ')[0]) || 1;
-    startFlex = base;
+  let dragging = false, dragDir = 'row';
+  const start = (e) => {
+    dragging = true;
+    dragDir = divider.dataset.dir || 'row';
     e.preventDefault();
   };
   const move = (e) => {
-    if (!dragging || !node) return;
-    const p = node.parentElement.getBoundingClientRect();
-    const pos = node.dataset.dir === 'col' ? e.clientY : e.clientX - (node.dataset.dir === 'col' ? p.top : p.left);
-    const size = node.dataset.dir === 'col' ? p.height : p.width;
+    if (!dragging || tab.extraPanes.length !== 1) return;
+    const p = container.getBoundingClientRect();
+    const pos = dragDir === 'col' ? e.clientY - p.top : e.clientX - p.left;
+    const size = dragDir === 'col' ? p.height : p.width;
     const ratio = Math.max(0.1, Math.min(0.9, pos / size));
-    node.style.flex = `${ratio} 1 0`;
-    const siblings = [...node.parentElement.children].filter(c => c !== node && c.classList.contains('term-host'));
-    if (siblings[0]) siblings[0].style.flex = `${1 - ratio} 1 0`;
+    const main = container.querySelector('.term-host.main-pane');
+    main.style.flex = `${ratio} 1 0`;
+    tab.extraPanes[0].host.style.flex = `${1 - ratio} 1 0`;
     [tab, ...tab.extraPanes].forEach(x => { try { x.fitAddon.fit(); } catch {} });
   };
   const end = () => {
@@ -1949,10 +2030,9 @@ function installSplitDragger(tab) {
     const main = container.querySelector('.term-host.main-pane');
     const mFlex = main.style.flex || '';
     const mRatio = parseFloat(mFlex.split(' ')[0]) || 0.5;
-    saveSplitPrefs({ ...loadSplitPrefs(), [tab.id]: { dir: 'row', ratio: mRatio } });
-    node = null;
+    saveSplitPrefs({ ...loadSplitPrefs(), [tab.id]: { dir: dragDir, ratio: mRatio } });
   };
-  divider.addEventListener('mousedown', (e) => start(e, divider, 'row'));
+  divider.addEventListener('mousedown', start);
   document.addEventListener('mousemove', move);
   document.addEventListener('mouseup', end);
   tab._splitCleanup = () => {
@@ -2224,7 +2304,10 @@ $('btn-tunnel-add').onclick = () => {
   send({ type: 'tunnel', id: tab.id, action: 'add', tunnelType: type, localPort,
     remoteHost: type === 'dynamic' ? 'SOCKS5' : host, remotePort: type === 'dynamic' ? 0 : remotePort });
 };
-$('btn-workspace').onclick = saveWorkspace;
+$('btn-workspace').onclick = openWorkspacePanel;
+$('workspace-close').onclick = () => $('dlg-workspace-mask').classList.add('hidden');
+$('workspace-save').onclick = saveWorkspace;
+$('workspace-restore').onclick = restoreWorkspace;
 $('btn-killall').onclick = () => {
   if (!tabs.length) return setStatus('没有打开的会话');
   if (!confirm(`关闭全部 ${tabs.length} 个会话? (将断开所有连接)`)) return;
