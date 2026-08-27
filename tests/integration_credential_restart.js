@@ -20,6 +20,7 @@ const APP_PORT = 8911;
 const BASE = `http://127.0.0.1:${APP_PORT}`;
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'sshterm-credential-restart-'));
 const password = 'restart-fixture-密码-42';
+const vncPassword = 'vnc-restart-fixture-密码-73';
 const hostKey = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey
   .export({ type: 'pkcs1', format: 'pem' });
 
@@ -113,16 +114,33 @@ async function startSshFixture() {
       },
     }));
     const sessionId = (await response).id;
+    response = nextMessage(app.ws, m => m.type === 'session-saved' && m.requestId === 'remembered-vnc');
+    app.ws.send(JSON.stringify({
+      type: 'save', requestId: 'remembered-vnc',
+      session: {
+        name: 'remembered-vnc', type: 'vnc', host: '127.0.0.1', port: 5901,
+        password: vncPassword, rememberPassword: true, reconnect: true,
+      },
+    }));
+    const vncSessionId = (await response).id;
     const encrypted = fs.readFileSync(path.join(profile, '.sshterm', 'secrets.enc'), 'utf8');
     assert(!encrypted.includes(password), 'saved credential leaked as plaintext');
+    assert(!encrypted.includes(vncPassword), 'saved VNC credential leaked as plaintext');
 
     await stopApp(app);
     app = await startApp();
     response = nextMessage(app.ws, m => m.type === 'sessions');
     app.ws.send(JSON.stringify({ type: 'list' }));
-    const saved = (await response).list.find(item => item.id === sessionId);
+    const restoredSessions = (await response).list;
+    const saved = restoredSessions.find(item => item.id === sessionId);
     assert(saved, 'remembered session did not survive restart');
     assert.strictEqual(saved.password, undefined, 'server exposed the saved password to the browser');
+    const savedVnc = restoredSessions.find(item => item.id === vncSessionId);
+    assert(savedVnc, 'remembered VNC session did not survive restart');
+    assert.strictEqual(savedVnc.password, undefined, 'server exposed the saved VNC password in the session list');
+    response = nextMessage(app.ws, m => m.type === 'vnc-credential' && m.requestId === 'restore-vnc');
+    app.ws.send(JSON.stringify({ type: 'vnc-credential', requestId: 'restore-vnc', session: savedVnc }));
+    assert.strictEqual((await response).password, vncPassword, 'VNC session did not recover its encrypted remembered password');
 
     // Old workspace snapshots may predate stable saved-session ids. A unique
     // endpoint must still recover the encrypted credential after restart.

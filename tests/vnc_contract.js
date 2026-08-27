@@ -12,26 +12,31 @@ const app = read('web/app.js');
 const server = read('server/index.js');
 const ssh = read('server/connections/ssh.js');
 
-assert.match(html, /id="btn-vnc"/, 'VNC toolbar button must exist');
-assert.doesNotMatch(html, /id="btn-vnc"[^>]*class="[^"]*hidden/, 'VNC toolbar button must remain visible without an SSH session');
-assert.match(html, /id="vnc-host"(?![^>]*readonly)/, 'VNC host input must be editable');
-assert.match(html, /无需先打开 SSH\/终端会话/, 'UI must explain that VNC is independent from SSH sessions');
-assert.match(html, /id="vnc-password"[^>]*type="password"/, 'VNC password must use a password input');
-assert.match(html, /VNC 密码（不保存）/, 'UI must state that the VNC password is not saved');
+assert.match(html, /<option value="vnc">VNC<\/option>/, 'VNC must be offered by the +New connection type selector');
+assert.match(html, /id="grp-vnc"/, 'the shared connection dialog must contain VNC fields');
+assert.match(html, /id="v-host"/, 'VNC host input must exist in +New');
+assert.match(html, /id="v-port"[^>]*value="5901"/, 'VNC port must default to 5901');
+assert.match(html, /id="v-password"[^>]*type="password"/, 'VNC password must use a password input');
+assert.match(html, /独立标签页/, 'the UI must explain that VNC opens as an independent tab');
+assert.doesNotMatch(html, /id="btn-vnc"|id="dlg-vnc-mask"/, 'the legacy toolbar/modal VNC entry must be removed');
 
 assert.match(app, /import\('\/vendor\/@novnc\/novnc\/core\/rfb\.js'\)/, 'UI must load the bundled noVNC client');
-assert.match(app, /new RFB\(/, 'UI must create an RFB session');
+assert.match(app, /cfg\.type === 'vnc'/, 'tab creation must branch for VNC');
+assert.match(app, /initVncSession\(tab\)/, 'each VNC tab must create its own controls and screen');
+assert.match(app, /tab\.rfb = instance/, 'the RFB instance must be owned by the individual tab');
+assert.match(app, /disconnectVncTab\(tab/, 'closing a tab must disconnect only that VNC instance');
+assert.match(app, /new RFB\(tab\.vncScreen/, 'UI must render noVNC inside the VNC session tab');
 assert.match(app, /token: clientToken, host, port: String\(port\)/, 'UI must send only the direct VNC target to the bridge');
-assert.match(app, /\$\('btn-vnc'\)\.onclick = openVncPanel/, 'VNC entry must not depend on the active terminal tab');
-assert.doesNotMatch(app, /请先连接一个 SSH 会话|VNC 需要活跃的 SSH 会话|vncTabId/, 'UI must not require an SSH session for VNC');
-assert.match(app, /\$\('vnc-password'\)\.value = '';/, 'UI must clear the VNC password after use');
-assert.doesNotMatch(app, /localStorage[^\n]*vnc-password|sessionStorage[^\n]*vnc-password/i, 'VNC password must not be persisted in browser storage');
+assert.match(app, /type: 'vnc-credential'/, 'saved VNC sessions must request remembered credentials through the authenticated local channel');
+assert.doesNotMatch(app, /localStorage[^\n]*vncPassword|sessionStorage[^\n]*vncPassword/i, 'VNC password must not be persisted in browser storage');
+assert.doesNotMatch(app, /let vncRfb\b|openVncPanel/, 'VNC must not remain a global singleton');
 
 assert.match(server, /new WebSocketServer\(\{ noServer: true/, 'VNC bridge must share the authenticated HTTP upgrade path');
 assert.match(server, /pathname === '\/vnc'/, 'Server must expose the VNC WebSocket endpoint');
 assert.match(server, /net\.connect\(\{ host: remoteHost, port: remotePort \}\)/, 'VNC bridge must connect directly to the requested host and port');
 assert.match(server, /validVncHost\(remoteHost\)/, 'VNC bridge must validate the direct target');
+assert.match(server, /case 'vnc-credential'/, 'server must restore an encrypted remembered VNC password on demand');
 assert.doesNotMatch(server, /conn\.openForward\(remoteHost, remotePort\)|VNC 需要活跃的 SSH 会话/, 'VNC bridge must not use an SSH-forwarded stream');
 assert.doesNotMatch(ssh, /openForward\(remoteHost, remotePort\)/, 'SSH connection must not expose the removed VNC forwarding helper');
 
-console.log('✅ standalone VNC direct-connect static contract passed');
+console.log('✅ standalone VNC session contract passed');

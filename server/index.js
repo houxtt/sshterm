@@ -318,8 +318,8 @@ function saveSessions(data) {
 function storedSessionForConfig(config) {
   if (!config || !config.type) return null;
   if (config.id && sessions[config.id]) return sessions[config.id];
-  if (config.type !== 'ssh' && config.type !== 'telnet') return null;
-  const defaultPort = config.type === 'telnet' ? 23 : 22;
+  if (!['ssh', 'telnet', 'vnc'].includes(config.type)) return null;
+  const defaultPort = config.type === 'telnet' ? 23 : (config.type === 'vnc' ? 5901 : 22);
   const host = String(config.host || '').trim().toLowerCase();
   const port = Number(config.port || defaultPort);
   const username = String(config.username || config.user || '').trim();
@@ -328,7 +328,7 @@ function storedSessionForConfig(config) {
     saved?.type === config.type &&
     String(saved.host || '').trim().toLowerCase() === host &&
     Number(saved.port || defaultPort) === port &&
-    String(saved.username || saved.user || '').trim() === username);
+    (config.type === 'vnc' || String(saved.username || saved.user || '').trim() === username));
   // Never guess between duplicate endpoints that may intentionally use
   // different credentials. The stable session id remains authoritative.
   return matches.length === 1 ? matches[0] : null;
@@ -1012,7 +1012,7 @@ function nextSessionSortOrder() {
 function importSessionEntries(entries, source) {
   if (!Array.isArray(entries) || entries.length > 500) throw new Error('导入会话数量无效（最多 500 个）');
   const names = new Set(Object.values(sessions).map(s => s.name));
-  const acceptedTypes = new Set(['ssh', 'telnet', 'serial']);
+  const acceptedTypes = new Set(['ssh', 'telnet', 'vnc', 'serial']);
   let count = 0;
   for (const item of entries) {
     if (!item || typeof item !== 'object' || !acceptedTypes.has(item.type)) continue;
@@ -1089,6 +1089,13 @@ async function handle(ws, m) {
     }
     case 'list': {
       send(ws, { type: 'sessions', list: sessionsList() });
+      break;
+    }
+    case 'vnc-credential': {
+      const requestId = typeof m.requestId === 'string' ? m.requestId.slice(0, 120) : '';
+      const stored = storedSessionForConfig({ ...(m.session || {}), type: 'vnc' });
+      const password = stored?.type === 'vnc' && stored.rememberPassword && typeof stored.password === 'string' ? stored.password : '';
+      send(ws, { type: 'vnc-credential', requestId, password });
       break;
     }
     case 'save': {
@@ -1564,7 +1571,7 @@ function expandTarget(t) {
 
   server.listen(PORT, '127.0.0.1', () => {
   console.log('┌──────────────────────────────────────────────┐');
-  console.log('│  sshterm  —  SSH / Telnet / 串口 连接工具     │');
+  console.log('│  sshterm  —  SSH / Telnet / VNC / 串口工具   │');
   console.log('└──────────────────────────────────────────────┘');
   console.log(`  地址: http://127.0.0.1:${PORT}`);
   console.log(`  会话: ${CONN_FILE}`);

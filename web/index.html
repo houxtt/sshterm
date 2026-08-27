@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>sshterm — SSH / Telnet / 串口</title>
+<title>sshterm — SSH / Telnet / VNC / 串口</title>
 <link rel="stylesheet" href="/vendor/@xterm/xterm/css/xterm.css">
 <link rel="stylesheet" href="/style.css">
 </head>
@@ -14,7 +14,6 @@
     <button id="btn-save" title="保存当前会话配置">💾 保存会话</button>
     <button id="btn-sftp" title="SSH 文件浏览/下载 (SFTP)">📁 文件</button>
     <button id="btn-tunnel" title="SSH 隧道管理" class="hidden">🔗 隧道</button>
-    <button id="btn-vnc" title="直接连接 VNC 远程桌面">🖥 VNC</button>
     <button id="btn-killall" title="断开并关闭全部会话标签" class="danger">⏹ 全部关闭</button>
     <div class="dropdown" id="wrap-more">
       <button id="btn-more" title="更多工具">☰ 工具</button>
@@ -105,7 +104,7 @@
       <div id="welcome" class="hidden">
         <div class="welcome-box">
           <h1>sshterm</h1>
-          <p>SSH · Telnet · 串口 一体化连接工具</p>
+          <p>SSH · Telnet · VNC · 串口 一体化连接工具</p>
           <button id="btn-welcome-new">＋ 新建连接</button>
         </div>
       </div>
@@ -130,6 +129,7 @@
         <select id="f-type">
           <option value="ssh">SSH</option>
           <option value="telnet">Telnet</option>
+          <option value="vnc">VNC</option>
           <option value="serial">串口</option>
         </select>
       </label>
@@ -192,10 +192,19 @@
         <label id="t-user-wrap" class="hidden">用户名 <input id="t-user"></label>
         <label id="t-pass-wrap2" class="hidden">密码 <input id="t-pass" type="password"></label>
       </div>
+      <!-- VNC 字段 -->
+      <div class="grp hidden" id="grp-vnc">
+        <label>VNC 主机 <input id="v-host" placeholder="192.168.1.100"></label>
+        <label>端口 <input id="v-port" type="number" value="5901" min="1" max="65535" style="width:90px"></label>
+        <label>密码 <input id="v-password" type="password" autocomplete="current-password" placeholder="VNC 密码"></label>
+        <label><input type="checkbox" id="v-view-only"> 只读模式</label>
+        <label><input type="checkbox" id="v-reconnect" checked> 断线自动重连</label>
+        <p class="muted">直接连接目标 VNC 服务，不依赖 SSH/终端会话；连接后会打开独立标签页。</p>
+      </div>
       <div class="grp" id="f-remember-wrap">
         <label><input type="checkbox" id="f-remember"> 记住凭据（使用 Windows DPAPI 加密）</label>
       </div>
-      <div class="grp">
+      <div class="grp" id="grp-autocmds">
         <label>连接后自动执行(每行一条)
           <textarea id="f-autocmds" rows="3" placeholder="如:&#10;ls&#10;dmesg | tail -20"></textarea>
         </label>
@@ -340,29 +349,6 @@
       </div>
     </div>
     <p class="muted cmd-foot">单会话最多 8 条隧道;端口冲突时会提示失败</p>
-  </div>
-</div>
-
-<!-- 独立直连的内嵌 VNC 客户端 -->
-<div id="dlg-vnc-mask" class="hidden">
-  <div id="dlg-vnc">
-    <div class="vnc-head">
-      <h3>🖥 VNC 远程桌面</h3>
-      <span id="vnc-status" class="muted">未连接</span>
-      <button id="vnc-close" class="mini danger" title="关闭 VNC">✕</button>
-    </div>
-    <div class="vnc-toolbar">
-      <label>VNC 主机 <input id="vnc-host" value="127.0.0.1" placeholder="例如 192.168.1.100" title="VNC 服务器的 IP 地址或主机名"></label>
-      <label>端口 <input id="vnc-port" type="number" value="5901" min="1" max="65535" title="显示器 :1 对应 5901，:2 对应 5902"></label>
-      <label>密码 <input id="vnc-password" type="password" autocomplete="current-password" placeholder="VNC 密码（不保存）"></label>
-      <label class="vnc-check"><input id="vnc-view-only" type="checkbox"> 只读</label>
-      <button id="vnc-connect" class="primary">连接</button>
-      <button id="vnc-disconnect" disabled>断开</button>
-      <button id="vnc-cad" disabled>Ctrl+Alt+Del</button>
-      <button id="vnc-fullscreen" disabled>全屏</button>
-    </div>
-    <div id="vnc-screen"><div class="vnc-placeholder">输入 VNC 主机 IP/域名、端口和密码后直接连接，无需先打开 SSH/终端会话。<br>常用端口：显示器 :1 = 5901，:2 = 5902。</div></div>
-    <div class="vnc-foot muted">直接连接 VNC 主机端口，请确保目标 VNC 服务允许本机访问；密码仅用于本次连接。</div>
   </div>
 </div>
 

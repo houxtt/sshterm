@@ -25,7 +25,7 @@ if (typeof Terminal !== 'function' || !FitAddonCtor) {
   throw new Error('terminal core missing');
 }
 
-const TYPE_ICON = { ssh: '🖥️', telnet: '🔌', serial: '🔗' };
+const TYPE_ICON = { ssh: '🖥️', telnet: '🔌', vnc: '🖼️', serial: '🔗' };
 const STATE_TEXT = { connecting: '连接中…', connected: '● 已连接', closed: '✕ 已断开' };
 const SENSITIVE_CONFIG_KEYS = new Set(['password', 'privateKey', 'passphrase', 'loginPass']);
 
@@ -74,6 +74,8 @@ let editingId = null;     // 对话框正在编辑的会话 id
 let serialPorts = [];
 const pendingSavedConnections = new Map();
 let saveRequestSeq = 0;
+const pendingVncCredentials = new Map();
+let vncCredentialRequestSeq = 0;
 
 // ---------- WS 连接 ----------
 ws.binaryType = 'arraybuffer';
@@ -200,6 +202,14 @@ function handleMsg(m) {
       if (!cfg) break;
       pendingSavedConnections.delete(m.requestId);
       newTab({ ...cfg, id: m.id });
+      break;
+    }
+    case 'vnc-credential': {
+      const pending = pendingVncCredentials.get(m.requestId);
+      if (!pending) break;
+      pendingVncCredentials.delete(m.requestId);
+      clearTimeout(pending.timer);
+      pending.resolve(typeof m.password === 'string' ? m.password : '');
       break;
     }
     case 'session-export': {
@@ -353,7 +363,7 @@ const I18N = {
     sftp_refresh: '刷新', sftp_close: '关闭', sftp_dl: '下载', sftp_dir_dl: '打包下载',
     side_title: '已保存会话', side_batch: '批量', side_foot: '双击连接',
     batch_all: '全选', batch_del: '删除选中', batch_cancel: '取消',
-    close_title: '关闭会话?', close_ok: '确认关闭', welcome_p: 'SSH · Telnet · 串口 一体化连接工具',
+    close_title: '关闭会话?', close_ok: '确认关闭', welcome_p: 'SSH · Telnet · VNC · 串口 一体化连接工具',
     ws_ok: '服务器已连接', ws_off: '服务器已断开', ws_init: '未连接服务器',
   },
   en: {
@@ -369,7 +379,7 @@ const I18N = {
     sftp_refresh: 'Refresh', sftp_close: 'Close', sftp_dl: 'Download', sftp_dir_dl: 'Zip',
     side_title: 'Sessions', side_batch: 'Batch', side_foot: 'Double-click to connect',
     batch_all: 'All', batch_del: 'Delete', batch_cancel: 'Cancel',
-    close_title: 'Close session?', close_ok: 'Close', welcome_p: 'SSH · Telnet · Serial all-in-one',
+    close_title: 'Close session?', close_ok: 'Close', welcome_p: 'SSH · Telnet · VNC · Serial all-in-one',
     ws_ok: 'Server connected', ws_off: 'Server disconnected', ws_init: 'Not connected',
   },
 };
@@ -441,7 +451,7 @@ function restoreTabItems(list) {
     if (!item || !item.cfg || !item.cfg.type) continue;
     const tab = newTab(item.cfg, { connect: true, hex: item.hex, replay: item.buf, id: item.id });
     const split = item.split || { dir: 'row', ratio: 0.5 };
-    for (let n = 0; n < Math.min(Number(item.panes) || 0, SPLIT_MAX - 1); n++) {
+    for (let n = 0; tab.cfg.type !== 'vnc' && n < Math.min(Number(item.panes) || 0, SPLIT_MAX - 1); n++) {
       addPane(tab, split.dir, split.ratio, { id: item.paneIds?.[n] });
     }
   }
@@ -511,6 +521,23 @@ function newTab(cfg, opts = {}) {
   container.appendChild(host);
   $('terms').appendChild(container);
 
+  if (cfg.type === 'vnc') {
+    container.classList.add('vnc-session-container');
+    host.className = 'vnc-session';
+    const tab = {
+      id, cfg, term: null, host: container, vncHost: host, state: 'idle',
+      hex: false, fitAddon: null, searchAddon: null, recParts: [], recLen: 0, extraPanes: [],
+      vncPassword: cfg.password || '',
+    };
+    tabs.push(tab);
+    initVncSession(tab);
+    renderTabbar();
+    activateTab(id);
+    saveTabs();
+    if (opts.connect !== false) connectVncTab(tab);
+    return tab;
+  }
+
   const term = new Terminal({
     fontSize: 13, fontFamily: 'Consolas, "Courier New", monospace',
     cursorBlink: true, scrollback: 5000,
@@ -579,6 +606,7 @@ function newTab(cfg, opts = {}) {
 }
 
 function fitTerm(tab) {
+  if (!tab?.fitAddon) return;
   try { tab.fitAddon.fit(); } catch (e) { /* 忽略 */ }
 }
 
@@ -713,15 +741,16 @@ function doCloseTab(id) {
   const tab = tabs[idx];
   tab.intentionalClose = true;
   cancelReconnect(tab);
+  if (tab.cfg.type === 'vnc') disconnectVncTab(tab, 'VNC 已断开', true);
   for (const p of tab.extraPanes) {
     send({ type: 'disconnect', id: p.connId });
     try { p.term.dispose(); } catch (e) {}
     p.host.remove();
   }
-  send({ type: 'disconnect', id });
+  if (tab.cfg.type !== 'vnc') send({ type: 'disconnect', id });
   tabs.splice(idx, 1);
   if (tab._splitCleanup) tab._splitCleanup();
-  try { tab.term.dispose(); } catch (e) {}
+  try { tab.term?.dispose(); } catch (e) {}
   tab.host.remove();
   if (activeTabId === id) activeTabId = null;
   const next = tabs[idx] || tabs[idx - 1];
@@ -737,11 +766,15 @@ function activateTab(id) {
   activeTabId = id;
   for (const t of tabs) {
     t.host.classList.toggle('hidden', t.id !== id);
-    if (t.id === id) setTimeout(() => { fitTerm(t); t.term.focus(); }, 0);
+    if (t.id === id) setTimeout(() => {
+      if (t.cfg.type === 'vnc') { try { t.rfb?.focus(); } catch {} }
+      else { fitTerm(t); t.term?.focus(); }
+    }, 0);
   }
   renderTabbar();
   updateWelcome();
   updateSftpBtn();
+  closeSearch();
 }
 
 function setTabState(id, state, msg) {
@@ -775,7 +808,10 @@ function scheduleReconnect(tab, reason) {
   setTabState(tab.id, 'connecting', `断线, ${delay / 1000} 秒后第 ${tab.reconnectAttempts} 次重连…`);
   tab.reconnectTimer = setTimeout(() => {
     tab.reconnectTimer = null;
-    if (!tab.intentionalClose && tabs.includes(tab)) send({ type: 'connect', session: tab.cfg, id: tab.id });
+    if (!tab.intentionalClose && tabs.includes(tab)) {
+      if (tab.cfg.type === 'vnc') connectVncTab(tab);
+      else send({ type: 'connect', session: tab.cfg, id: tab.id });
+    }
   }, delay);
 }
 
@@ -1066,6 +1102,11 @@ function openDlg(existing = null) {
   $('t-autologin').checked = !!existing?.autoLogin;
   $('t-user').value = existing?.loginUser || '';
   $('t-pass').value = '';
+  $('v-host').value = existing?.type === 'vnc' ? (existing.host || '') : '';
+  $('v-port').value = existing?.type === 'vnc' ? (existing.port || 5901) : 5901;
+  $('v-password').value = '';
+  $('v-view-only').checked = !!existing?.viewOnly;
+  $('v-reconnect').checked = existing?.reconnect !== false;
   $('f-autocmds').value = (existing?.autoCmds || []).join('\n');
   $('s-port').value = existing?.port2 || existing?.port || '';
   $('s-baud').value = String(existing?.baudRate || 115200);
@@ -1087,8 +1128,10 @@ function updateDlgFields() {
   const type = $('f-type').value;
   $('grp-ssh').classList.toggle('hidden', type !== 'ssh');
   $('grp-telnet').classList.toggle('hidden', type !== 'telnet');
+  $('grp-vnc').classList.toggle('hidden', type !== 'vnc');
   $('grp-serial').classList.toggle('hidden', type !== 'serial');
   $('f-remember-wrap').classList.toggle('hidden', type === 'serial');
+  $('grp-autocmds').classList.toggle('hidden', type === 'vnc' || type === 'serial');
   const auth = $('f-auth').value;
   $('f-pwd-wrap').classList.toggle('hidden', auth !== 'password' && auth !== 'keyboard-interactive');
   $('f-key-wrap').classList.toggle('hidden', auth !== 'key');
@@ -1147,6 +1190,14 @@ function collectDlg() {
       loginUser: $('t-user').value.trim() || undefined,
       loginPass: $('t-pass').value || undefined,
     });
+  } else if (type === 'vnc') {
+    Object.assign(base, {
+      host: $('v-host').value.trim(),
+      port: parseInt($('v-port').value, 10) || 5901,
+      password: $('v-password').value || undefined,
+      viewOnly: $('v-view-only').checked,
+      reconnect: $('v-reconnect').checked,
+    });
   } else {
     Object.assign(base, {
       port2: $('s-port').value, port: $('s-port').value,
@@ -1162,9 +1213,11 @@ function collectDlg() {
       trigger: $('s-trigger').value.trim() || undefined,
     });
   }
-  // 连接后自动执行脚本 (所有协议通用)
-  const autoCmds = $('f-autocmds').value.split('\n').map(s => s.trim()).filter(Boolean);
-  if (autoCmds.length) base.autoCmds = autoCmds;
+  // 自动命令仅适用于终端协议，VNC 是图形桌面会话。
+  if (type !== 'vnc' && type !== 'serial') {
+    const autoCmds = $('f-autocmds').value.split('\n').map(s => s.trim()).filter(Boolean);
+    if (autoCmds.length) base.autoCmds = autoCmds;
+  }
   return base;
 }
 
@@ -1209,6 +1262,9 @@ function updateSftpBtn() {
   $('btn-sftp').title = ok ? 'SSH 文件浏览/下载 (SFTP)' : '文件面板仅 SSH 已连接时可用';
   $('btn-tunnel').disabled = !ok;
   if (ok) $('btn-tunnel').classList.remove('hidden'); else $('btn-tunnel').classList.add('hidden');
+  const terminalSession = !!(tab && tab.cfg.type !== 'vnc');
+  $('btn-split').disabled = !terminalSession;
+  $('btn-cmds').disabled = !terminalSession;
 }
 
 function toggleSftpPanel() {
@@ -1436,7 +1492,7 @@ function renderSftpList(entries) {
 let _searchActive = false;
 function openSearch() {
   const tab = tabs.find(t => t.id === activeTabId);
-  if (!tab) return;
+  if (!tab || !tab.searchAddon) return setStatus(tab?.cfg.type === 'vnc' ? 'VNC 会话不支持终端搜索' : '没有激活的会话');
   _searchActive = true;
   $('search-bar').classList.remove('hidden');
   $('search-input').focus();
@@ -1675,6 +1731,7 @@ function renderCommands() {
 function runCommand(cmd) {
   const tab = tabs.find(t => t.id === activeTabId);
   if (!tab) return setStatus('没有激活的会话');
+  if (tab.cfg.type === 'vnc') return setStatus('VNC 会话不支持终端命令');
   if (tab.state !== 'connected') return setStatus('会话未连接');
   sendInput(tab.id, expandCommand(cmd, tab.cfg) + '\n');
   setStatus(`已发送: ${expandCommand(cmd, tab.cfg)}`);
@@ -2013,6 +2070,7 @@ function toggleSplit(tab) {
 $('btn-split').onclick = () => {
   const tab = tabs.find(t => t.id === activeTabId);
   if (!tab) return setStatus('没有激活的会话');
+  if (tab.cfg.type === 'vnc') return setStatus('VNC 会话为独立桌面，不支持终端分屏');
   toggleSplit(tab);
 };
 
@@ -2157,101 +2215,185 @@ function openTunnelPanel(tab) {
   tunnelRefreshTimer = setInterval(() => { if (tunnelTab && !$('dlg-tunnel-mask').classList.contains('hidden')) send({ type: 'tunnel', id: tunnelTab.id, action: 'list' }); }, 2000);
 }
 
-// ---------- 独立 VNC 直连 ----------
-let vncRfb = null;
-let vncCredentialPending = false;
+// ---------- VNC 独立会话标签 ----------
 let vncModulePromise = null;
 
-function setVncStatus(text, state = '') {
-  $('vnc-status').textContent = text;
-  $('vnc-status').style.color = state === 'ok' ? '#22c55e' : (state === 'error' ? '#ef4444' : '#a9b1d6');
+function setVncTabStatus(tab, text, state = '') {
+  if (!tab?.vncStatus) return;
+  tab.vncStatus.textContent = text;
+  tab.vncStatus.className = `vnc-session-status${state ? ` ${state}` : ''}`;
 }
 
-function setVncControls(connected) {
-  $('vnc-disconnect').disabled = !connected;
-  $('vnc-cad').disabled = !connected;
-  $('vnc-fullscreen').disabled = !connected;
+function setVncTabControls(tab, connected) {
+  if (!tab?.vncControls) return;
+  tab.vncControls.connect.disabled = connected;
+  tab.vncControls.disconnect.disabled = !connected;
+  tab.vncControls.cad.disabled = !connected;
+  tab.vncControls.fullscreen.disabled = !connected;
 }
 
-function disconnectVnc(status = '已断开') {
-  const current = vncRfb;
-  vncRfb = null;
-  vncCredentialPending = false;
-  if (current) { try { current.disconnect(); } catch {} }
-  $('vnc-password').value = '';
-  setVncControls(false);
-  setVncStatus(status);
-  const screen = $('vnc-screen');
-  screen.innerHTML = '<div class="vnc-placeholder">VNC 已断开。输入主机、端口与密码后可重新连接。</div>';
+function initVncSession(tab) {
+  tab.vncHost.innerHTML = `
+    <div class="vnc-session-toolbar">
+      <span class="vnc-session-status">准备连接 ${esc(tab.cfg.host)}:${Number(tab.cfg.port) || 5901}</span>
+      <input class="vnc-session-password" type="password" autocomplete="current-password" placeholder="VNC 密码（需要时输入）">
+      <label class="vnc-session-check"><input class="vnc-session-view-only" type="checkbox"> 只读</label>
+      <button class="vnc-session-connect primary">连接</button>
+      <button class="vnc-session-disconnect" disabled>断开</button>
+      <button class="vnc-session-cad" disabled>Ctrl+Alt+Del</button>
+      <button class="vnc-session-fullscreen" disabled>全屏</button>
+    </div>
+    <div class="vnc-session-screen"><div class="vnc-placeholder">正在准备独立 VNC 会话…</div></div>`;
+  tab.vncStatus = tab.vncHost.querySelector('.vnc-session-status');
+  tab.vncScreen = tab.vncHost.querySelector('.vnc-session-screen');
+  tab.vncControls = {
+    password: tab.vncHost.querySelector('.vnc-session-password'),
+    viewOnly: tab.vncHost.querySelector('.vnc-session-view-only'),
+    connect: tab.vncHost.querySelector('.vnc-session-connect'),
+    disconnect: tab.vncHost.querySelector('.vnc-session-disconnect'),
+    cad: tab.vncHost.querySelector('.vnc-session-cad'),
+    fullscreen: tab.vncHost.querySelector('.vnc-session-fullscreen'),
+  };
+  tab.vncControls.viewOnly.checked = !!tab.cfg.viewOnly;
+  tab.vncControls.connect.onclick = () => connectVncTab(tab);
+  tab.vncControls.disconnect.onclick = () => disconnectVncTab(tab, 'VNC 已断开', true);
+  tab.vncControls.cad.onclick = () => { try { tab.rfb?.sendCtrlAltDel(); } catch {} };
+  tab.vncControls.fullscreen.onclick = () => tab.vncHost.requestFullscreen?.();
+  tab.vncControls.viewOnly.onchange = () => {
+    tab.cfg.viewOnly = tab.vncControls.viewOnly.checked;
+    if (tab.rfb) tab.rfb.viewOnly = tab.cfg.viewOnly;
+    saveTabs();
+  };
+  tab.vncControls.password.addEventListener('keydown', event => {
+    if (event.key === 'Enter') { event.preventDefault(); connectVncTab(tab); }
+  });
 }
 
-async function connectVnc() {
-  const password = $('vnc-password').value;
-  if (vncRfb && vncCredentialPending) {
-    if (!password) return setVncStatus('请输入 VNC 密码', 'error');
-    vncCredentialPending = false;
-    vncRfb.sendCredentials({ password });
-    $('vnc-password').value = '';
-    return setVncStatus('正在认证…');
+function rememberedVncPassword(tab) {
+  if (tab.vncPassword) return Promise.resolve(tab.vncPassword);
+  if (!tab.cfg.id || !tab.cfg.rememberPassword || ws.readyState !== WebSocket.OPEN) return Promise.resolve('');
+  const requestId = `vnc-${Date.now()}-${++vncCredentialRequestSeq}`;
+  return new Promise(resolve => {
+    const timer = setTimeout(() => {
+      pendingVncCredentials.delete(requestId);
+      resolve('');
+    }, 3000);
+    pendingVncCredentials.set(requestId, { resolve, timer });
+    send({ type: 'vnc-credential', requestId, session: configForBrowserStorage(tab.cfg) });
+  });
+}
+
+function disconnectVncTab(tab, status = 'VNC 已断开', intentional = false) {
+  if (!tab || tab.cfg.type !== 'vnc') return;
+  if (intentional) {
+    tab.manualDisconnect = true;
+    cancelReconnect(tab);
   }
-  const host = $('vnc-host').value.trim();
-  if (!host || host.length > 253 || !/^[A-Za-z0-9._:-]+$/.test(host)) return setVncStatus('VNC 主机地址无效', 'error');
-  const port = Number($('vnc-port').value);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) return setVncStatus('VNC 端口无效', 'error');
-  if (vncRfb) disconnectVnc();
-  setVncStatus('正在加载 VNC 客户端…');
+  const current = tab.rfb;
+  tab.rfb = null;
+  tab.vncCredentialPending = false;
+  if (current) { try { current.disconnect(); } catch {} }
+  if (tab.vncControls) tab.vncControls.password.value = '';
+  setVncTabControls(tab, false);
+  setVncTabStatus(tab, status);
+  if (tab.vncScreen) tab.vncScreen.innerHTML = '<div class="vnc-placeholder">VNC 已断开。点击“连接”可重新连接此会话。</div>';
+  if (tabs.includes(tab)) setTabState(tab.id, 'closed', status);
+}
+
+async function connectVncTab(tab) {
+  if (!tab || tab.cfg.type !== 'vnc' || !tabs.includes(tab)) return;
+  const typedPassword = tab.vncControls?.password.value || '';
+  if (tab.rfb && tab.vncCredentialPending) {
+    const password = typedPassword || tab.vncPassword;
+    if (!password) {
+      setVncTabStatus(tab, '请输入 VNC 密码后再次点击“连接”', 'error');
+      tab.vncControls.password.focus();
+      return;
+    }
+    tab.vncPassword = password;
+    tab.vncCredentialPending = false;
+    tab.rfb.sendCredentials({ password });
+    tab.vncControls.password.value = '';
+    setVncTabStatus(tab, '正在认证…');
+    return;
+  }
+  const host = String(tab.cfg.host || '').trim();
+  const port = Number(tab.cfg.port || 5901);
+  if (!host || host.length > 253 || !/^[A-Za-z0-9._:-]+$/.test(host) ||
+      !Number.isInteger(port) || port < 1 || port > 65535) {
+    setTabState(tab.id, 'closed', 'VNC 主机或端口无效');
+    setVncTabStatus(tab, 'VNC 主机或端口无效', 'error');
+    return;
+  }
+  tab.manualDisconnect = false;
+  cancelReconnect(tab);
+  const previous = tab.rfb;
+  tab.rfb = null;
+  if (previous) { try { previous.disconnect(); } catch {} }
+  setTabState(tab.id, 'connecting', `正在连接 ${host}:${port}…`);
+  setVncTabControls(tab, false);
+  tab.vncControls.connect.disabled = true;
+  setVncTabStatus(tab, '正在加载 VNC 客户端…');
   try {
+    const password = typedPassword || await rememberedVncPassword(tab);
+    if (!tabs.includes(tab) || tab.intentionalClose) return;
+    if (password) tab.vncPassword = password;
     vncModulePromise ||= import('/vendor/@novnc/novnc/core/rfb.js');
     const RFB = (await vncModulePromise).default;
-    const params = new URLSearchParams({
-      token: clientToken, host, port: String(port),
-    });
+    const params = new URLSearchParams({ token: clientToken, host, port: String(port) });
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const screen = $('vnc-screen');
-    screen.innerHTML = '';
+    tab.vncScreen.innerHTML = '';
     const options = { shared: true };
     if (password) options.credentials = { password };
-    const instance = new RFB(screen, `${protocol}//${location.host}/vnc?${params}`, options);
-    vncRfb = instance;
-    $('vnc-password').value = '';
+    const instance = new RFB(tab.vncScreen, `${protocol}//${location.host}/vnc?${params}`, options);
+    tab.rfb = instance;
+    tab.vncCredentialPending = false;
+    tab.vncControls.password.value = '';
     instance.scaleViewport = true;
     instance.resizeSession = false;
-    instance.viewOnly = $('vnc-view-only').checked;
+    instance.viewOnly = !!tab.cfg.viewOnly;
     instance.showDotCursor = true;
     instance.addEventListener('connect', () => {
-      if (vncRfb !== instance) return;
-      setVncControls(true);
-      setVncStatus(`已连接：${host}:${port}`, 'ok');
+      if (tab.rfb !== instance) return;
+      tab.everConnected = true;
+      tab.reconnectAttempts = 0;
+      setVncTabControls(tab, true);
+      setTabState(tab.id, 'connected', `已连接 ${host}:${port}`);
+      setVncTabStatus(tab, `已连接：${host}:${port}`, 'ok');
       try { instance.focus(); } catch {}
     });
     instance.addEventListener('credentialsrequired', () => {
-      if (vncRfb !== instance) return;
-      vncCredentialPending = true;
-      setVncStatus('VNC 需要密码：请输入后再次点击“连接”', 'error');
-      $('vnc-password').focus();
+      if (tab.rfb !== instance) return;
+      tab.vncCredentialPending = true;
+      setVncTabControls(tab, false);
+      tab.vncControls.connect.disabled = false;
+      setVncTabStatus(tab, 'VNC 需要密码：输入后点击“连接”', 'error');
+      tab.vncControls.password.focus();
     });
     instance.addEventListener('disconnect', event => {
-      if (vncRfb !== instance) return;
-      vncRfb = null;
-      vncCredentialPending = false;
-      setVncControls(false);
-      setVncStatus(event.detail?.clean ? 'VNC 已断开' : 'VNC 连接异常，请确认远端服务和端口', event.detail?.clean ? '' : 'error');
+      if (tab.rfb !== instance) return;
+      tab.rfb = null;
+      tab.vncCredentialPending = false;
+      setVncTabControls(tab, false);
+      const clean = !!event.detail?.clean;
+      const message = clean ? 'VNC 已断开' : 'VNC 连接异常，请确认远端服务和端口';
+      setTabState(tab.id, 'closed', message);
+      setVncTabStatus(tab, message, clean ? '' : 'error');
+      if (!clean && tab.everConnected && !tab.manualDisconnect) scheduleReconnect(tab, message);
     });
     instance.addEventListener('desktopname', event => {
-      if (vncRfb === instance && event.detail?.name) document.title = `${event.detail.name} — sshterm VNC`;
+      if (tab.rfb === instance && event.detail?.name) {
+        tab.desktopName = event.detail.name;
+        setVncTabStatus(tab, `已连接：${event.detail.name}（${host}:${port}）`, 'ok');
+      }
     });
-    setVncStatus(`正在直接连接 ${host}:${port}…`);
+    setVncTabStatus(tab, `正在直接连接 ${host}:${port}…`);
   } catch (error) {
-    disconnectVnc(`VNC 初始化失败：${error.message || error}`);
-    setVncStatus(`VNC 初始化失败：${error.message || error}`, 'error');
+    tab.rfb = null;
+    setVncTabControls(tab, false);
+    setTabState(tab.id, 'closed', 'VNC 初始化失败');
+    setVncTabStatus(tab, `VNC 初始化失败：${error.message || error}`, 'error');
   }
-}
-
-function openVncPanel() {
-  $('dlg-vnc-mask').classList.remove('hidden');
-  setVncStatus('就绪：输入 VNC 主机和端口后直接连接');
-  setVncControls(!!vncRfb);
-  setTimeout(() => ($('vnc-host').value.trim() ? $('vnc-password') : $('vnc-host')).focus(), 0);
 }
 
 // ---------- 事件绑定 ----------
@@ -2274,6 +2416,7 @@ $('mi-timer').onclick = () => {
   $('menu-more').classList.add('hidden');
   const tab = tabs.find(t => t.id === activeTabId);
   if (!tab) return setStatus('没有激活的会话');
+  if (tab.cfg.type === 'vnc') return setStatus('VNC 会话不支持定时发送终端数据');
   $('dlg-timer-mask').classList.remove('hidden');
 };
 $('mi-scan').onclick = () => { $('menu-more').classList.add('hidden'); $('dlg-scan-mask').classList.remove('hidden'); };
@@ -2287,6 +2430,7 @@ $('mi-capture').onclick = () => {
   $('menu-more').classList.add('hidden');
   const tab = tabs.find(t => t.id === activeTabId);
   if (!tab) return setStatus('没有激活的会话');
+  if (tab.cfg.type === 'vnc') return setStatus('VNC 会话不支持终端原始抓包');
   tab.logging = !tab.logging;
   if (tab.logging) {
     tab.captureParts = [];
@@ -2331,6 +2475,7 @@ $('mi-record').onclick = () => {
   $('menu-more').classList.add('hidden');
   const tab = tabs.find(t => t.id === activeTabId);
   if (!tab) return setStatus('没有激活的会话');
+  if (tab.cfg.type === 'vnc') return setStatus('VNC 会话不支持终端录制');
   if (tab.recording) return stopSessionRecording(tab);
   tab.recording = { startedAt: Date.now(), events: [], size: 0 };
   $('mi-record').textContent = '⏹ 停止并导出录制';
@@ -2409,13 +2554,6 @@ $('btn-tunnel').onclick = () => {
   if (!tab || tab.cfg.type !== 'ssh') return setStatus('隧道仅适用于 SSH 会话');
   openTunnelPanel(tab);
 };
-$('btn-vnc').onclick = openVncPanel;
-$('vnc-connect').onclick = connectVnc;
-$('vnc-disconnect').onclick = () => disconnectVnc();
-$('vnc-cad').onclick = () => { if (vncRfb) vncRfb.sendCtrlAltDel(); };
-$('vnc-fullscreen').onclick = () => $('dlg-vnc').requestFullscreen?.();
-$('vnc-view-only').onchange = () => { if (vncRfb) vncRfb.viewOnly = $('vnc-view-only').checked; };
-$('vnc-close').onclick = () => { disconnectVnc(); $('dlg-vnc-mask').classList.add('hidden'); document.title = 'sshterm — SSH / Telnet / 串口'; };
 $('tunnel-close').onclick = () => { $('dlg-tunnel-mask').classList.add('hidden'); clearInterval(tunnelRefreshTimer); tunnelRefreshTimer = null; };
 $('btn-tunnel-refresh').onclick = () => {
   const tab = tunnelTab;
@@ -2846,6 +2984,16 @@ $('batch-del').onclick = () => {
 function doConnect(save) {
   const cfg = collectDlg();
   if (!cfg.name) { alert('请填写会话名称'); return; }
+  if (cfg.type === 'vnc') {
+    if (!cfg.host || cfg.host.length > 253 || !/^[A-Za-z0-9._:-]+$/.test(cfg.host)) {
+      alert('请填写有效的 VNC 主机地址');
+      return;
+    }
+    if (!Number.isInteger(cfg.port) || cfg.port < 1 || cfg.port > 65535) {
+      alert('请填写有效的 VNC 端口');
+      return;
+    }
+  }
   $('dlg-mask').classList.add('hidden');
   if (save) {
     const requestId = `${Date.now()}-${++saveRequestSeq}`;
