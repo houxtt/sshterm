@@ -1,5 +1,5 @@
-// End-to-end VNC transport regression.  A local TCP fixture stands in for the
-// remote VNC server while the test-only SSH fixture provides openForward().
+// End-to-end standalone VNC transport regression. A local TCP fixture stands
+// in for a VNC server; no SSH connection or terminal session is created.
 const assert = require('assert');
 const fs = require('fs');
 const http = require('http');
@@ -14,8 +14,6 @@ const PORT = 8908;
 const BASE = `http://127.0.0.1:${PORT}`;
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'sshterm-vnc-'));
 const profile = path.join(temp, 'profile');
-const fixture = path.join(temp, 'fixture');
-fs.mkdirSync(fixture, { recursive: true });
 
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 function httpGet(url) {
@@ -61,7 +59,7 @@ function wsClose(ws, timeout = 8000) {
   const vncPort = tcpServer.address().port;
   const server = spawn(process.execPath, ['server/index.js', '--port', String(PORT), '--no-open'], {
     cwd: ROOT,
-    env: { ...process.env, USERPROFILE: profile, HOME: profile, SSHTERM_TEST_SFTP_ROOT: fixture },
+    env: { ...process.env, USERPROFILE: profile, HOME: profile },
     stdio: 'ignore',
   });
   let ws;
@@ -74,7 +72,7 @@ function wsClose(ws, timeout = 8000) {
     assert.strictEqual(moduleResponse.status, 200, 'noVNC RFB module must be served locally');
     assert.match(moduleResponse.headers['content-type'] || '', /javascript/, 'noVNC module MIME type');
 
-    const endpoint = `ws://127.0.0.1:${PORT}/vnc?token=${encodeURIComponent(token)}&conn=9900&host=127.0.0.1&port=${vncPort}`;
+    const endpoint = `ws://127.0.0.1:${PORT}/vnc?token=${encodeURIComponent(token)}&host=127.0.0.1&port=${vncPort}`;
     ws = new WebSocket(endpoint);
     await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
     assert.strictEqual((await wsMessage(ws)).toString(), 'RFB 003.008\n', 'VNC server banner forwarding');
@@ -83,10 +81,10 @@ function wsClose(ws, timeout = 8000) {
     assert.strictEqual((await reply).toString(), 'ECHO:RFB 003.008\n', 'bidirectional VNC byte forwarding');
     ws.close();
 
-    const forbidden = new WebSocket(`ws://127.0.0.1:${PORT}/vnc?token=${encodeURIComponent(token)}&conn=9900&host=192.168.1.10&port=5901`);
-    const closed = wsClose(forbidden);
-    assert.strictEqual((await closed).code, 1008, 'VNC bridge must reject non-loopback remote targets');
-    console.log('✅ VNC-over-SSH WebSocket bridge integration passed');
+    const invalid = new WebSocket(`ws://127.0.0.1:${PORT}/vnc?token=${encodeURIComponent(token)}&host=bad%20host&port=5901`);
+    const closed = wsClose(invalid);
+    assert.strictEqual((await closed).code, 1008, 'VNC bridge must reject malformed direct targets');
+    console.log('✅ standalone VNC direct WebSocket bridge integration passed');
   } finally {
     if (ws) ws.close();
     server.kill();

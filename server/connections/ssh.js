@@ -326,14 +326,6 @@ class SSHConnection extends BaseConnection {
     if (this.stream) this.stream.setWindow(nextRows, nextCols);
   }
 
-  openForward(remoteHost, remotePort) {
-    if (!this.client || this.state !== 'connected') return Promise.reject(new Error('SSH 未连接'));
-    return new Promise((resolve, reject) => {
-      this.client.forwardOut('127.0.0.1', 0, remoteHost, remotePort,
-        (error, stream) => error ? reject(error) : resolve(stream));
-    });
-  }
-
   // ---------- SSH 隧道 / 端口转发 ----------
   // 单会话上限由服务端控制
   _nextTunnelId = 1;

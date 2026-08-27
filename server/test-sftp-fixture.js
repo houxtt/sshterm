@@ -2,7 +2,6 @@
 // explicitly set, allowing transport routes to be integration-tested without
 // a network host. Production startup never imports or enables this fixture.
 const fs = require('fs');
-const net = require('net');
 const path = require('path');
 
 function installLocalSftpFixture(connections, root, id = 9900) {
@@ -33,11 +32,6 @@ function installLocalSftpFixture(connections, root, id = 9900) {
   };
   connections.set(id, {
     id, state: 'connected', config: { type: 'ssh', name: 'fixture' }, getSftpInst: () => sftp,
-    openForward: (host, port) => new Promise((resolveForward, rejectForward) => {
-      if (host !== '127.0.0.1' && host !== 'localhost') return rejectForward(new Error('测试转发仅允许回环地址'));
-      const socket = net.connect({ host: '127.0.0.1', port }, () => resolveForward(socket));
-      socket.once('error', rejectForward);
-    }),
     sftpCollectFiles: async (dir) => {
       const files = [];
       const localDir = resolve(dir);

@@ -1,6 +1,7 @@
 // sshterm 服务端: HTTP 静态 + WebSocket 路由 + 连接管理 + 会话持久化
 // 启动: node server/index.js [--port 8787] [--no-open]
 const http = require('http');
+const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -914,21 +915,32 @@ wss.on('connection', (ws, req) => {
   });
 });
 
-function vncConnectionForRequest(req) {
+function validVncHost(value) {
+  return value.length > 0 && value.length <= 253 && /^[A-Za-z0-9._:-]+$/.test(value);
+}
+
+function vncTargetForRequest(req) {
   const query = new URL(req.url, 'http://127.0.0.1').searchParams;
-  const id = Number(query.get('conn'));
-  const remoteHost = String(query.get('host') || '127.0.0.1').toLowerCase();
+  const remoteHost = String(query.get('host') || '127.0.0.1').trim().toLowerCase();
   const remotePort = Number(query.get('port') || 5901);
-  if (!Number.isInteger(id) || id < 1 || id > 0xffff) throw new Error('SSH 会话编号无效');
-  if (remoteHost !== '127.0.0.1' && remoteHost !== 'localhost') throw new Error('VNC 仅允许访问 SSH 主机的回环地址');
+  if (!validVncHost(remoteHost)) throw new Error('VNC 主机地址无效');
   if (!Number.isInteger(remotePort) || remotePort < 1 || remotePort > 65535) throw new Error('VNC 端口无效');
-  const owner = windows.get(String(query.get('window') || ''));
-  const conn = owner ? getConnection(owner, id)
-    : (process.env.SSHTERM_TEST_SFTP_ROOT ? connections.get(id) : null);
-  if (!conn || conn.config?.type !== 'ssh' || conn.state !== 'connected' || typeof conn.openForward !== 'function') {
-    throw new Error('VNC 需要活跃的 SSH 会话');
-  }
-  return { conn, remoteHost, remotePort, id };
+  return { remoteHost, remotePort };
+}
+
+function openDirectVnc(remoteHost, remotePort) {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect({ host: remoteHost, port: remotePort });
+    const timer = setTimeout(() => socket.destroy(new Error('VNC 连接超时')), 15000);
+    timer.unref();
+    const onError = error => { clearTimeout(timer); reject(error); };
+    socket.once('error', onError);
+    socket.once('connect', () => {
+      clearTimeout(timer);
+      socket.off('error', onError);
+      resolve(socket);
+    });
+  });
 }
 
 vncWss.on('connection', async (ws, req) => {
@@ -950,17 +962,17 @@ vncWss.on('connection', async (ws, req) => {
     pending.push(chunk);
   });
   try {
-    const { conn, remoteHost, remotePort, id } = vncConnectionForRequest(req);
-    stream = await conn.openForward(remoteHost, remotePort);
+    const { remoteHost, remotePort } = vncTargetForRequest(req);
+    stream = await openDirectVnc(remoteHost, remotePort);
     for (const chunk of pending) stream.write(chunk);
     pending.length = 0;
     stream.on('data', chunk => { if (ws.readyState === 1) ws.send(chunk, { binary: true }); });
     stream.once('error', error => {
-      log('error', `[VNC ${id}] 转发失败: ${error.message}`);
-      if (ws.readyState < 2) ws.close(1011, 'VNC 转发失败');
+      log('error', `[VNC ${remoteHost}:${remotePort}] 连接失败: ${error.message}`);
+      if (ws.readyState < 2) ws.close(1011, 'VNC 连接失败');
     });
     stream.once('close', () => { if (ws.readyState < 2) ws.close(1000, 'VNC 已关闭'); });
-    log('audit', `VNC 通过 SSH 会话 ${id} 连接 ${remoteHost}:${remotePort}`);
+    log('audit', `VNC 直接连接 ${remoteHost}:${remotePort}`);
   } catch (error) {
     log('error', `VNC 连接失败: ${error.message}`);
     if (ws.readyState < 2) ws.close(1008, error.message.slice(0, 120));

@@ -14,7 +14,7 @@
     <button id="btn-save" title="保存当前会话配置">💾 保存会话</button>
     <button id="btn-sftp" title="SSH 文件浏览/下载 (SFTP)">📁 文件</button>
     <button id="btn-tunnel" title="SSH 隧道管理" class="hidden">🔗 隧道</button>
-    <button id="btn-vnc" title="通过当前 SSH 会话打开 VNC 桌面" class="hidden">🖥 VNC</button>
+    <button id="btn-vnc" title="直接连接 VNC 远程桌面">🖥 VNC</button>
     <button id="btn-killall" title="断开并关闭全部会话标签" class="danger">⏹ 全部关闭</button>
     <div class="dropdown" id="wrap-more">
       <button id="btn-more" title="更多工具">☰ 工具</button>
@@ -343,7 +343,7 @@
   </div>
 </div>
 
-<!-- 通过 SSH 转发的内嵌 VNC 客户端 -->
+<!-- 独立直连的内嵌 VNC 客户端 -->
 <div id="dlg-vnc-mask" class="hidden">
   <div id="dlg-vnc">
     <div class="vnc-head">
@@ -352,7 +352,7 @@
       <button id="vnc-close" class="mini danger" title="关闭 VNC">✕</button>
     </div>
     <div class="vnc-toolbar">
-      <label>远端地址 <input id="vnc-host" value="127.0.0.1" readonly title="通过 SSH 访问远端回环地址"></label>
+      <label>VNC 主机 <input id="vnc-host" value="127.0.0.1" placeholder="例如 192.168.1.100" title="VNC 服务器的 IP 地址或主机名"></label>
       <label>端口 <input id="vnc-port" type="number" value="5901" min="1" max="65535" title="显示器 :1 对应 5901，:2 对应 5902"></label>
       <label>密码 <input id="vnc-password" type="password" autocomplete="current-password" placeholder="VNC 密码（不保存）"></label>
       <label class="vnc-check"><input id="vnc-view-only" type="checkbox"> 只读</label>
@@ -361,8 +361,8 @@
       <button id="vnc-cad" disabled>Ctrl+Alt+Del</button>
       <button id="vnc-fullscreen" disabled>全屏</button>
     </div>
-    <div id="vnc-screen"><div class="vnc-placeholder">选择当前已连接的 SSH 会话，然后连接远端 VNC 服务。<br>常用端口：显示器 :1 = 5901，:2 = 5902。</div></div>
-    <div class="vnc-foot muted">VNC 数据通过当前 SSH 连接转发到远端 127.0.0.1，不向局域网暴露 VNC 端口；密码仅用于本次连接。</div>
+    <div id="vnc-screen"><div class="vnc-placeholder">输入 VNC 主机 IP/域名、端口和密码后直接连接，无需先打开 SSH/终端会话。<br>常用端口：显示器 :1 = 5901，:2 = 5902。</div></div>
+    <div class="vnc-foot muted">直接连接 VNC 主机端口，请确保目标 VNC 服务允许本机访问；密码仅用于本次连接。</div>
   </div>
 </div>
 

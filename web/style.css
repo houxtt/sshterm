@@ -376,6 +376,7 @@ button.mini { padding: 2px 8px; font-size: 11px; }
 .vnc-toolbar { display: flex; align-items: end; gap: 8px; padding: 8px 12px; border-bottom: 1px solid #2a2b3a; flex-wrap: wrap; }
 .vnc-toolbar label { color: #a9b1d6; font-size: 11px; }
 .vnc-toolbar input { display: block; width: 130px; margin-top: 2px; padding: 4px 7px; background: #1a1b26; color: #c0caf5; border: 1px solid #3a3b4d; border-radius: 4px; }
+#vnc-host { width: 190px; }
 .vnc-toolbar #vnc-port { width: 82px; }
 .vnc-toolbar #vnc-password { width: 170px; }
 .vnc-toolbar .vnc-check { display: flex; align-items: center; gap: 4px; height: 28px; }

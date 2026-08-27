@@ -1209,8 +1209,6 @@ function updateSftpBtn() {
   $('btn-sftp').title = ok ? 'SSH 文件浏览/下载 (SFTP)' : '文件面板仅 SSH 已连接时可用';
   $('btn-tunnel').disabled = !ok;
   if (ok) $('btn-tunnel').classList.remove('hidden'); else $('btn-tunnel').classList.add('hidden');
-  $('btn-vnc').disabled = !ok;
-  if (ok) $('btn-vnc').classList.remove('hidden'); else $('btn-vnc').classList.add('hidden');
 }
 
 function toggleSftpPanel() {
@@ -2159,9 +2157,8 @@ function openTunnelPanel(tab) {
   tunnelRefreshTimer = setInterval(() => { if (tunnelTab && !$('dlg-tunnel-mask').classList.contains('hidden')) send({ type: 'tunnel', id: tunnelTab.id, action: 'list' }); }, 2000);
 }
 
-// ---------- VNC over SSH ----------
+// ---------- 独立 VNC 直连 ----------
 let vncRfb = null;
-let vncTabId = null;
 let vncCredentialPending = false;
 let vncModulePromise = null;
 
@@ -2179,14 +2176,13 @@ function setVncControls(connected) {
 function disconnectVnc(status = '已断开') {
   const current = vncRfb;
   vncRfb = null;
-  vncTabId = null;
   vncCredentialPending = false;
   if (current) { try { current.disconnect(); } catch {} }
   $('vnc-password').value = '';
   setVncControls(false);
   setVncStatus(status);
   const screen = $('vnc-screen');
-  screen.innerHTML = '<div class="vnc-placeholder">VNC 已断开。输入端口与密码后可重新连接。</div>';
+  screen.innerHTML = '<div class="vnc-placeholder">VNC 已断开。输入主机、端口与密码后可重新连接。</div>';
 }
 
 async function connectVnc() {
@@ -2198,8 +2194,8 @@ async function connectVnc() {
     $('vnc-password').value = '';
     return setVncStatus('正在认证…');
   }
-  const tab = tabs.find(t => t.id === activeTabId);
-  if (!tab || tab.cfg.type !== 'ssh' || tab.state !== 'connected') return setVncStatus('请先连接一个 SSH 会话', 'error');
+  const host = $('vnc-host').value.trim();
+  if (!host || host.length > 253 || !/^[A-Za-z0-9._:-]+$/.test(host)) return setVncStatus('VNC 主机地址无效', 'error');
   const port = Number($('vnc-port').value);
   if (!Number.isInteger(port) || port < 1 || port > 65535) return setVncStatus('VNC 端口无效', 'error');
   if (vncRfb) disconnectVnc();
@@ -2208,8 +2204,7 @@ async function connectVnc() {
     vncModulePromise ||= import('/vendor/@novnc/novnc/core/rfb.js');
     const RFB = (await vncModulePromise).default;
     const params = new URLSearchParams({
-      token: clientToken, window: windowId, conn: String(tab.id),
-      host: '127.0.0.1', port: String(port),
+      token: clientToken, host, port: String(port),
     });
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const screen = $('vnc-screen');
@@ -2218,7 +2213,6 @@ async function connectVnc() {
     if (password) options.credentials = { password };
     const instance = new RFB(screen, `${protocol}//${location.host}/vnc?${params}`, options);
     vncRfb = instance;
-    vncTabId = tab.id;
     $('vnc-password').value = '';
     instance.scaleViewport = true;
     instance.resizeSession = false;
@@ -2227,7 +2221,7 @@ async function connectVnc() {
     instance.addEventListener('connect', () => {
       if (vncRfb !== instance) return;
       setVncControls(true);
-      setVncStatus(`已连接：${tab.cfg.name || tab.cfg.host} → 127.0.0.1:${port}`, 'ok');
+      setVncStatus(`已连接：${host}:${port}`, 'ok');
       try { instance.focus(); } catch {}
     });
     instance.addEventListener('credentialsrequired', () => {
@@ -2239,7 +2233,6 @@ async function connectVnc() {
     instance.addEventListener('disconnect', event => {
       if (vncRfb !== instance) return;
       vncRfb = null;
-      vncTabId = null;
       vncCredentialPending = false;
       setVncControls(false);
       setVncStatus(event.detail?.clean ? 'VNC 已断开' : 'VNC 连接异常，请确认远端服务和端口', event.detail?.clean ? '' : 'error');
@@ -2247,20 +2240,18 @@ async function connectVnc() {
     instance.addEventListener('desktopname', event => {
       if (vncRfb === instance && event.detail?.name) document.title = `${event.detail.name} — sshterm VNC`;
     });
-    setVncStatus(`正在通过 SSH 连接 127.0.0.1:${port}…`);
+    setVncStatus(`正在直接连接 ${host}:${port}…`);
   } catch (error) {
     disconnectVnc(`VNC 初始化失败：${error.message || error}`);
     setVncStatus(`VNC 初始化失败：${error.message || error}`, 'error');
   }
 }
 
-function openVncPanel(tab) {
-  if (!tab || tab.cfg.type !== 'ssh' || tab.state !== 'connected') return setStatus('VNC 需要活跃的 SSH 会话');
-  vncTabId = tab.id;
+function openVncPanel() {
   $('dlg-vnc-mask').classList.remove('hidden');
-  setVncStatus(`就绪：将通过 ${tab.cfg.name || tab.cfg.host} 连接远端 VNC`);
+  setVncStatus('就绪：输入 VNC 主机和端口后直接连接');
   setVncControls(!!vncRfb);
-  setTimeout(() => $('vnc-password').focus(), 0);
+  setTimeout(() => ($('vnc-host').value.trim() ? $('vnc-password') : $('vnc-host')).focus(), 0);
 }
 
 // ---------- 事件绑定 ----------
@@ -2418,7 +2409,7 @@ $('btn-tunnel').onclick = () => {
   if (!tab || tab.cfg.type !== 'ssh') return setStatus('隧道仅适用于 SSH 会话');
   openTunnelPanel(tab);
 };
-$('btn-vnc').onclick = () => openVncPanel(tabs.find(t => t.id === activeTabId));
+$('btn-vnc').onclick = openVncPanel;
 $('vnc-connect').onclick = connectVnc;
 $('vnc-disconnect').onclick = () => disconnectVnc();
 $('vnc-cad').onclick = () => { if (vncRfb) vncRfb.sendCtrlAltDel(); };
