@@ -1,8 +1,13 @@
-// 构建独立 EXE: npx caxa 将 Node.js + 项目打包为单个可执行文件
+// 构建独立 EXE: caxa 将 Node.js + 项目打包为单个可执行文件
 // 用法: node scripts/build-exe.js
-// 前置: npm install -g caxa  (如需, 先 npm install -g caxa)
+// 前置: 已装全局 caxa (npm install -g caxa) 或本机有 npx caxa
+//
+// 产物: dist/sshterm.exe
+//   - 双击即启动后台服务并自动打开浏览器 http://127.0.0.1:8787
+//   - 无需对方安装 Node.js
+//   - 已排除 .git / tests / perf-proto / 源码脚本等非运行时文件，体积约 160MB
 const { execSync } = require('child_process');
-const { existsSync, mkdirSync, writeFileSync } = require('fs');
+const { existsSync, mkdirSync } = require('fs');
 const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
@@ -18,25 +23,33 @@ catch { console.log('│ caxa: 安装中…'); execSync('npm install -g caxa', {
 // 2. 确保 dist/
 mkdirSync(OUT, { recursive: true });
 
-// 3. 构建
+// 3. 排除非运行时目录/文件, 缩小体积
+const EXCLUDE = [
+  '.git', 'tests', 'perf-proto', 'dist', 'assets',
+  'node_modules/.cache', '*.log', 'scripts',
+  '*.bat', '*.vbs', '*.ps1', 'README.md', 'package-lock.json'
+];
+const excludeArgs = EXCLUDE.map(e => ` --exclude "${e}"`).join('');
+
+// 4. 构建 (不传 --no-open, 双击自动开浏览器; 对方如需静默可加 --no-open)
 console.log(`│ 输出: ${TARGET}`);
 console.log('│ 打包中 (可能需要几分钟)…');
 try {
   execSync(
     `npx caxa --input "${ROOT}"` +
     ` --output "${TARGET}"` +
-    ` -- "{{caxa}}/node_modules/.bin/node" "{{caxa}}/server/index.js" "--no-open"`,
+    excludeArgs +
+    ` -- "{{caxa}}/node_modules/.bin/node" "{{caxa}}/server/index.js"`,
     { stdio: 'inherit', cwd: ROOT }
   );
   console.log('│ ✅ 构建成功');
   console.log(`│ ${TARGET}`);
-  console.log('│ 双击 sshterm.exe 启动 (服务在后台, 浏览器打开 http://127.0.0.1:8787)');
+  console.log('│ 双击 sshterm.exe 启动 (后台服务 + 自动打开浏览器 http://127.0.0.1:8787)');
 } catch (e) {
   console.log('│ ❌ caxa 构建失败');
   console.log('│ 备选方案: ');
-  console.log('│   1. 确保已安装 Node.js');
+  console.log('│   1. 确保已安装 Node.js 和 npx caxa');
   console.log('│   2. 双击 run.bat 即可启动 (无需 EXE)');
-  console.log('│   3. 或创建桌面快捷方式指向 run.bat');
   process.exitCode = 1;
 }
 console.log('└──────────────────────────────────────┘');

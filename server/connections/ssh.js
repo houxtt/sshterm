@@ -519,6 +519,83 @@ class SSHConnection extends BaseConnection {
       this.stream.write(cmd);
       return Promise.resolve();
     }
+
+    // ---------- 远端主机状态采集 (RAM / 磁盘挂载 / CPU 负载 / 主机名) ----------
+    // 通过 exec 通道执行只读命令, 解析 free/df/loadavg/hostname; 不污染 shell 通道
+    // 返回: { memUsed, memTotal, memPct, load1..15, cores, hostname, disk:[{mp,pct,used,total}] }
+    async getHostStats() {
+      if (!this.client || this.state !== 'connected') {
+        return Promise.reject(new Error('SSH 未连接'));
+      }
+      // 单条命令尽量兼容主流 Linux/macOS (BusyBox 也基本支持)
+      const script = [
+        'echo __SSHTERM_STATS_START__',
+        // RAM (free -b 输出 bytes; 兼容无 -b 的旧版, 用 awk 兜底)
+        'free -b 2>/dev/null | awk \'/Mem:/{printf "MEM %d %d\\n", $3, $2}\' || free | awk \'/Mem:/{printf "MEM %d %d\\n", $3*1024, $2*1024}\'',
+        // 1/5/15 分钟负载 + CPU 核数
+        'echo LOAD $(cat /proc/loadavg 2>/dev/null | awk \'{print $1" "$2" "$3}\') $(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 0)',
+        // 主机名
+        'echo HOST $(hostname 2>/dev/null)',
+        // 磁盘/挂载: df -Pk (1K 块), 排除伪文件系统, 输出 挂载点 用量% 可用字节 总量字节
+        'echo DISK_START',
+        'df -Pk 2>/dev/null | awk \'NR>1 && $1 !~ /tmpfs|devtmpfs|squashfs/ && $6 !~ /\\/dev\\/loop/ { gsub(/%/,"",$5); printf "DISK %s %s %d %d\\n", $6, $5, $4*1024, $3*1024 }\'',
+        'echo DISK_END',
+        'echo __SSHTERM_STATS_END__',
+      ].join('\n');
+
+      return new Promise((resolve, reject) => {
+        this.client.exec(script, (err, stream) => {
+          if (err) return reject(err);
+          let buf = '';
+          let done = false;
+          const finish = (e, data) => {
+            if (done) return; done = true;
+            if (e) return reject(e);
+            resolve(data);
+          };
+          const timer = setTimeout(() => finish(new Error('采集主机状态超时')), 8000);
+          stream.on('data', (d) => { buf += d.toString('utf8'); });
+          stream.stderr.on('data', () => {});
+          stream.on('close', () => {
+            clearTimeout(timer);
+            const start = buf.indexOf('__SSHTERM_STATS_START__');
+            const end = buf.indexOf('__SSHTERM_STATS_END__');
+            if (start < 0 || end < 0) return finish(new Error('主机状态输出无法解析'));
+            const body = buf.slice(start, end);
+            const mem = body.match(/MEM\s+(\d+)\s+(\d+)/);
+            const load = body.match(/LOAD\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+(\d+)/);
+            const host = body.match(/HOST\s+(.+)/);
+            // 磁盘: 每个 DISK 行 -> 挂载点 用量% 可用 总量
+            const disk = [];
+            const dStart = body.indexOf('DISK_START');
+            const dEnd = body.indexOf('DISK_END');
+            if (dStart >= 0 && dEnd >= 0) {
+              const dBody = body.slice(dStart, dEnd);
+              for (const line of dBody.split('\n')) {
+                const m = line.match(/DISK\s+(\S+)\s+(\d+)\s+(\d+)\s+(\d+)/);
+                if (m) disk.push({ mp: m[1], pct: Number(m[2]), avail: Number(m[3]), total: Number(m[4]) });
+              }
+              // 按用量降序, 取前 5 个真实挂载点 (总量>0)
+              disk.sort((a, b) => b.pct - a.pct);
+              disk.splice(5);
+            }
+            const memUsed = mem ? Number(mem[1]) : 0;
+            const memTotal = mem ? Number(mem[2]) : 0;
+            finish(null, {
+              memUsed,
+              memTotal,
+              memPct: memTotal > 0 ? Math.round((memUsed / memTotal) * 1000) / 10 : 0,
+              load1: load ? Number(load[1]) : 0,
+              load5: load ? Number(load[2]) : 0,
+              load15: load ? Number(load[3]) : 0,
+              cores: load ? Number(load[4]) || 0 : 0,
+              hostname: host ? host[1].trim() : '',
+              disk,
+            });
+          });
+        });
+      });
+    }
   }
 
 module.exports = SSHConnection;

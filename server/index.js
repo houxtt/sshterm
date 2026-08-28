@@ -1091,6 +1091,19 @@ async function handle(ws, m) {
       send(ws, { type: 'sessions', list: sessionsList() });
       break;
     }
+    // 前端每隔几秒请求一次远端主机状态 (内存/负载/主机名); 断开即停, 无需服务端定时器
+    case 'hostinfo': {
+      const conn = getConnection(ws, m.id);
+      if (!conn || conn.state !== 'connected') break;
+      if (typeof conn.getHostStats !== 'function') break; // 仅 SSH 支持
+      conn.getHostStats().then(stats => {
+        send(ws, { type: 'hostinfo', id: m.id, ...stats });
+      }).catch(e => {
+        // 采集失败不打断终端, 仅回空 (前端显示 —)
+        send(ws, { type: 'hostinfo', id: m.id, error: String(e.message || e) });
+      });
+      break;
+    }
     case 'vnc-credential': {
       const requestId = typeof m.requestId === 'string' ? m.requestId.slice(0, 120) : '';
       const stored = storedSessionForConfig({ ...(m.session || {}), type: 'vnc' });

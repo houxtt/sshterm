@@ -163,6 +163,52 @@ function sendInput(tabId, str) {
   }
 }
 
+// ---------- 远端主机状态条 (仅 SSH 会话) ----------
+function fmtDuration(ms) {
+  if (!ms || ms < 0) return '0s';
+  const s = Math.floor(ms / 1000);
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (d > 0) return `${d}天${h}时${m}分`;
+  if (h > 0) return `${h}时${m}分${sec}秒`;
+  if (m > 0) return `${m}分${sec}秒`;
+  return `${sec}秒`;
+}
+function renderHostInfo(tab, s) {
+  const bar = tab.hostinfoBar;
+  if (!bar) return;
+  if (s.error) { bar.innerHTML = `<span class="hi-item hi-muted">状态采集不可用</span>`; return; }
+  const memPct = s.memPct != null ? s.memPct : 0;
+  const memCls = memPct >= 85 ? 'hi-warn' : (memPct >= 60 ? 'hi-caution' : 'hi-ok');
+  const dur = tab.connectedAt ? fmtDuration(Date.now() - tab.connectedAt) : '—';
+  const ip = tab.cfg.host || '';
+  const name = s.hostname || '';
+  let html =
+    `<span class="hi-item"><b>🖥 ${esc(name || ip)}</b> <span class="hi-muted">${esc(ip)}</span></span>` +
+    `<span class="hi-item">💾 RAM <span class="${memCls}">${memPct}%</span> <span class="hi-muted">${fmtSize(s.memUsed)}/${fmtSize(s.memTotal)}</span></span>` +
+    `<span class="hi-item">⚡ 负载 <span class="${memCls}">${s.load1}</span> <span class="hi-muted">(${s.load5}/${s.load15}, ${s.cores}核)</span></span>` +
+    `<span class="hi-item">⏱ 连接 <span class="hi-ok">${dur}</span></span>`;
+  // 磁盘/挂载: 列出主要挂载点及用量 (按用量降序, 已取前 5)
+  if (Array.isArray(s.disk) && s.disk.length) {
+    const disks = s.disk.map(d => {
+      const cls = d.pct >= 85 ? 'hi-warn' : (d.pct >= 60 ? 'hi-caution' : 'hi-ok');
+      const mp = d.mp === '/' ? '根/' : d.mp;
+      return `<span class="hi-disk"><span class="hi-muted">${esc(mp)}</span> <span class="${cls}">${d.pct}%</span> <span class="hi-muted">${fmtSize(d.total - d.avail)}/${fmtSize(d.total)}</span></span>`;
+    }).join('');
+    html += `<span class="hi-item hi-disks">💽 磁盘 ${disks}</span>`;
+  }
+  bar.innerHTML = html;
+}
+function startHostInfo(tab) {
+  if (tab.hostinfoTimer) clearInterval(tab.hostinfoTimer);
+  tab.connectedAt = Date.now();
+  const tick = () => send({ type: 'hostinfo', id: tab.id });
+  tick();
+  tab.hostinfoTimer = setInterval(tick, 3000);
+}
+
 function handleMsg(m) {
   switch (m.type) {
     case 'window-id': { windowId = m.windowId || ''; break; }
@@ -249,9 +295,16 @@ function handleMsg(m) {
             tab.everConnected = true;
             // 刷新重挂接的是同一条远端 shell，不能重复执行登录命令。
             if (!m.resumed) setTimeout(() => runAutoCmds(tab.cfg), 300);
+            // 启动远端主机状态轮询 (内存/负载/连接时长), 仅 SSH
+            if (tab.cfg.type === 'ssh') startHostInfo(tab);
           }
         }
       }
+      break;
+    }
+    case 'hostinfo': {
+      const tab = tabs.find(t => t.id === m.id);
+      if (tab && tab.hostinfoBar) renderHostInfo(tab, m);
       break;
     }
     case 'host-key': {
@@ -559,7 +612,14 @@ function newTab(cfg, opts = {}) {
   term.open(host);
   setTimeout(() => fitAddon.fit(), 0);
 
-  const tab = { id, cfg, term, host: container, state: 'idle', hex: !!(opts.hex ?? cfg.hexMode), fitAddon, searchAddon, recParts: [], recLen: 0, extraPanes: [] };
+  // 主机信息条 (仅 SSH): 终端下方显示远端内存/负载/主机名/连接时长
+  let hostinfoBar = null;
+  if (cfg.type === 'ssh') {
+    host.insertAdjacentHTML('afterend', `<div class="hostinfo-bar" id="hostinfo-${id}"><span class="hi-item hi-muted">连接中…</span></div>`);
+    hostinfoBar = document.getElementById(`hostinfo-${id}`);
+  }
+
+  const tab = { id, cfg, term, host: container, state: 'idle', hex: !!(opts.hex ?? cfg.hexMode), fitAddon, searchAddon, recParts: [], recLen: 0, extraPanes: [], hostinfoBar, hostinfoTimer: null, connectedAt: 0 };
   if (window.Zmodem) {
     tab.zmodemSentry = new Zmodem.Sentry({
       to_terminal: octets => term.write(octets),
@@ -750,6 +810,7 @@ function doCloseTab(id) {
   if (tab.cfg.type !== 'vnc') send({ type: 'disconnect', id });
   tabs.splice(idx, 1);
   if (tab._splitCleanup) tab._splitCleanup();
+  if (tab.hostinfoTimer) { clearInterval(tab.hostinfoTimer); tab.hostinfoTimer = null; }
   try { tab.term?.dispose(); } catch (e) {}
   tab.host.remove();
   if (activeTabId === id) activeTabId = null;
