@@ -8,6 +8,31 @@ const { Client } = require('ssh2');
 const BaseConnection = require('./base');
 
 const KNOWN_HOSTS_PATH = path.join(os.homedir(), '.sshterm', 'known-hosts.json');
+const DEFAULT_READY_TIMEOUT = 30000;
+
+function readyTimeoutFor(config) {
+  const value = Number(config.readyTimeout);
+  return Number.isFinite(value) && value >= 10000 && value <= 120000
+    ? Math.trunc(value) : DEFAULT_READY_TIMEOUT;
+}
+
+function connectionErrorMessage(error, timeout) {
+  if (error && error.level === 'client-timeout') {
+    return `SSH 服务端未发送握手信息（TCP 已连接，等待 ${Math.round(timeout / 1000)} 秒超时）。`
+      + '请检查服务端 sshd 的 MaxStartups/连接数、负载或安全设备限流，并关闭多余的未完成 SSH 连接';
+  }
+  return error && error.message ? error.message : String(error);
+}
+
+function forceDestroyClient(client) {
+  // net.Socket.resetAndDestroy() sends RST instead of entering FIN_WAIT_2. This
+  // matters when a broken/overloaded sshd accepts TCP but never reads the FIN.
+  const socket = client && client._sock;
+  if (socket && !socket.destroyed && typeof socket.resetAndDestroy === 'function') {
+    try { socket.resetAndDestroy(); return; } catch {}
+  }
+  try { if (client) client.destroy(); } catch {}
+}
 function loadKnownHosts() {
   try { return JSON.parse(fs.readFileSync(KNOWN_HOSTS_PATH, 'utf8')); } catch { return {}; }
 }
@@ -83,8 +108,9 @@ class SSHConnection extends BaseConnection {
     this.state = 'connecting';
     const { host, port = 22, username, auth = 'password',
             password, privateKey, passphrase, proxy } = this.config;
+    const readyTimeout = readyTimeoutFor(this.config);
     const cfg = {
-      host, port, username, readyTimeout: 10000,
+      host, port, username, readyTimeout,
       keepaliveInterval: 15000,   // 15 秒心跳, 防空闲断链(网络设备 idle timeout)
       keepaliveCountMax: 3,       // 连续 3 次无响应才判定连接死亡
     };
@@ -120,7 +146,7 @@ class SSHConnection extends BaseConnection {
       // UI supplies one credential set for the chain; an explicit user@host
       // in ProxyJump remains the highest-priority username.
       const jumpCredentials = jumpAuth ? { ...this.config, ...jumpAuth } : this.config;
-      const jumpCfg = { host: hop.host, port: hop.port, username: hop.username || jumpAuth?.username || username, readyTimeout: 10000,
+      const jumpCfg = { host: hop.host, port: hop.port, username: hop.username || jumpAuth?.username || username, readyTimeout,
         keepaliveInterval: 15000, keepaliveCountMax: 3, hostVerifier: makeHostVerifier(this, `${hop.host}:${hop.port}`) };
       applyAuth(jumpCfg, jumpCredentials);
       if (upstream) jumpCfg.sock = await forwardThrough(upstream, hop.host, hop.port);
@@ -137,6 +163,7 @@ class SSHConnection extends BaseConnection {
     return new Promise((resolve, reject) => {
       const client = new Client();
       this.client = client;
+      let connectErrorReported = false;
       if (auth === 'keyboard-interactive') {
         client.on('keyboard-interactive', (name, instructions, lang, prompts, finish) => {
           // One password is appropriate for common OTP/password prompts.  For
@@ -166,14 +193,28 @@ class SSHConnection extends BaseConnection {
         });
       });
       client.on('error', (e) => {
+        // A timeout destroys ssh2's socket, which then emits the secondary
+        // "Connection lost before handshake" error.  Report the useful root
+        // cause once instead of showing two contradictory failures.
+        if (this.state === 'closing' || this.state === 'closed') return;
+        if (e && e.level === 'client-timeout') forceDestroyClient(client);
         // 连接建立后中断 vs 建连失败: 给出具体原因
+        const detail = connectionErrorMessage(e, readyTimeout);
         const msg = this.state === 'connected'
-          ? `SSH 连接中断: ${e.message}`
-          : `SSH 连接失败: ${e.message}`;
+          ? `SSH 连接中断: ${detail}`
+          : `SSH 连接失败: ${detail}`;
+        if (this.state !== 'connected' && connectErrorReported) return;
+        if (this.state !== 'connected') connectErrorReported = true;
         this._emitError(msg);
         if (this.state !== 'connected') reject(e);
       });
       client.on('close', (hadError) => {
+        if (this.state === 'closing') {
+          const error = new Error('SSH 连接已取消');
+          error.code = 'SSH_CONNECT_CANCELLED';
+          reject(error);
+          return;
+        }
         // 连接建立后 client 关闭: 报告具体原因
         if (this.state === 'connected' || this.state === 'connecting') {
           this._emitClose(hadError
@@ -480,6 +521,7 @@ class SSHConnection extends BaseConnection {
 
   close() {
       if (this.state === 'closed') return;
+      const wasConnected = this.state === 'connected';
       this.state = 'closing';
       try {
         // 关闭所有隧道
@@ -499,7 +541,14 @@ class SSHConnection extends BaseConnection {
         }
         if (this._sftp) { this._sftp.end(); this._sftp = null; }
         if (this.stream) { this.stream.end(); this.stream = null; }
-      if (this.client) { this.client.end(); }
+      // During the pre-auth handshake `end()` attempts to send an SSH
+      // disconnect packet that cannot be encoded yet.  destroy() is the only
+      // reliable way to cancel immediately and release the server's pre-auth
+      // slot.
+      if (this.client) {
+        if (wasConnected) this.client.end();
+        else forceDestroyClient(this.client);
+      }
         for (const jump of this.jumpClients || []) { try { jump.end(); } catch {} }
         this.resolveHostKey(false);
       } catch (e) { /* 忽略 */ }
@@ -596,6 +645,7 @@ class SSHConnection extends BaseConnection {
         });
       });
     }
-  }
+}
 
+SSHConnection._test = { readyTimeoutFor, connectionErrorMessage, forceDestroyClient };
 module.exports = SSHConnection;

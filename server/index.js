@@ -11,6 +11,7 @@ const { createBackup, readBackup, parseOpenSSHConfig } = require('./session-back
 const { createParallelReadStream, receiveParallelUpload } = require('./sftp-transfer');
 const { connectionConfigForRequest } = require('./connection-config');
 const { writeSecrets, readSecrets } = require('./dpapi');
+const sshConnectScheduler = require('./ssh-connect-scheduler');
 
 const ROOT = path.join(__dirname, '..');
 const WEB = path.join(ROOT, 'web');
@@ -1527,8 +1528,26 @@ async function doConnect(ws, cfg, tabId) {
   });
 
   try {
-    await conn.connect();
+    if (cfg.type === 'ssh') {
+      // Browser workspace restore may recreate several tabs for the same host
+      // in one event-loop turn.  Authenticate them one at a time so a device
+      // with a small sshd MaxStartups/pre-auth limit does not silently discard
+      // every handshake.
+      const endpoint = `${String(cfg.host || '').trim().toLowerCase()}:${Number(cfg.port) || 22}`;
+      if (sshConnectScheduler.isBusy(endpoint)) {
+        conn._lastStateMsg = '等待同一服务器的其他 SSH 握手…';
+        send(conn.ownerWs, { type: 'status', id: connId, state: 'connecting', msg: conn._lastStateMsg });
+      }
+      await sshConnectScheduler.runExclusive(
+        endpoint,
+        () => conn.connect(),
+        () => conn.state === 'closing' || conn.state === 'closed',
+      );
+    } else {
+      await conn.connect();
+    }
   } catch (e) {
+    if (e && e.code === 'SSH_CONNECT_CANCELLED') return;
     // 连接失败: 状态已由 error/close 事件发出, 这里兜底
     send(conn.ownerWs, { type: 'status', id: connId, state: 'closed', msg: e.message });
     const key = connectionKey(ws, connId);
