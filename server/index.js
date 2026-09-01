@@ -117,6 +117,20 @@ directoryDownloadCleanup.unref();
 const CLIENT_TOKEN = randomBytes(32).toString('base64url');
 const PORT = parseInt(process.argv[process.argv.indexOf('--port') + 1], 10) || 8787; // P0 FIX: 移到此处供 isTrustedOrigin 使用
 
+// 'wasm-unsafe-eval' is required by @xterm/addon-image: its Sixel decoder is an
+// inline WebAssembly module, and Chrome blocks WebAssembly.instantiate() under
+// a bare "script-src 'self'" policy.  'blob:' feeds the addon's Image-based
+// fallback path for iTerm2 inline images.
+const STATIC_CSP = [
+  "default-src 'self'",
+  "connect-src 'self' ws:",
+  "style-src 'self' 'unsafe-inline'",
+  "script-src 'self' 'wasm-unsafe-eval'",
+  "img-src 'self' data: blob:",
+  "object-src 'none'",
+  "base-uri 'none'",
+].join('; ');
+
 function hasClientToken(req) {
   try {
     const u = new URL(req.url, 'http://127.0.0.1');
@@ -856,7 +870,7 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream',
                          'Cache-Control': 'no-cache',
                          'X-Content-Type-Options': 'nosniff',
-                         'Content-Security-Policy': "default-src 'self'; connect-src 'self' ws:; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'" });
+                         'Content-Security-Policy': STATIC_CSP });
     res.end(data);
   });
 });

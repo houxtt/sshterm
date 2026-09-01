@@ -27,20 +27,21 @@ if (typeof Terminal !== 'function' || !FitAddonCtor) {
   throw new Error('terminal core missing');
 }
 
-// Inline images for SSH terminals.  Resource limits are deliberately lower
-// than the addon's defaults so an untrusted remote cannot retain hundreds of
-// megabytes of decoded canvases in the browser.
+// Inline images for SSH terminals (Sixel + iTerm2 OSC 1337).  pixelLimit caps
+// the *source* size before the addon scales the image down to the terminal, so
+// a low value silently drops ordinary photos: keep one full-frame camera image
+// (16 megapixels) acceptable while storage stays far below the addon default.
 const IMAGE_ADDON_OPTIONS = Object.freeze({
   enableSizeReports: true,
-  pixelLimit: 4 * 1024 * 1024,
-  storageLimit: 32,
+  pixelLimit: 16 * 1024 * 1024,
+  storageLimit: 64,
   showPlaceholder: true,
   sixelSupport: true,
   sixelScrolling: true,
   sixelPaletteLimit: 256,
-  sixelSizeLimit: 8 * 1024 * 1024,
+  sixelSizeLimit: 16 * 1024 * 1024,
   iipSupport: true,
-  iipSizeLimit: 8 * 1024 * 1024,
+  iipSizeLimit: 16 * 1024 * 1024,
 });
 function attachImageAddon(term, connectionType) {
   if (connectionType !== 'ssh' || !ImageAddonCtor) return null;
@@ -696,6 +697,18 @@ function scheduleTabsSave() {
     saveTabs();
   }, 250);
 }
+// The 200 KB replay snapshot can end in the middle of an inline image.  Writing
+// a truncated Sixel/OSC/APC payload leaves the xterm parser inside the sequence,
+// which silently swallows every byte that follows and looks like a hung
+// terminal.  Drop an unterminated trailing image sequence before replaying.
+function stripTruncatedSequence(text) {
+  if (typeof text !== 'string' || !text) return text;
+  const start = Math.max(text.lastIndexOf('\x1bP'), text.lastIndexOf('\x1b]'), text.lastIndexOf('\x1b_'));
+  if (start < 0) return text;
+  const tail = text.slice(start);
+  if (tail.includes('\x1b\\') || tail.includes('\x07') || tail.includes('\x9c')) return text;
+  return text.slice(0, start);
+}
 function saveTabs() {
   try {
     localStorage.setItem(LS_TABS, JSON.stringify(tabs.map(t => ({
@@ -869,10 +882,11 @@ function newTab(cfg, opts = {}) {
 
   // 刷新恢复: 先重放之前的终端内容, 再建立连接
   if (opts.replay) {
-    tab.recParts = [opts.replay];
-    tab.recLen = opts.replay.length;
+    const replay = stripTruncatedSequence(opts.replay);
+    tab.recParts = [replay];
+    tab.recLen = replay.length;
     try {
-      term.write(opts.replay);
+      term.write(replay);
       term.write('\r\n\x1b[33m[--- 连接已重新建立 ---]\x1b[0m\r\n');
     } catch (e) {}
   }
@@ -2280,10 +2294,11 @@ function addPane(tab, dir = 'row', ratio = 0.5, opts = {}) {
   pane.imageAddon = imageAddon;
   host.querySelector('.pane-close').onclick = () => removePane(tab, pane);
   if (opts.replay) {
-    pane.recParts = [opts.replay];
-    pane.recLen = opts.replay.length;
+    const replay = stripTruncatedSequence(opts.replay);
+    pane.recParts = [replay];
+    pane.recLen = replay.length;
     try {
-      pane.term.write(opts.replay);
+      pane.term.write(replay);
       pane.term.write('\r\n\x1b[33m[--- 连接已重新建立 ---]\x1b[0m\r\n');
     } catch {}
   }
