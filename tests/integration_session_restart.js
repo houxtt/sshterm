@@ -3,14 +3,14 @@
 const assert = require('assert');
 const fs = require('fs');
 const http = require('http');
+const net = require('net');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 const { WebSocket } = require('ws');
 
 const ROOT = path.join(__dirname, '..');
-const PORT = 8904;
-const BASE = `http://127.0.0.1:${PORT}`;
+let port = Number(process.env.SSHTERM_TEST_PORT) || 0;
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'sshterm-restart-'));
 const sessionDir = path.join(profile, '.sshterm');
 const originalId = '11111111-1111-4111-8111-111111111111';
@@ -20,7 +20,7 @@ function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 async function getToken(deadline = Date.now() + 10000) {
   while (Date.now() < deadline) {
     try {
-      const script = await new Promise((resolve, reject) => http.get(`${BASE}/bootstrap.js`, res => {
+      const script = await new Promise((resolve, reject) => http.get(`http://127.0.0.1:${port}/bootstrap.js`, res => {
         let body = '';
         res.setEncoding('utf8');
         res.on('data', chunk => { body += chunk; });
@@ -48,13 +48,13 @@ function onceMessage(ws, predicate, timeout = 8000) {
 }
 
 async function startServer() {
-  const child = spawn(process.execPath, ['server/index.js', '--port', String(PORT), '--no-open'], {
+  const child = spawn(process.execPath, ['server/index.js', '--port', String(port), '--no-open'], {
     cwd: ROOT,
     env: { ...process.env, USERPROFILE: profile, HOME: profile },
     stdio: 'ignore',
   });
   const token = await getToken();
-  const ws = new WebSocket(`ws://127.0.0.1:${PORT}/?token=${encodeURIComponent(token)}`);
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/?token=${encodeURIComponent(token)}`);
   await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
   return { child, ws };
 }
@@ -68,6 +68,16 @@ async function stopServer(instance) {
 }
 
 (async () => {
+  if (!port) {
+    port = await new Promise((resolve, reject) => {
+      const probe = net.createServer();
+      probe.once('error', reject);
+      probe.listen(0, '127.0.0.1', () => {
+        const selected = probe.address().port;
+        probe.close(error => error ? reject(error) : resolve(selected));
+      });
+    });
+  }
   fs.mkdirSync(sessionDir, { recursive: true });
   fs.writeFileSync(path.join(sessionDir, 'sessions.json'), JSON.stringify({
     [originalId]: {

@@ -1,7 +1,7 @@
 // UI 测试: 串口占用弹窗 (模拟 occupied error 消息注入)
 // 注: chrome-headless-shell 渲染器在真实串口连接时崩溃(Edge 151 headless bug),
 //     实际占用检测链路已由 e2e_serial_occupied.js 验证; 此处验证前端弹窗交互
-const puppeteer = require('puppeteer-core');
+const puppeteer = require('./puppeteer_test');
 const CHS = 'C:\\Users\\Administrator\\sshterm\\vendor\\chrome-headless-shell\\chrome-headless-shell.exe';
 const URL = process.argv[2] || 'http://127.0.0.1:8787/';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));

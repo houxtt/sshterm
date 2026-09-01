@@ -1,5 +1,5 @@
 // UI 测试: 终端选中文本后 左键/右键/双击 无序乱点 → 页面不卡死
-const puppeteer = require('puppeteer-core');
+const puppeteer = require('./puppeteer_test');
 const EDGE = 'C:\\Users\\Administrator\\sshterm\\vendor\\chrome-headless-shell\\chrome-headless-shell.exe';
 const URL = process.argv[2] || 'http://127.0.0.1:8787/';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));

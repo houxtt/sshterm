@@ -237,8 +237,9 @@ button.mini { padding: 2px 8px; font-size: 11px; }
   display: flex; flex-direction: row;
   min-width: 0; min-height: 0;
 }
-/* 主会话(含主机状态条)改为纵向: 终端在上, 状态条占满终端下方整行 */
-#terms .split-container:has(.hostinfo-bar) { flex-direction: column; }
+/* Keep the host status bar outside the pane flex flow. As a normal flex child
+   its width:100% pushed the divider beyond the viewport, making drag inert. */
+#terms .split-container:has(.hostinfo-bar) { box-sizing: border-box; padding-bottom: 31px; }
 #terms .split-container.hidden { display: none !important; }
 #terms .split-container .term-host { position: relative; flex: 1; padding: 4px; min-width: 0; min-height: 0; }
 #terms .split-container .term-host.pane-split { flex: 1; }
@@ -246,6 +247,7 @@ button.mini { padding: 2px 8px; font-size: 11px; }
 .split-divider {
   width: 5px; background: #2a2b3a; cursor: col-resize; flex-shrink: 0;
   border-left: 1px solid #1f2030; border-right: 1px solid #1f2030;
+  touch-action: none; user-select: none;
 }
 .split-divider.col { cursor: row-resize; width: auto; height: 5px; border-left: none; border-right: none; border-top: 1px solid #1f2030; border-bottom: 1px solid #1f2030; }
 .pane-close {
@@ -445,8 +447,10 @@ button.mini { padding: 2px 8px; font-size: 11px; }
 
 /* ---------- 远端主机状态条 (SSH 会话终端正下方整行) ---------- */
 .hostinfo-bar {
-  flex: 0 0 auto;            /* 固定在终端下方, 不随终端伸缩 */
-  width: 100%;
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  z-index: 8;
+  width: auto;
   box-sizing: border-box;
   display: flex;
   flex-wrap: nowrap;         /* 单行; 内容多则横向滚动, 不挤占终端高度 */
@@ -470,4 +474,3 @@ button.mini { padding: 2px 8px; font-size: 11px; }
 .hostinfo-bar .hi-ok { color: #9ece6a; font-weight: 600; }
 .hostinfo-bar .hi-caution { color: #e0af68; font-weight: 600; }
 .hostinfo-bar .hi-warn { color: #f7768e; font-weight: 700; }
-

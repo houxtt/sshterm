@@ -40,8 +40,17 @@ const MAX_SFTP_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
 const connections = new Map();   // connId -> BaseConnection
 const windows = new Map();       // opaque window capability -> WebSocket
 const windowCleanupTimers = new Map();
-const REFRESH_GRACE_MS = 10 * 1000;
-const REATTACH_BUFFER_BYTES = 256 * 1024;
+const AUTO_EXIT_GRACE_MS = 12 * 1000;
+// Losing the browser WebSocket must not tear down a healthy remote shell.
+// Detached connections live until an explicit disconnect or server shutdown.
+// Managed deployments may opt into bounded orphan cleanup with this variable.
+const DETACHED_CONNECTION_GRACE_MS = (() => {
+  const value = Number(process.env.SSHTERM_DETACHED_GRACE_MS || 0);
+  return Number.isFinite(value) && value > 0
+    ? Math.min(value, 7 * 24 * 60 * 60 * 1000)
+    : 0;
+})();
+const CONNECTION_REPLAY_BUFFER_BYTES = 256 * 1024;
 function connectionKey(ws, id) { return `${ws.windowId}:${id}`; }
 function getConnection(ws, id) { return connections.get(connectionKey(ws, id)); }
 function getHttpConnection(qs) {
@@ -75,10 +84,11 @@ function closeWindowConnections(windowId) {
 
 function scheduleWindowCleanup(windowId) {
   cancelWindowCleanup(windowId);
+  if (!DETACHED_CONNECTION_GRACE_MS) return;
   const timer = setTimeout(() => {
     windowCleanupTimers.delete(windowId);
     if (!windows.has(windowId)) closeWindowConnections(windowId);
-  }, REFRESH_GRACE_MS);
+  }, DETACHED_CONNECTION_GRACE_MS);
   timer.unref();
   windowCleanupTimers.set(windowId, timer);
 }
@@ -338,6 +348,16 @@ function storedSessionForConfig(config) {
 function mergeStoredCredentials(config, stored) {
   if (!stored) return config;
   if (!config.id && stored.id) config.id = stored.id;
+  // A restored browser workspace may still contain an older, sanitized Telnet
+  // config after the saved session was edited.  Reconnects for the same stable
+  // session id must use the durable login policy; otherwise an already-open tab
+  // can keep reconnecting with autoLogin=false and be kicked by telnetd every
+  // 60 seconds even though the saved session has been fixed.
+  if (config.type === 'telnet' && config.id && stored.id === config.id) {
+    if (typeof stored.autoLogin === 'boolean') config.autoLogin = stored.autoLogin;
+    if (typeof stored.loginUser === 'string') config.loginUser = stored.loginUser;
+    if (typeof stored.reconnect === 'boolean') config.reconnect = stored.reconnect;
+  }
   for (const key of ['password', 'privateKey', 'passphrase', 'loginPass']) {
     if (!config[key]) config[key] = stored[key];
   }
@@ -853,7 +873,7 @@ function scheduleIdleExit() {
       console.log('[auto-exit] 无客户端连接, 服务自动退出');
       for (const c of connections.values()) c.close();
       process.exit(0);
-    }, REFRESH_GRACE_MS + 2000);
+    }, AUTO_EXIT_GRACE_MS);
   }
 }
 
@@ -895,6 +915,11 @@ wss.on('connection', (ws, req) => {
     scheduleIdleExit();
     if (windows.get(ws.windowId) === ws) {
       windows.delete(ws.windowId);
+      // Remove only the stale socket owner. A replacement WebSocket may have
+      // already claimed the same connection during a normal page refresh.
+      for (const [key, conn] of connections) {
+        if (key.startsWith(`${ws.windowId}:`) && conn.ownerWs === ws) conn.ownerWs = null;
+      }
       scheduleWindowCleanup(ws.windowId);
     }
   });
@@ -1048,42 +1073,47 @@ function sendBinary(ws, id, data) {
   if (ws.readyState === 1) ws.send(frame, { binary: true });
 }
 
-function bufferDetachedOutput(conn, data) {
-  if (!conn._reattachBuffer) conn._reattachBuffer = [];
+function bufferConnectionHistory(conn, data) {
+  if (!conn._replayBuffer) conn._replayBuffer = [];
   const chunk = Buffer.from(data);
-  conn._reattachBuffer.push(chunk);
-  conn._reattachBufferBytes = (conn._reattachBufferBytes || 0) + chunk.length;
-  while (conn._reattachBufferBytes > REATTACH_BUFFER_BYTES && conn._reattachBuffer.length) {
-    conn._reattachBufferBytes -= conn._reattachBuffer.shift().length;
+  conn._replayBuffer.push(chunk);
+  conn._replayBufferBytes = (conn._replayBufferBytes || 0) + chunk.length;
+  while (conn._replayBufferBytes > CONNECTION_REPLAY_BUFFER_BYTES && conn._replayBuffer.length) {
+    conn._replayBufferBytes -= conn._replayBuffer.shift().length;
   }
 }
 
 function sendConnectionData(conn, id, data) {
+  bufferConnectionHistory(conn, data);
   if (conn.ownerWs && conn.ownerWs.readyState === 1) sendBinary(conn.ownerWs, id, data);
-  else bufferDetachedOutput(conn, data);
 }
 
 function attachExistingConnection(ws, conn, id) {
   conn.ownerWs = ws;
   const state = conn.state || 'connected';
   const msg = state === 'connected' ? '已恢复原连接' : (conn._lastStateMsg || '连接中…');
-  send(ws, { type: 'status', id, state, msg, resumed: true, cfg: sanitize(conn.config || {}) });
-  if (state === 'connected' && conn._reattachBuffer?.length) {
-    for (const chunk of conn._reattachBuffer) sendBinary(ws, id, chunk);
-    conn._reattachBuffer = [];
-    conn._reattachBufferBytes = 0;
+  const historyReplay = !!conn._replayBuffer?.length;
+  send(ws, { type: 'status', id, state, msg, resumed: true, historyReplay, cfg: sanitize(conn.config || {}) });
+  if (historyReplay) {
+    for (const chunk of conn._replayBuffer) sendBinary(ws, id, chunk);
   }
 }
 
 async function handle(ws, m) {
   switch (m.type) {
+    case 'test-connection-output': {
+      if (!process.env.SSHTERM_TEST_SFTP_ROOT || !Number.isInteger(m.id)) return;
+      const conn = getConnection(ws, m.id);
+      if (conn) sendConnectionData(conn, m.id, Buffer.from(String(m.data || '')));
+      break;
+    }
     case 'test-sftp-claim': {
       if (!process.env.SSHTERM_TEST_SFTP_ROOT || !Number.isInteger(m.id)) return;
       const fixture = connections.get(9900);
       if (!fixture) return;
       connections.set(connectionKey(ws, m.id), {
         ...fixture, id: m.id, state: 'connected', config: { type: 'ssh', name: 'fixture' },
-        ownerWs: ws, _reattachBuffer: [], _reattachBufferBytes: 0,
+        ownerWs: ws, _replayBuffer: [], _replayBufferBytes: 0,
       });
       send(ws, { type: 'test-sftp-claimed', id: m.id });
       break;
@@ -1460,8 +1490,8 @@ async function doConnect(ws, cfg, tabId) {
   const connId = tabId;   // 前端 tab 即连接 id, 简化路由
   conn.id = connId;
   conn.ownerWs = ws;
-  conn._reattachBuffer = [];
-  conn._reattachBufferBytes = 0;
+  conn._replayBuffer = [];
+  conn._replayBufferBytes = 0;
   conn._lastStateMsg = '连接中…';
   connections.set(connectionKey(ws, connId), conn);
   liveByConfig.set(ownerFpKey, connId);

@@ -36,21 +36,41 @@ async function getToken(deadline = Date.now() + 10000) {
 function open(token, windowId) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(`ws://127.0.0.1:${PORT}/?token=${token}&window=${windowId}`);
-    ws.on('message', raw => {
+    const handler = (raw, isBinary) => {
+      if (isBinary) return;
       const message = JSON.parse(raw.toString());
-      if (message.type === 'window-id') resolve({ ws, windowId: message.windowId });
-    });
+      if (message.type === 'window-id') {
+        ws.off('message', handler);
+        resolve({ ws, windowId: message.windowId });
+      }
+    };
+    ws.on('message', handler);
     ws.on('error', reject);
   });
 }
 function waitMessage(ws, predicate, timeout = 5000) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => { cleanup(); reject(new Error('WebSocket response timed out')); }, timeout);
-    const handler = raw => {
+    const handler = (raw, isBinary) => {
+      if (isBinary) return;
       const message = JSON.parse(raw.toString());
       if (!predicate(message)) return;
       cleanup();
       resolve(message);
+    };
+    const cleanup = () => { clearTimeout(timer); ws.off('message', handler); };
+    ws.on('message', handler);
+  });
+}
+function waitBinary(ws, id, expected, timeout = 5000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { cleanup(); reject(new Error('WebSocket binary response timed out')); }, timeout);
+    const handler = (raw, isBinary) => {
+      if (!isBinary || raw.length < 2 || raw.readUInt16LE(0) !== id) return;
+      const text = raw.subarray(2).toString();
+      if (!text.includes(expected)) return;
+      cleanup();
+      resolve(text);
     };
     const cleanup = () => { clearTimeout(timer); ws.off('message', handler); };
     ws.on('message', handler);
@@ -80,6 +100,10 @@ function close(ws) {
     const claimed = waitMessage(firstWs, message => message.type === 'test-sftp-claimed');
     firstWs.send(JSON.stringify({ type: 'test-sftp-claim', id: 42 }));
     await claimed;
+    const marker = 'REFRESH_HISTORY_MARKER';
+    const liveOutput = waitBinary(firstWs, 42, marker);
+    firstWs.send(JSON.stringify({ type: 'test-connection-output', id: 42, data: marker }));
+    await liveOutput;
     const before = await get(`${BASE}/api/sftp/download?token=${token}&window=${stableWindowId}&conn=42&path=alive.txt`);
     assert.strictEqual(before.status, 200);
     assert.strictEqual(before.body.toString(), 'same connection');
@@ -88,18 +112,25 @@ function close(ws) {
     // the same sessionStorage window capability and connection id.
     await close(firstWs);
     firstWs = null;
-    await sleep(100);
+    // Regression: the old implementation destroyed every remote connection
+    // when the page WebSocket stayed detached for ten seconds.
+    await sleep(10500);
     const resumed = await open(token, stableWindowId);
     resumedWs = resumed.ws;
     assert.strictEqual(resumed.windowId, stableWindowId);
+    const detached = await get(`${BASE}/api/sftp/download?token=${token}&window=${stableWindowId}&conn=42&path=alive.txt`);
+    assert.strictEqual(detached.status, 200, 'remote connection must survive more than the former 10s cleanup window');
     const after = await get(`${BASE}/api/sftp/download?token=${token}&window=${stableWindowId}&conn=42&path=alive.txt`);
     assert.strictEqual(after.status, 200, 'detached connection must survive the refresh grace period');
 
     const resumedStatus = waitMessage(resumedWs, message => message.type === 'status' && message.id === 42);
+    const replayedOutput = waitBinary(resumedWs, 42, marker);
     resumedWs.send(JSON.stringify({ type: 'connect', id: 42, session: { type: 'ssh' } }));
     const status = await resumedStatus;
     assert.strictEqual(status.state, 'connected');
     assert.strictEqual(status.resumed, true, 'connect must reattach instead of dialing again');
+    assert.strictEqual(status.historyReplay, true, 'reattach status must announce transcript replay');
+    assert((await replayedOutput).includes(marker), 'reattach must replay output emitted before the WebSocket loss');
 
     const otherWindowId = 'other_window_' + 'b'.repeat(50);
     const other = await open(token, otherWindowId);

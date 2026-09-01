@@ -1,7 +1,7 @@
 // UI 功能测试 v2: 完整用户路径 (真实鼠标点击)
 // 路径1: 新建 → 填 SSH → 连接 → shell
 // 路径2: 保存并连接 → 会话入列表
-const puppeteer = require('puppeteer-core');
+const puppeteer = require('./puppeteer_test');
 const EDGE = 'C:\\Users\\Administrator\\sshterm\\vendor\\chrome-headless-shell\\chrome-headless-shell.exe';
 const URL = process.argv[2] || 'http://127.0.0.1:8787/';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));

@@ -1,5 +1,5 @@
 // UI 功能测试 v3: 日志面板 + 批量删除 + 复制不崩 (三项新功能)
-const puppeteer = require('puppeteer-core');
+const puppeteer = require('./puppeteer_test');
 const EDGE = 'C:\\Users\\Administrator\\sshterm\\vendor\\chrome-headless-shell\\chrome-headless-shell.exe';
 const URL = process.argv[2] || 'http://127.0.0.1:8787/';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));

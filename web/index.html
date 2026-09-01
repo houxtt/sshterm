@@ -1,7 +1,8 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" translate="no" class="notranslate">
 <head>
 <meta charset="utf-8">
+<meta name="google" content="notranslate">
 <title>sshterm — SSH / Telnet / VNC / 串口</title>
 <link rel="stylesheet" href="/vendor/@xterm/xterm/css/xterm.css">
 <link rel="stylesheet" href="/style.css">
@@ -46,7 +47,7 @@
     <!-- 左侧: 会话列表 -->
     <aside id="sidebar">
       <div class="side-head">
-        <span>已保存会话</span>
+        <span id="side-title">已保存会话</span>
         <span>
           <button id="btn-batch" title="批量管理" class="mini">☑ 批量</button>
           <button id="btn-refresh" title="刷新">⟳</button>
@@ -130,7 +131,7 @@
           <option value="ssh">SSH</option>
           <option value="telnet">Telnet</option>
           <option value="vnc">VNC</option>
-          <option value="serial">串口</option>
+          <option value="serial">Serial</option>
         </select>
       </label>
 
@@ -427,6 +428,7 @@
 <script src="/vendor/@xterm/xterm/lib/xterm.js"></script>
 <script src="/vendor/@xterm/addon-fit/lib/addon-fit.js"></script>
 <script src="/vendor/@xterm/addon-search/lib/addon-search.js"></script>
+<script src="/vendor/@xterm/addon-image/lib/addon-image.js"></script>
 <script src="/vendor/zmodem.js/dist/zmodem.js"></script>
 <script src="/app.js"></script>
 </body>

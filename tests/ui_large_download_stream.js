@@ -9,7 +9,7 @@ const { spawn } = require('child_process');
 const puppeteer = require('puppeteer-core');
 
 const ROOT = path.join(__dirname, '..');
-const EDGE = path.join(ROOT, 'vendor', 'chrome-headless-shell', 'chrome-headless-shell.exe');
+const EDGE = require('./browser_path')(ROOT);
 const PORT = 8906;
 const URL = `http://127.0.0.1:${PORT}/`;
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'sshterm-large-download-'));
@@ -38,7 +38,11 @@ async function waitForServer(deadline = Date.now() + 10000) {
   let browser;
   try {
     await waitForServer();
-    browser = await puppeteer.launch({ executablePath: EDGE, headless: 'new' });
+    browser = await puppeteer.launch({
+      executablePath: EDGE,
+      headless: 'new',
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu'],
+    });
     const page = await browser.newPage();
     await page.goto(URL, { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => typeof streamDownloadToFile === 'function');

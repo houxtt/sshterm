@@ -1,5 +1,5 @@
 // UI 测试: 快捷命令 (保存/记忆/执行) + 连接后自动执行脚本
-const puppeteer = require('puppeteer-core');
+const puppeteer = require('./puppeteer_test');
 const EDGE = 'C:\\Users\\Administrator\\sshterm\\vendor\\chrome-headless-shell\\chrome-headless-shell.exe';
 const URL = process.argv[2] || 'http://127.0.0.1:8787/';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));

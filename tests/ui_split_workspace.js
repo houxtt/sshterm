@@ -7,7 +7,7 @@ const puppeteer = require('puppeteer-core');
 const ROOT = path.join(__dirname, '..');
 const PORT = 8896;
 const BASE = `http://127.0.0.1:${PORT}/`;
-const EDGE = path.join(ROOT, 'vendor', 'chrome-headless-shell', 'chrome-headless-shell.exe');
+const EDGE = require('./browser_path')(ROOT);
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 function waitForServer(deadline = Date.now() + 10000) {
@@ -34,13 +34,19 @@ function waitForServer(deadline = Date.now() + 10000) {
   let browser;
   try {
     await waitForServer();
-    browser = await puppeteer.launch({ executablePath: EDGE, headless: 'new' });
+    browser = await puppeteer.launch({
+      executablePath: EDGE,
+      headless: 'new',
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu'],
+    });
     const page = await browser.newPage();
+    page.setDefaultTimeout(10000);
     await page.setViewport({ width: 1280, height: 800 });
     const pageErrors = [];
     page.on('pageerror', error => pageErrors.push(error.message));
     page.on('dialog', dialog => dialog.accept());
-    await page.goto(BASE, { waitUntil: 'networkidle0' });
+    await page.goto(BASE, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => typeof ws !== 'undefined' && ws.readyState === WebSocket.OPEN);
 
     // Build an offline tab so layout behavior is tested without external SSH
     // credentials or network availability.

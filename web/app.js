@@ -19,10 +19,39 @@ const FitAddonCtor = (typeof FitAddon === 'function') ? FitAddon
   : (window.FitAddon && window.FitAddon.FitAddon);
 const SearchAddonCtor = (typeof SearchAddon === 'function') ? SearchAddon
   : (window.SearchAddon && window.SearchAddon.SearchAddon);
+const ImageAddonCtor = (typeof ImageAddon === 'function') ? ImageAddon
+  : (window.ImageAddon && window.ImageAddon.ImageAddon);
 if (typeof Terminal !== 'function' || !FitAddonCtor) {
   document.body.innerHTML = '<div style="padding:40px;font:14px sans-serif;color:#f87171">' +
     '❌ 终端核心加载失败(xterm.js / addon-fit), 请刷新或检查服务端资源。</div>';
   throw new Error('terminal core missing');
+}
+
+// Inline images for SSH terminals.  Resource limits are deliberately lower
+// than the addon's defaults so an untrusted remote cannot retain hundreds of
+// megabytes of decoded canvases in the browser.
+const IMAGE_ADDON_OPTIONS = Object.freeze({
+  enableSizeReports: true,
+  pixelLimit: 4 * 1024 * 1024,
+  storageLimit: 32,
+  showPlaceholder: true,
+  sixelSupport: true,
+  sixelScrolling: true,
+  sixelPaletteLimit: 256,
+  sixelSizeLimit: 8 * 1024 * 1024,
+  iipSupport: true,
+  iipSizeLimit: 8 * 1024 * 1024,
+});
+function attachImageAddon(term, connectionType) {
+  if (connectionType !== 'ssh' || !ImageAddonCtor) return null;
+  try {
+    const addon = new ImageAddonCtor(IMAGE_ADDON_OPTIONS);
+    term.loadAddon(addon);
+    return addon;
+  } catch (error) {
+    console.error('[image-addon] SSH inline image support unavailable:', error);
+    return null;
+  }
 }
 
 const TYPE_ICON = { ssh: '🖥️', telnet: '🔌', vnc: '🖼️', serial: '🔗' };
@@ -143,6 +172,7 @@ ws.onmessage = (ev) => {
     while (target.recLen > BUF_MAX && target.recParts.length) {
       target.recLen -= target.recParts.shift().length;
     }
+    scheduleTabsSave();
   } catch (e) { /* 忽略 */ }
 };
 function send(obj) { if (ws.readyState === 1) ws.send(JSON.stringify(obj)); }
@@ -276,6 +306,15 @@ function handleMsg(m) {
         if (p) { tab = t; pane = p; break; }
       }
       if (tab) {
+        const target = pane || tab;
+        if (m.resumed && m.historyReplay) {
+          // The server owns the authoritative rolling transcript for a live
+          // connection. Clear any browser snapshot before replay to avoid
+          // duplicate lines, then rebuild recParts from the binary frames.
+          try { target.term?.reset(); } catch {}
+          target.recParts = [];
+          target.recLen = 0;
+        }
         if (pane) {
           pane.state = m.state;
         } else {
@@ -405,7 +444,7 @@ function handleMsg(m) {
 const I18N = {
   zh: {
     btn_new: '＋ 新建连接', btn_save: '💾 保存会话', btn_log: '📋 日志',
-    btn_sftp: '📁 文件', btn_killall: '⏹ 全部关闭', btn_lang: '🌐 EN',
+    btn_sftp: '📁 文件', btn_killall: '⏹ 全部关闭', btn_lang: '🌐 EN', btn_split: '⊞ 分屏',
     dl_title_new: '新建连接', dl_title_edit: '编辑会话',
     dl_conn: '连接', dl_save_conn: '保存并连接', dl_cancel: '取消',
     f_name: '会话名称', f_type: '类型', f_host: '主机', f_port: '端口',
@@ -421,7 +460,7 @@ const I18N = {
   },
   en: {
     btn_new: '＋ New', btn_save: '💾 Save', btn_log: '📋 Log',
-    btn_sftp: '📁 Files', btn_killall: '⏹ Close All', btn_lang: '🌐 中文',
+    btn_sftp: '📁 Files', btn_killall: '⏹ Close All', btn_lang: '🌐 中文', btn_split: '⊞ Split',
     dl_title_new: 'New Connection', dl_title_edit: 'Edit Session',
     dl_conn: 'Connect', dl_save_conn: 'Save & Connect', dl_cancel: 'Cancel',
     f_name: 'Name', f_type: 'Type', f_host: 'Host', f_port: 'Port',
@@ -430,19 +469,189 @@ const I18N = {
     t_autologin: 'Auto login', s_baud: 'Baud', s_hex: 'HEX mode',
     sftp_up: 'Up', sftp_upload: 'Upload', sftp_upload_dir: 'Folder',
     sftp_refresh: 'Refresh', sftp_close: 'Close', sftp_dl: 'Download', sftp_dir_dl: 'Zip',
-    side_title: 'Sessions', side_batch: 'Batch', side_foot: 'Double-click to connect',
+    side_title: 'Saved Sessions', side_batch: 'Batch', side_foot: 'Double-click to connect',
     batch_all: 'All', batch_del: 'Delete', batch_cancel: 'Cancel',
     close_title: 'Close session?', close_ok: 'Close', welcome_p: 'SSH · Telnet · VNC · Serial all-in-one',
     ws_ok: 'Server connected', ws_off: 'Server disconnected', ws_init: 'Not connected',
   },
 };
+
+// Translate the complete static UI, including dialogs that are initially
+// hidden. WeakMaps retain the original Chinese key so language switching is
+// reversible, while the observer also covers controls rendered later.
+const DOM_TEXT_EN = {
+  'sshterm — SSH / Telnet / VNC / 串口': 'sshterm — SSH / Telnet / VNC / Serial',
+  '＋ 新建连接': '＋ New Connection', '💾 保存会话': '💾 Save Session', '📁 文件': '📁 Files',
+  '🔗 隧道': '🔗 Tunnels', '⏹ 全部关闭': '⏹ Close All', '☰ 工具': '☰ Tools',
+  '📋 操作日志': '📋 Operation Log', '🌐 切换语言': '🌐 Language', '⏱ 定时发送': '⏱ Timed Send',
+  '🔍 端口扫描': '🔍 Port Scan', '⇄ 导入 / 导出会话': '⇄ Import / Export Sessions',
+  '⏺ 开始原始抓包': '⏺ Start Raw Capture', '⏺ 开始会话录制': '⏺ Start Recording',
+  '▶ 导入并回放录制': '▶ Import & Replay Recording', '⊞ 分屏': '⊞ Split',
+  '▣ 工作区': '▣ Workspace', '⚡ 命令': '⚡ Commands', '已保存会话': 'Saved Sessions',
+  '默认': 'Default',
+  '☑ 批量': '☑ Batch', '🔑 SSH 配置': '🔑 SSH Config', '全选': 'Select All',
+  '删除选中': 'Delete Selected', '取消': 'Cancel', '双击连接 · 悬停可编辑/删除': 'Double-click to connect · hover to edit/delete',
+  '就绪': 'Ready', '未连接服务器': 'Server disconnected', '服务器已连接': 'Server connected',
+  '服务器已断开': 'Server disconnected', '连接中…': 'Connecting…', '● 已连接': '● Connected',
+  '已连接': 'Connected', '已恢复原连接': 'Original Connection Restored',
+  '✕ 已断开': '✕ Disconnected', '已断开': 'Disconnected', '出错': 'Error',
+  '本地待传文件': 'Local Files', '远端目录': 'Remote Directory',
+  '⬆️传': '⬆ Upload', '📂传': '📂 Upload Folder', '⏸ 暂停队列': '⏸ Pause Queue',
+  'SSH · Telnet · VNC · 串口 一体化连接工具': 'SSH · Telnet · VNC · Serial all-in-one',
+  '新建连接': 'New Connection', '编辑会话': 'Edit Session', '会话名称': 'Session Name',
+  '分组': 'Group', '类型': 'Type', '主机': 'Host', '端口': 'Port', '用户名': 'Username',
+  '认证方式': 'Authentication', '密码': 'Password', '密钥': 'Key', '私钥路径': 'Private Key Path',
+  '密钥口令': 'Key Passphrase', '代理': 'Proxy', '代理地址': 'Proxy Address', '代理认证': 'Proxy Authentication',
+  '跳板链 (ProxyJump)': 'ProxyJump Chain', '跳板凭据（整条跳板链共用，独立于目标主机）': 'Jump Credentials (shared by the chain)',
+  '跳板用户': 'Jump User', '跳板认证': 'Jump Authentication', '跳板密码': 'Jump Password',
+  '跳板私钥路径': 'Jump Private Key Path', '跳板密钥口令': 'Jump Key Passphrase',
+  '自动登录': 'Auto Login', '只读模式': 'View Only', '断线自动重连': 'Reconnect Automatically',
+  '记住凭据（使用 Windows DPAPI 加密）': 'Remember Credentials (Windows DPAPI encrypted)',
+  '连接后自动执行(每行一条)': 'Run After Connect (one command per line)', '串口': 'Serial',
+  '波特率': 'Baud Rate', '数据位': 'Data Bits', '停止位': 'Stop Bits', '校验位': 'Parity',
+  '编码': 'Encoding', 'RTS/CTS 硬件流控': 'RTS/CTS Hardware Flow Control',
+  'HEX 显示/发送': 'HEX Display/Send', '接收显示时间戳': 'Show Receive Timestamps',
+  '触发关键字': 'Trigger Keyword', '发送 Break': 'Send Break', '连接': 'Connect',
+  '保存并连接': 'Save & Connect', '— 常用路径 —': '— Common Paths —', '无代理': 'No Proxy',
+  '键盘交互/MFA': 'Keyboard Interactive / MFA', 'SSH Agent（含 FIDO2）': 'SSH Agent (including FIDO2)',
+  'GBK (嵌入式常见)': 'GBK (common on embedded devices)',
+  'SSH 配置 (SSH config)': 'SSH Config', '发现以下 Host 条目 (点击填充表单):': 'Host entries found (click to fill the form):',
+  '关闭': 'Close', '⚠️ 关闭会话?': '⚠️ Close Session?', '确认关闭': 'Confirm Close',
+  '⚡ 快捷命令': '⚡ Quick Commands', '命令名称': 'Command Name', '命令内容': 'Command',
+  '连接后自动执行此命令集': 'Run This Command Set After Connect', '保存命令': 'Save Command',
+  '执行全部': 'Run All', '🔌 串口被占用': '🔌 Serial Port In Use', '⏳ 等待重试': '⏳ Wait and Retry',
+  '⚡ 强制释放': '⚡ Force Release', '等待重试: 占用方释放后自动连接;强制释放: 重启该串口设备(需管理员确认 UAC),其他程序将断开':
+    'Wait and retry after the owner releases the port; force release restarts the device and requires UAC confirmation.',
+  '目标': 'Target', '扫描': 'Scan', '单 IP → 全端口扫描;网段(含 / 或 -) → 网络扫描, 发现整个子网设备':
+    'Single IP → full port scan; subnet (/ or -) → discover devices across the subnet.',
+  '🔗 SSH 隧道': '🔗 SSH Tunnels', '为当前 SSH 会话创建端口转发/跳板隧道': 'Create port forwarding for the current SSH session.',
+  '本地监听端口': 'Local Listen Port', '远端目标': 'Remote Target', '新建隧道': 'Add Tunnel', '刷新': 'Refresh',
+  '本地转发 Local (本地端口 → 远端:端口)': 'Local Forward (local port → remote host:port)',
+  '远端转发 Remote (远端端口 → 本地:端口)': 'Remote Forward (remote port → local host:port)',
+  '动态转发 Dynamic (SOCKS5 代理)': 'Dynamic Forward (SOCKS5 Proxy)',
+  '单会话最多 8 条隧道;端口冲突时会提示失败': 'Up to 8 tunnels per session; port conflicts are reported.',
+  '发送内容': 'Content', '周期(毫秒)': 'Interval (ms)', '按 HEX 发送': 'Send as HEX', '立即开始': 'Start Immediately',
+  '开始': 'Start', '停止': 'Stop', '▣ 默认工作区': '▣ Default Workspace',
+  '保存或恢复当前打开的会话标签、标签顺序以及分屏布局。恢复时会关闭当前连接并重新建立已保存的会话。':
+    'Save or restore open tabs, tab order, and split layout. Restoring reconnects the saved sessions.',
+  '尚未保存工作区': 'No Workspace Saved', '保存当前工作区': 'Save Current Workspace',
+  '恢复已保存工作区': 'Restore Saved Workspace',
+  '工作区不会把密码或私钥保存到浏览器；未记住凭据的会话恢复后可能需要重新认证。':
+    'Workspace data never stores passwords or private keys in the browser; authentication may be required after restore.',
+  '★ 仅看书签': '★ Bookmarks Only', '🔐 仅看审计': '🔐 Audit Only', '⬇ 导出 CSV': '⬇ Export CSV',
+  '日志文件: 加载中…': 'Log file: loading…', '每次启动工具自动新建日志文件, 关闭后保留在本地':
+    'A new local log file is created on each start and retained after closing.',
+  '导出 sshterm 加密备份': 'Export Encrypted sshterm Backup',
+  '备份以 AES-256-GCM 加密，可跨设备导入；口令无法找回。': 'Backups use AES-256-GCM and can be imported on another device; passphrases cannot be recovered.',
+  '备份口令': 'Backup Passphrase', '确认口令': 'Confirm Passphrase', '⬇ 导出加密备份': '⬇ Export Encrypted Backup',
+  '导入 sshterm 加密备份': 'Import Encrypted sshterm Backup', '⬆ 导入备份': '⬆ Import Backup',
+  '导入 OpenSSH config': 'Import OpenSSH Config',
+  '导入具体 Host；通配符、Match 和 Include 规则会跳过。不会导入密码。':
+    'Imports concrete Host entries; wildcard, Match, and Include rules are skipped. Passwords are never imported.',
+  '⬆ 导入 OpenSSH config': '⬆ Import OpenSSH Config',
+  '直接连接目标 VNC 服务，不依赖 SSH/终端会话；连接后会打开独立标签页。':
+    'Connect directly to the target VNC service in a standalone tab.',
+  'VNC 主机': 'VNC Host', '(加载中…)': '(Loading…)',
+  '点击命令=立即发送到当前会话;连接后自动执行见"新建连接→SSH/Telnet→连接后执行"':
+    'Click a command to send it; configure automatic execution in the connection dialog.',
+};
+
+const DOM_ATTR_EN = {
+  '新建连接 (Ctrl+N)': 'New Connection (Ctrl+N)', '保存当前会话配置': 'Save Current Session',
+  'SSH 文件浏览/下载 (SFTP)': 'Browse/Download Files (SFTP)', 'SSH 隧道管理': 'SSH Tunnel Management',
+  '断开并关闭全部会话标签': 'Disconnect and Close All Tabs', '更多工具': 'More Tools',
+  '分屏(当前标签左右分屏)': 'Split Current Tab', '保存或恢复当前标签与分屏布局': 'Save or Restore Tabs and Split Layout',
+  '快捷命令(保存/执行/脚本)': 'Quick Commands', 'IP[:端口] 回车快速连接': 'IP[:port] — Enter to connect',
+  '服务器连接状态': 'Server Connection Status', '批量管理': 'Batch Management', '解析 SSH config': 'Parse SSH Config',
+  '拖动调整已保存会话宽度': 'Drag to Resize Saved Sessions',
+  '搜索 (Enter=下一个, Shift+Enter=上一个, Esc=关闭)': 'Search (Enter=next, Shift+Enter=previous, Esc=close)',
+  '上一个': 'Previous', '下一个': 'Next', '关闭': 'Close', '上级目录': 'Parent Directory',
+  '当前目录': 'Current Directory', '上传文件到当前目录': 'Upload Files Here',
+  '上传整个文件夹(含子目录)': 'Upload Folder Recursively', '刷新': 'Refresh', '关闭面板': 'Close Panel',
+  '取消当前下载': 'Cancel Current Download', '拖动调整本地与远端目录宽度': 'Drag to Resize Local and Remote Columns',
+  '如: 开发板串口': 'e.g. Board Serial', '如: 开发板 / 服务器': 'e.g. Boards / Servers',
+  '密码': 'Password', '可选': 'Optional', '或手动输入私钥路径': 'Or Enter a Private Key Path',
+  '用户名': 'Username', '留空则使用跳板链中的用户或目标用户': 'Leave blank to use the jump-chain or target username',
+  '刷新串口列表': 'Refresh Serial Ports', '匹配后通知，不执行命令': 'Notify on match; do not execute commands',
+  'VNC 密码': 'VNC Password', '如: 查看内核日志': 'e.g. View Kernel Log', '如: dmesg | tail -50': 'e.g. dmesg | tail -50',
+  '按顺序执行全部命令': 'Run All Commands in Order', '要定时发送的内容': 'Content to Send',
+  '至少 12 个字符': 'At Least 12 Characters',
+  '192.168.1.216 或 192.168.1.0/24 或 192.168.1.1-254': '192.168.1.216 or 192.168.1.0/24 or 192.168.1.1-254',
+  '如:\nls\ndmesg | tail -20': 'e.g.\nls\ndmesg | tail -20',
+  '关闭此分屏': 'Close This Pane', '删除': 'Delete', '编辑': 'Edit', '拖动排序': 'Drag to Reorder',
+  '文件面板仅 SSH 已连接时可用': 'Files are available only for a connected SSH session',
+  '已连接': 'Connected', '已恢复原连接': 'Original Connection Restored',
+  '连接中…': 'Connecting…', '已断开': 'Disconnected', '出错': 'Error',
+};
+
+const i18nTextKeys = new WeakMap();
+const i18nAttrKeys = new WeakMap();
+
+function translateDom(root = document) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  for (const node of nodes) {
+    const current = node.nodeValue || '';
+    const trimmed = current.trim();
+    if (!trimmed) continue;
+    let key = i18nTextKeys.get(node);
+    if (!key || (trimmed !== key && trimmed !== DOM_TEXT_EN[key] && DOM_TEXT_EN[trimmed])) {
+      if (DOM_TEXT_EN[trimmed]) { key = trimmed; i18nTextKeys.set(node, key); }
+    }
+    if (!key) continue;
+    const value = LANG === 'en' ? DOM_TEXT_EN[key] : key;
+    const leading = current.match(/^\s*/)?.[0] || '';
+    const trailing = current.match(/\s*$/)?.[0] || '';
+    const next = `${leading}${value}${trailing}`;
+    if (node.nodeValue !== next) node.nodeValue = next;
+  }
+  const scope = root.querySelectorAll ? root : document;
+  const elements = [];
+  if (root.nodeType === Node.ELEMENT_NODE) elements.push(root);
+  elements.push(...scope.querySelectorAll('[title],[placeholder]'));
+  for (const el of elements) {
+    let keys = i18nAttrKeys.get(el);
+    if (!keys) { keys = {}; i18nAttrKeys.set(el, keys); }
+    for (const attr of ['title', 'placeholder']) {
+      const current = el.getAttribute?.(attr);
+      if (!current) continue;
+      let key = keys[attr];
+      if (!key || (current !== key && current !== DOM_ATTR_EN[key] && DOM_ATTR_EN[current])) {
+        if (DOM_ATTR_EN[current]) { key = current; keys[attr] = key; }
+      }
+      if (!key) continue;
+      const value = LANG === 'en' ? DOM_ATTR_EN[key] : key;
+      if (current !== value) el.setAttribute(attr, value);
+    }
+  }
+}
+
+let domTranslationObserver = null;
+function installDomTranslationObserver() {
+  if (domTranslationObserver || !document.body) return;
+  domTranslationObserver = new MutationObserver(records => {
+    for (const record of records) {
+      if (record.type === 'characterData') translateDom(record.target.parentElement || document);
+      else if (record.type === 'attributes') translateDom(record.target);
+      else for (const node of record.addedNodes) {
+        if (node.nodeType === Node.ELEMENT_NODE) translateDom(node);
+        else if (node.parentElement) translateDom(node.parentElement);
+      }
+    }
+  });
+  domTranslationObserver.observe(document.body, {
+    childList: true, subtree: true, characterData: true,
+    attributes: true, attributeFilter: ['title', 'placeholder'],
+  });
+}
 let LANG = localStorage.getItem('sshterm.lang') || 'zh';
 function t(key) { return (I18N[LANG] && I18N[LANG][key]) || I18N.zh[key] || key; }
 function applyI18n() {
   const map = {
     'btn-new': 'btn_new', 'btn-save': 'btn_save',
-    'btn-sftp': 'btn_sftp', 'btn-killall': 'btn_killall',
-    'btn-batch': 'side_batch',
+    'btn-sftp': 'btn_sftp', 'btn-killall': 'btn_killall', 'btn-split': 'btn_split',
+    'side-title': 'side_title', 'btn-batch': 'side_batch',
   };
   for (const [id, key] of Object.entries(map)) {
     const el = document.getElementById(id);
@@ -462,6 +671,9 @@ function applyI18n() {
   $('batch-all').parentElement.firstChild.textContent = t('batch_all') + ' ';
   $('dlg-title').textContent = t('dl_title_new');
   document.querySelectorAll('label[for]').forEach(() => {});
+  document.documentElement.lang = LANG === 'en' ? 'en' : 'zh-CN';
+  translateDom(document);
+  installDomTranslationObserver();
   // 状态栏
   if (ws && ws.readyState === 1) $('conn-status-text').textContent = t('ws_ok');
 }
@@ -476,12 +688,21 @@ function toggleLang() {
 const LS_TABS = 'sshterm.tabs';
 const LS_WORKSPACE = 'sshterm.workspace.default';
 const BUF_MAX = 200 * 1024;   // 每标签保留最近 200KB 输出, 刷新后重放
+let tabsSaveTimer = null;
+function scheduleTabsSave() {
+  clearTimeout(tabsSaveTimer);
+  tabsSaveTimer = setTimeout(() => {
+    tabsSaveTimer = null;
+    saveTabs();
+  }, 250);
+}
 function saveTabs() {
   try {
     localStorage.setItem(LS_TABS, JSON.stringify(tabs.map(t => ({
       id: t.id, cfg: configForBrowserStorage(t.cfg), hex: !!t.hex, buf: (t.recParts || []).join(''),
       panes: (t.extraPanes || []).length,
       paneIds: (t.extraPanes || []).map(p => p.connId),
+      paneBufs: (t.extraPanes || []).map(p => (p.recParts || []).join('')),
       split: { dir: splitDirection(t), ratio: splitRatio(t) },
     }))));
   } catch (e) { /* 存储失败忽略 */ }
@@ -498,6 +719,7 @@ function restoreTabs() {
 }
 // 刷新/关闭页面前保存最新终端内容
 window.addEventListener('beforeunload', () => saveTabs());
+window.addEventListener('pagehide', () => saveTabs());
 
 function restoreTabItems(list) {
   for (const item of list) {
@@ -505,9 +727,13 @@ function restoreTabItems(list) {
     const tab = newTab(item.cfg, { connect: true, hex: item.hex, replay: item.buf, id: item.id });
     const split = item.split || { dir: 'row', ratio: 0.5 };
     for (let n = 0; tab.cfg.type !== 'vnc' && n < Math.min(Number(item.panes) || 0, SPLIT_MAX - 1); n++) {
-      addPane(tab, split.dir, split.ratio, { id: item.paneIds?.[n] });
+      addPane(tab, split.dir, split.ratio, {
+        id: item.paneIds?.[n],
+        replay: item.paneBufs?.[n] || '',
+      });
     }
   }
+  saveTabs();
 }
 
 function readWorkspaceSnapshot() {
@@ -599,6 +825,7 @@ function newTab(cfg, opts = {}) {
   });
   const fitAddon = new (FitAddonCtor)();
   term.loadAddon(fitAddon);
+  const imageAddon = attachImageAddon(term, cfg.type);
   let searchAddon = null;
   if (SearchAddonCtor) {
     searchAddon = new SearchAddonCtor();
@@ -619,7 +846,7 @@ function newTab(cfg, opts = {}) {
     hostinfoBar = document.getElementById(`hostinfo-${id}`);
   }
 
-  const tab = { id, cfg, term, host: container, state: 'idle', hex: !!(opts.hex ?? cfg.hexMode), fitAddon, searchAddon, recParts: [], recLen: 0, extraPanes: [], hostinfoBar, hostinfoTimer: null, connectedAt: 0 };
+  const tab = { id, cfg, term, host: container, state: 'idle', hex: !!(opts.hex ?? cfg.hexMode), fitAddon, searchAddon, imageAddon, recParts: [], recLen: 0, extraPanes: [], hostinfoBar, hostinfoTimer: null, connectedAt: 0 };
   if (window.Zmodem) {
     tab.zmodemSentry = new Zmodem.Sentry({
       to_terminal: octets => term.write(octets),
@@ -638,7 +865,6 @@ function newTab(cfg, opts = {}) {
   renderTabbar();
   activateTab(id);
   bindClipboard(tab);
-  saveTabs();
   installSplitDragger(tab);
 
   // 刷新恢复: 先重放之前的终端内容, 再建立连接
@@ -650,6 +876,7 @@ function newTab(cfg, opts = {}) {
       term.write('\r\n\x1b[33m[--- 连接已重新建立 ---]\x1b[0m\r\n');
     } catch (e) {}
   }
+  saveTabs();
 
   term.onData((d) => safeSendInput(id, d));
   term.onResize(({ cols, rows }) => send({ type: 'resize', id, cols, rows }));
@@ -1132,7 +1359,7 @@ function connectTo(s) {
 // ---------- 新建/编辑对话框 ----------
 function openDlg(existing = null) {
   editingId = existing ? existing.id : null;
-  $('dlg-title').textContent = existing ? '编辑会话' : '新建连接';
+  $('dlg-title').textContent = t(existing ? 'dl_title_edit' : 'dl_title_new');
   $('f-name').value = existing?.name || '';
   $('f-group').value = existing?.group || '';
   $('f-type').value = existing?.type || 'ssh';
@@ -1980,9 +2207,13 @@ function splitDirection(tab) {
   const prefs = loadSplitPrefs();
   return prefs[tab.id] ? prefs[tab.id].dir : 'row';
 }
+function clampSplitRatio(value) {
+  const ratio = Number(value);
+  return Number.isFinite(ratio) ? Math.max(0.1, Math.min(0.9, ratio)) : 0.5;
+}
 function splitRatio(tab) {
   const prefs = loadSplitPrefs();
-  return prefs[tab.id] ? prefs[tab.id].ratio : 0.5;
+  return clampSplitRatio(prefs[tab.id] ? prefs[tab.id].ratio : 0.5);
 }
 function findPane(tab, connId) {
   if (tab.id === connId) return tab;
@@ -2014,17 +2245,19 @@ function createTerminal(host, tabOrPane) {
   });
   const fitAddon = new (FitAddonCtor)();
   term.loadAddon(fitAddon);
+  const imageAddon = attachImageAddon(term, tabOrPane.cfg?.type);
   term.open(host);
   // Clipboard/key bindings need the concrete terminal object. Split panes
   // previously reached bindClipboard while pane.term was still null, aborting
   // creation before layout and connection setup completed.
   tabOrPane.term = term;
   tabOrPane.fitAddon = fitAddon;
+  tabOrPane.imageAddon = imageAddon;
   setTimeout(() => fitAddon.fit(), 0);
   bindClipboard(tabOrPane);
   term.onData((d) => safeSendInput(tabOrPane.connId, d));
   term.onResize(({ cols, rows }) => send({ type: 'resize', id: tabOrPane.connId, cols, rows }));
-  return { term, fitAddon };
+  return { term, fitAddon, imageAddon };
 }
 
 function addPane(tab, dir = 'row', ratio = 0.5, opts = {}) {
@@ -2035,22 +2268,32 @@ function addPane(tab, dir = 'row', ratio = 0.5, opts = {}) {
   tabSeq = Math.max(tabSeq, paneId + 1);
   const host = createPaneHost('pane-split');
   const pane = {
-    connId: paneId, term: null, fitAddon: null, host,
+    connId: paneId, term: null, fitAddon: null, imageAddon: null, host,
     cfg: { ...tab.cfg }, state: 'connecting',
     hex: !!tab.hex, recParts: [], recLen: 0, logging: false, logBuf: ''
   };
   tab.extraPanes.push(pane);
   tab.host.appendChild(host);
-  const { term, fitAddon } = createTerminal(host, pane);
+  const { term, fitAddon, imageAddon } = createTerminal(host, pane);
   pane.term = term;
   pane.fitAddon = fitAddon;
+  pane.imageAddon = imageAddon;
   host.querySelector('.pane-close').onclick = () => removePane(tab, pane);
+  if (opts.replay) {
+    pane.recParts = [opts.replay];
+    pane.recLen = opts.replay.length;
+    try {
+      pane.term.write(opts.replay);
+      pane.term.write('\r\n\x1b[33m[--- 连接已重新建立 ---]\x1b[0m\r\n');
+    } catch {}
+  }
   // The browser deliberately holds only a redacted session config after a
   // refresh. Ask the server to clone credentials from the authenticated main
   // connection instead of trying to reconnect with a missing password/key.
   send({ type: 'connect', session: pane.cfg, id: paneId, sourceId: tab.id });
   setStatus('已分屏');
   applySplitLayout(tab, dir, ratio);
+  scheduleTabsSave();
   setTimeout(() => { if (tabs.includes(tab)) tab.term.focus(); }, 100);
 }
 
@@ -2062,12 +2305,14 @@ function removePane(tab, pane) {
   if (i >= 0) tab.extraPanes.splice(i, 1);
   if (tab.extraPanes.length === 0) applySplitLayout(tab, 'none', 1);
   else applySplitLayout(tab, splitDirection(tab), splitRatio(tab));
+  scheduleTabsSave();
 }
 
 function applySplitLayout(tab, dir, ratio) {
   const container = tab.host;
   const main = container.querySelector('.term-host.main-pane');
   if (!container || !main) return;
+  ratio = clampSplitRatio(ratio);
   const n = countPanes(tab);
   if (n <= 1 || dir === 'none') {
     if (tab._dividers?.[0]) tab._dividers[0].style.display = 'none';
@@ -2151,10 +2396,13 @@ function installSplitDragger(tab) {
   let divider = makeDivider('row');
   container.appendChild(divider);
   tab._dividers.push(divider);
-  let dragging = false, dragDir = 'row';
+  let dragging = false, dragDir = 'row', dragRatio = null;
   const start = (e) => {
+    if (e.button != null && e.button !== 0) return;
     dragging = true;
     dragDir = divider.dataset.dir || 'row';
+    dragRatio = null;
+    try { if (e.pointerId != null) divider.setPointerCapture(e.pointerId); } catch {}
     e.preventDefault();
   };
   const move = (e) => {
@@ -2162,26 +2410,35 @@ function installSplitDragger(tab) {
     const p = container.getBoundingClientRect();
     const pos = dragDir === 'col' ? e.clientY - p.top : e.clientX - p.left;
     const size = dragDir === 'col' ? p.height : p.width;
-    const ratio = Math.max(0.1, Math.min(0.9, pos / size));
+    if (!Number.isFinite(size) || size <= 0) return;
+    const ratio = clampSplitRatio(pos / size);
+    dragRatio = ratio;
     const main = container.querySelector('.term-host.main-pane');
     main.style.flex = `${ratio} 1 0`;
     tab.extraPanes[0].host.style.flex = `${1 - ratio} 1 0`;
     [tab, ...tab.extraPanes].forEach(x => { try { x.fitAddon.fit(); } catch {} });
+    e.preventDefault();
   };
-  const end = () => {
+  const end = (e) => {
     if (!dragging) return;
     dragging = false;
     const main = container.querySelector('.term-host.main-pane');
     const mFlex = main.style.flex || '';
-    const mRatio = parseFloat(mFlex.split(' ')[0]) || 0.5;
+    const parsed = parseFloat(mFlex.split(' ')[0]);
+    const mRatio = clampSplitRatio(Number.isFinite(dragRatio) ? dragRatio : parsed);
+    dragRatio = null;
     saveSplitPrefs({ ...loadSplitPrefs(), [tab.id]: { dir: dragDir, ratio: mRatio } });
+    saveTabs();
+    try { if (e?.pointerId != null) divider.releasePointerCapture(e.pointerId); } catch {}
   };
-  divider.addEventListener('mousedown', start);
-  document.addEventListener('mousemove', move);
-  document.addEventListener('mouseup', end);
+  divider.addEventListener('pointerdown', start);
+  document.addEventListener('pointermove', move);
+  document.addEventListener('pointerup', end);
+  document.addEventListener('pointercancel', end);
   tab._splitCleanup = () => {
-    document.removeEventListener('mousemove', move);
-    document.removeEventListener('mouseup', end);
+    document.removeEventListener('pointermove', move);
+    document.removeEventListener('pointerup', end);
+    document.removeEventListener('pointercancel', end);
     container._draggerInstalled = false;
   };
 }

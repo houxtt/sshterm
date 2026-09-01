@@ -6,11 +6,16 @@ const os = require('os');
 const path = require('path');
 const PORT = 8799;
 const ROOT = path.join(__dirname, '..');
+const TEST_PROFILE = fs.mkdtempSync(path.join(os.tmpdir(), 'sshterm-full-suite-'));
+const TEST_ENV = {
+  ...process.env,
+  USERPROFILE: TEST_PROFILE,
+  HOME: TEST_PROFILE,
+};
 
 // Tests intentionally use the real protocol/device fixtures, but must not
 // permanently modify the user's sessions or generated progress fixture.
 const protectedFiles = [
-  path.join(os.homedir(), '.sshterm', 'sessions.json'),
   path.join(ROOT, 'tests', 'tmp_progress.txt'),
 ];
 const backups = protectedFiles.map(file => ({
@@ -73,7 +78,7 @@ const tests = [
 
 function run(cmd, args, opts = {}) {
   return new Promise((resolve) => {
-    const p = spawn(cmd, args, { cwd: ROOT, ...opts });
+    const p = spawn(cmd, args, { cwd: ROOT, env: TEST_ENV, ...opts });
     let out = '';
     p.stdout.on('data', (d) => { out += d; process.stdout.write(d); });
     p.stderr.on('data', (d) => { out += d; process.stdout.write(d); });
@@ -82,24 +87,50 @@ function run(cmd, args, opts = {}) {
   });
 }
 
+async function getToken(deadline = Date.now() + 10000) {
+  while (Date.now() < deadline) {
+    try {
+      const body = await new Promise((resolve, reject) => {
+        require('http').get(`http://127.0.0.1:${PORT}/bootstrap.js`, (response) => {
+          let text = '';
+          response.setEncoding('utf8');
+          response.on('data', chunk => { text += chunk; });
+          response.on('end', () => response.statusCode === 200
+            ? resolve(text)
+            : reject(new Error(`HTTP ${response.statusCode}`)));
+        }).on('error', reject);
+      });
+      const match = body.match(/__SSHTERM_TOKEN\s*=\s*"([^"]+)"/);
+      if (match) return match[1];
+    } catch {}
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  throw new Error('temporary server startup timed out');
+}
+
 async function main() {
   console.log('══════════ sshterm 测试套件 ══════════\n');
   // 起临时服务端 (--no-open 避免弹浏览器)
   const srv = spawn('node', ['server/index.js', '--port', String(PORT), '--no-open'],
-    { cwd: ROOT });
+    { cwd: ROOT, env: TEST_ENV });
   srv.stdout.on('data', () => {});
   srv.stderr.on('data', () => {});
-  await new Promise((r) => setTimeout(r, 1200));
+  const token = await getToken();
 
   const results = [];
   for (const t of tests) {
     process.stdout.write(`\n▶ ${t.name}\n`);
-    const { code } = await run(t.cmd, t.args);
+    const args = t.args.map(arg => arg.startsWith(`ws://127.0.0.1:${PORT}`)
+      ? `${arg}/?token=${encodeURIComponent(token)}`
+      : arg);
+    const isBrowserTest = args.some(arg => arg.startsWith(`http://127.0.0.1:${PORT}`));
+    const { code } = await run(t.cmd, args, isBrowserTest ? { env: process.env } : {});
     results.push({ ...t, pass: code === 0 });
   }
 
   srv.kill();
   restoreProtectedFiles();
+  fs.rmSync(TEST_PROFILE, { recursive: true, force: true });
   console.log('\n══════════ 汇总 ══════════');
   let ok = 0;
   for (const r of results) {
