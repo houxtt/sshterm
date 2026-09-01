@@ -65,10 +65,10 @@ function handleUserInput(tab, data) {
     if (ch === '\r' || ch === '\n') {
       const m = /^\s*display\b([\s\S]*)$/.exec(line);
       if (m && tab.imageAddon) {
-        const p = pickDisplayPath(m[1]);
+        const paths = pickDisplayPaths(m[1]);
         tab._inputLine = '';
         tab.term.write('\r\n');
-        if (p) renderRemoteImage(tab, connId, p);
+        if (paths.length) displaySequence(tab, connId, paths);
         return; // 不转发到远端, 避免 "Unable to open X server"
       }
       line = '';
@@ -82,50 +82,98 @@ function handleUserInput(tab, data) {
   safeSendInput(connId, data);
 }
 
-function pickDisplayPath(rest) {
-  const tokens = (rest || '').trim().split(/\s+/).filter(Boolean);
-  if (!tokens.length) return '';
-  const file = tokens.find(t => !t.startsWith('-')) || tokens[tokens.length - 1];
-  return file || '';
+function pickDisplayPaths(rest) {
+  // 返回所有图片路径参数 (跳过 -xxx 选项); display a.png b.png → ['a.png','b.png']
+  return (rest || '').trim().split(/\s+/).filter(Boolean).filter(t => !t.startsWith('-'));
 }
 
 async function renderRemoteImage(tab, connId, remotePath) {
-  tab.term.write(`\r\n\x1b[2m[display] 读取 ${remotePath} …\x1b[0m\r\n`);
-  try {
+  return new Promise((resolve) => {
+    tab.term.write(`\r\n\x1b[2m[display] 读取 ${remotePath} …\x1b[0m\r\n`);
+    const fail = (msg) => { tab.term.write(`\x1b[31m[display] ${msg}\x1b[0m\r\n`); resolve(); };
     const url = apiUrl('/api/sftp/download', { conn: connId, path: remotePath });
-    const resp = await fetch(url, { cache: 'no-store' });
-    if (!resp.ok) {
-      tab.term.write(`\x1b[31m[display] 取图失败 (${resp.status})，确认路径与连接\x1b[0m\r\n`);
-      return;
-    }
-    const blob = await resp.blob();
-    if (!blob.size) { tab.term.write('\x1b[31m[display] 空文件\x1b[0m\r\n'); return; }
-    const objUrl = URL.createObjectURL(blob);
-    const img = new Image();
-    img.onload = () => {
-      try {
-        const cellW = 8.4, cellH = 17; // 13px Consolas 单元格近似
-        let cols = Math.max(8, Math.round(img.width / cellW));
-        let rows = Math.max(4, Math.round(img.height / cellH));
-        const maxCols = Math.max(8, tab.term.cols - 1);
-        if (cols > maxCols) { const s = maxCols / cols; cols = maxCols; rows = Math.max(1, Math.round(rows * s)); }
-        tab.imageAddon.registerImage(img, { cols, rows });
-        tab.term.write(`\r\n\x1b[2m[display] ${img.width}×${img.height} 已显示\x1b[0m`);
-      } catch (e) {
-        tab.term.write(`\x1b[31m[display] 渲染失败: ${e.message}\x1b[0m\r\n`);
-      } finally {
-        URL.revokeObjectURL(objUrl);
-      }
-    };
-    img.onerror = () => {
-      tab.term.write('\x1b[31m[display] 无法解码(非图片格式?)\x1b[0m\r\n');
-      URL.revokeObjectURL(objUrl);
-    };
-    img.src = objUrl;
-  } catch (e) {
-    tab.term.write(`\x1b[31m[display] 错误: ${e.message}\x1b[0m\r\n`);
+    fetch(url, { cache: 'no-store' })
+      .then(async (resp) => {
+        if (!resp.ok) return fail(`取图失败 (${resp.status})，确认路径与连接`);
+        const blob = await resp.blob();
+        if (!blob.size) return fail('空文件');
+        const objUrl = URL.createObjectURL(blob);
+        const img = new Image();
+        img.onload = () => {
+          try {
+            const cellW = 8.4, cellH = 17; // 13px Consolas 单元格近似
+            let cols = Math.max(8, Math.round(img.width / cellW));
+            let rows = Math.max(4, Math.round(img.height / cellH));
+            const maxCols = Math.max(8, tab.term.cols - 1);
+            if (cols > maxCols) { const s = maxCols / cols; cols = maxCols; rows = Math.max(1, Math.round(rows * s)); }
+            tab.imageAddon.registerImage(img, { cols, rows });
+            tab.term.write(`\r\n\x1b[2m[display] ${img.width}×${img.height} 已显示\x1b[0m`);
+          } catch (e) {
+            tab.term.write(`\x1b[31m[display] 渲染失败: ${e.message}\x1b[0m\r\n`);
+          } finally {
+            URL.revokeObjectURL(objUrl);
+            resolve();
+          }
+        };
+        img.onerror = () => { tab.term.write('\x1b[31m[display] 无法解码(非图片格式?)\x1b[0m\r\n'); URL.revokeObjectURL(objUrl); resolve(); };
+        img.src = objUrl;
+      })
+      .catch((e) => fail(`错误: ${e.message}`));
+  });
+}
+
+// display a.png b.png: 依次拉取并逐个渲染, 避免多图异步完成时交错
+async function displaySequence(tab, connId, paths) {
+  for (const p of paths) {
+    await renderRemoteImage(tab, connId, p);
   }
 }
+
+// Ctrl+I: 弹出远程图片路径输入框, 回车即经 SFTP 拉取并渲染 (快捷 display, 免手打命令)
+function showDisplayPrompt() {
+  const tab = tabs.find(t => t.id === activeTabId);
+  if (!tab || tab.cfg.type !== 'ssh' || !tab.imageAddon) return;
+  if (document.getElementById('sshterm-display-prompt')) return;
+  const overlay = document.createElement('div');
+  overlay.id = 'sshterm-display-prompt';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:9999;font-family:Consolas,monospace';
+  const box = document.createElement('div');
+  box.style.cssText = 'background:#1a1b26;border:1px solid #3b4261;border-radius:8px;padding:16px 18px;min-width:440px;box-shadow:0 8px 30px rgba(0,0,0,.5)';
+  const title = document.createElement('div');
+  title.textContent = '显示远程图片 (SFTP)';
+  title.style.cssText = 'color:#c0caf5;font-size:13px;margin-bottom:8px';
+  const input = document.createElement('input');
+  input.placeholder = '远程图片路径, 空格分隔多张, 如 /home/u/a.png';
+  input.style.cssText = 'width:100%;box-sizing:border-box;background:#16161e;color:#c0caf5;border:1px solid #3b4261;border-radius:4px;padding:7px 9px;font-size:13px;outline:none';
+  const hint = document.createElement('div');
+  hint.textContent = '回车显示 · Esc 取消';
+  hint.style.cssText = 'color:#565f89;font-size:11px;margin-top:7px';
+  box.appendChild(title); box.appendChild(input); box.appendChild(hint);
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+  input.focus();
+  const close = () => overlay.remove();
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); close(); }
+    else if (e.key === 'Enter') {
+      e.preventDefault();
+      const val = input.value.trim();
+      close();
+      if (val) displaySequence(tab, tab.connId != null ? tab.connId : tab.id, pickDisplayPaths(val));
+    }
+  });
+  overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) close(); });
+}
+
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'i' || e.key === 'I')) {
+    const tab = tabs.find(t => t.id === activeTabId);
+    if (tab && tab.cfg.type === 'ssh' && tab.imageAddon) {
+      e.preventDefault(); e.stopPropagation();
+      showDisplayPrompt();
+    }
+  }
+}, true);
 
 const TYPE_ICON = { ssh: '🖥️', telnet: '🔌', vnc: '🖼️', serial: '🔗' };
 const STATE_TEXT = { connecting: '连接中…', connected: '● 已连接', closed: '✕ 已断开' };
