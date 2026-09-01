@@ -55,6 +55,78 @@ function attachImageAddon(term, connectionType) {
   }
 }
 
+// `display <远程图片>` 经 SFTP 拉取到本地后, 用 ImageAddon 直接在终端内联渲染,
+// 无需远端有 X server / ImageMagick 图形界面。仅在 SSH 会话 (imageAddon 存在) 拦截。
+function handleUserInput(tab, data) {
+  const connId = tab.connId != null ? tab.connId : tab.id;
+  let line = tab._inputLine || '';
+  for (let i = 0; i < data.length; i++) {
+    const ch = data[i];
+    if (ch === '\r' || ch === '\n') {
+      const m = /^\s*display\b([\s\S]*)$/.exec(line);
+      if (m && tab.imageAddon) {
+        const p = pickDisplayPath(m[1]);
+        tab._inputLine = '';
+        tab.term.write('\r\n');
+        if (p) renderRemoteImage(tab, connId, p);
+        return; // 不转发到远端, 避免 "Unable to open X server"
+      }
+      line = '';
+    } else if (ch === '\x7f' || ch === '\b') {
+      line = line.slice(0, -1);
+    } else if (ch >= ' ' && ch !== '\x7f') {
+      line += ch;
+    }
+  }
+  tab._inputLine = line;
+  safeSendInput(connId, data);
+}
+
+function pickDisplayPath(rest) {
+  const tokens = (rest || '').trim().split(/\s+/).filter(Boolean);
+  if (!tokens.length) return '';
+  const file = tokens.find(t => !t.startsWith('-')) || tokens[tokens.length - 1];
+  return file || '';
+}
+
+async function renderRemoteImage(tab, connId, remotePath) {
+  tab.term.write(`\r\n\x1b[2m[display] 读取 ${remotePath} …\x1b[0m\r\n`);
+  try {
+    const url = apiUrl('/api/sftp/download', { conn: connId, path: remotePath });
+    const resp = await fetch(url, { cache: 'no-store' });
+    if (!resp.ok) {
+      tab.term.write(`\x1b[31m[display] 取图失败 (${resp.status})，确认路径与连接\x1b[0m\r\n`);
+      return;
+    }
+    const blob = await resp.blob();
+    if (!blob.size) { tab.term.write('\x1b[31m[display] 空文件\x1b[0m\r\n'); return; }
+    const objUrl = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const cellW = 8.4, cellH = 17; // 13px Consolas 单元格近似
+        let cols = Math.max(8, Math.round(img.width / cellW));
+        let rows = Math.max(4, Math.round(img.height / cellH));
+        const maxCols = Math.max(8, tab.term.cols - 1);
+        if (cols > maxCols) { const s = maxCols / cols; cols = maxCols; rows = Math.max(1, Math.round(rows * s)); }
+        tab.imageAddon.registerImage(img, { cols, rows });
+        tab.term.write(`\r\n\x1b[2m[display] ${img.width}×${img.height} 已显示\x1b[0m`);
+      } catch (e) {
+        tab.term.write(`\x1b[31m[display] 渲染失败: ${e.message}\x1b[0m\r\n`);
+      } finally {
+        URL.revokeObjectURL(objUrl);
+      }
+    };
+    img.onerror = () => {
+      tab.term.write('\x1b[31m[display] 无法解码(非图片格式?)\x1b[0m\r\n');
+      URL.revokeObjectURL(objUrl);
+    };
+    img.src = objUrl;
+  } catch (e) {
+    tab.term.write(`\x1b[31m[display] 错误: ${e.message}\x1b[0m\r\n`);
+  }
+}
+
 const TYPE_ICON = { ssh: '🖥️', telnet: '🔌', vnc: '🖼️', serial: '🔗' };
 const STATE_TEXT = { connecting: '连接中…', connected: '● 已连接', closed: '✕ 已断开' };
 const SENSITIVE_CONFIG_KEYS = new Set(['password', 'privateKey', 'passphrase', 'loginPass']);
@@ -892,7 +964,7 @@ function newTab(cfg, opts = {}) {
   }
   saveTabs();
 
-  term.onData((d) => safeSendInput(id, d));
+  term.onData((d) => handleUserInput(tab, d));
   term.onResize(({ cols, rows }) => send({ type: 'resize', id, cols, rows }));
 
   // 窗口尺寸变化 → 重新适配
@@ -2269,7 +2341,7 @@ function createTerminal(host, tabOrPane) {
   tabOrPane.imageAddon = imageAddon;
   setTimeout(() => fitAddon.fit(), 0);
   bindClipboard(tabOrPane);
-  term.onData((d) => safeSendInput(tabOrPane.connId, d));
+  term.onData((d) => handleUserInput(tabOrPane, d));
   term.onResize(({ cols, rows }) => send({ type: 'resize', id: tabOrPane.connId, cols, rows }));
   return { term, fitAddon, imageAddon };
 }
