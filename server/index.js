@@ -116,19 +116,31 @@ directoryDownloadCleanup.unref();
 // the loopback service.  Loopback is not an authentication boundary by itself.
 const CLIENT_TOKEN = randomBytes(32).toString('base64url');
 const PORT = parseInt(process.argv[process.argv.indexOf('--port') + 1], 10) || 8787; // P0 FIX: 移到此处供 isTrustedOrigin 使用
+const TOKEN_FILE = path.join(CONN_DIR, 'token');
+
+// CLI capability token is persisted so non-browser clients (scripts, tests) can
+// authenticate without a browser Origin.  The file is mode 0600; the desktop
+// launcher writes it once per process start.
+try {
+  fs.mkdirSync(CONN_DIR, { recursive: true });
+  fs.writeFileSync(TOKEN_FILE, CLIENT_TOKEN, { mode: 0o600 });
+} catch {}
 
 // 'wasm-unsafe-eval' is required by @xterm/addon-image: its Sixel decoder is an
 // inline WebAssembly module, and Chrome blocks WebAssembly.instantiate() under
 // a bare "script-src 'self'" policy.  'blob:' feeds the addon's Image-based
 // fallback path for iTerm2 inline images.
+// connect-src is restricted to this service's loopback WebSocket endpoints only;
+// a bare "ws:" would let injected scripts connect to arbitrary WebSocket servers.
 const STATIC_CSP = [
   "default-src 'self'",
-  "connect-src 'self' ws:",
+  "connect-src 'self' ws://127.0.0.1:" + PORT + " ws://localhost:" + PORT + " ws://[::1]:" + PORT,
   "style-src 'self' 'unsafe-inline'",
   "script-src 'self' 'wasm-unsafe-eval'",
   "img-src 'self' data: blob:",
   "object-src 'none'",
   "base-uri 'none'",
+  "frame-ancestors 'none'",
 ].join('; ');
 
 function hasClientToken(req) {
@@ -138,19 +150,32 @@ function hasClientToken(req) {
   } catch { return false; }
 }
 
+// Non-browser clients (CLI, tests) authenticate with the persisted capability
+// token via the X-SSHTERM-Token header instead of a browser Origin.
+function hasCliCapability(req) {
+  return req.headers['x-sshterm-token'] === CLIENT_TOKEN;
+}
+
 // 新增：双重来源校验 - 防止恶意网页通过 <script src="..."> 抓取 token
 // 由端口函数获取，确保与 server.listen 的端口一致
 function isTrustedOrigin(req) {
-  const origin = req.headers.origin;
-  if (!origin) return true; // 非浏览器请求(CLI)，放行
+  const source = req.headers.origin || req.headers.referer;
+  if (!source) return false; // 无来源一律拒绝；CLI 走 X-SSHTERM-Token 头
   try {
-    const u = new URL(origin);
-    const validHost = u.hostname === '127.0.0.1' || u.hostname === 'localhost';
-    // Origin port 应该匹配实际监听端口；若未指定则默认 8787
+    const u = new URL(source);
+    const validHost = u.hostname === '127.0.0.1' || u.hostname === 'localhost'
+      || u.hostname === '[::1]' || u.hostname === '::1';
+    // Origin/Referer port 应该匹配实际监听端口；若未指定则默认 80/443
     const origPort = u.port || (u.protocol === 'https:' ? '443' : '80');
-    const validPort = origPort === String(PORT);
-    return validHost && validPort;
+    return validHost && origPort === String(PORT);
   } catch { return false; }
+}
+
+// A request is trusted when it comes from a verified loopback browser origin
+// OR presents the CLI capability token.  Neither condition alone is sufficient
+// to bypass the other: origin must match loopback, and the token must match.
+function isTrustedRequest(req) {
+  return isTrustedOrigin(req) || hasCliCapability(req);
 }
 
 function isInside(root, candidate) {
@@ -424,7 +449,13 @@ loadSSHConfig();
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css',
                '.json': 'application/json', '.png': 'image/png', '.woff2': 'font/woff2' };
 const server = http.createServer((req, res) => {
-  let url = decodeURIComponent(req.url.split('?')[0]);
+  let url;
+  try {
+    url = decodeURIComponent(req.url.split('?')[0]);
+  } catch {
+    res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+    return res.end('bad request: invalid percent-encoding');
+  }
 
   // Public, read-only loopback identity used only by the desktop launcher.
   // It intentionally contains no session data or control capability.
@@ -443,14 +474,14 @@ const server = http.createServer((req, res) => {
     // cannot perform privileged actions.
     // P0 FIX: bootstrap.js 也要 Origin 校验，防止 <script src="..."> 抓取 token
     if (url === '/bootstrap.js') {
-      if (!isTrustedOrigin(req)) {
+      if (!isTrustedRequest(req)) {
         res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
         return res.end('forbidden: untrusted origin');
       }
       res.writeHead(200, { 'Content-Type': 'text/javascript', 'Cache-Control': 'no-store' });
       return res.end(`window.__SSHTERM_TOKEN=${JSON.stringify(CLIENT_TOKEN)};`);
     }
-    if (url.startsWith('/api/') && (!hasClientToken(req) || !isTrustedOrigin(req))) {
+    if (url.startsWith('/api/') && (!hasClientToken(req) || !isTrustedRequest(req))) {
         res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
         return res.end('forbidden');
       }
@@ -461,14 +492,15 @@ const server = http.createServer((req, res) => {
     const name = qs.get('file') || '';
     const safe = path.basename(name).replace(/[\\/]/g, '_');
     const fp = path.join(os.homedir(), '.sshterm', 'zmodem', safe);
-    fs.readFile(fp, (err, data) => {
-      if (err) { res.writeHead(404); return res.end('文件不存在'); }
-      res.writeHead(200, {
-        'Content-Type': 'application/octet-stream',
-        'Content-Disposition': `attachment; filename="${encodeURIComponent(safe)}"`,
-      });
-      res.end(data);
+    // 使用流式传输避免大文件占用过多内存
+    if (!fs.existsSync(fp)) { res.writeHead(404); return res.end('文件不存在'); }
+    res.writeHead(200, {
+      'Content-Type': 'application/octet-stream',
+      'Content-Disposition': `attachment; filename="${encodeURIComponent(safe)}"`,
     });
+    const stream = fs.createReadStream(fp);
+    stream.on('error', () => { try { res.end(); } catch {} });
+    stream.pipe(res);
     return;
   }
 
@@ -902,7 +934,7 @@ function rejectUpgrade(socket, status = '403 Forbidden') {
 }
 
 server.on('upgrade', (req, socket, head) => {
-  if (!hasClientToken(req) || !isTrustedOrigin(req)) return rejectUpgrade(socket);
+  if (!hasClientToken(req) || !isTrustedRequest(req)) return rejectUpgrade(socket);
   let pathname;
   try { pathname = new URL(req.url, 'http://127.0.0.1').pathname; } catch { return rejectUpgrade(socket, '400 Bad Request'); }
   const target = pathname === '/vnc' ? vncWss : (pathname === '/' ? wss : null);
@@ -965,6 +997,11 @@ function vncTargetForRequest(req) {
   const remotePort = Number(query.get('port') || 5901);
   if (!validVncHost(remoteHost)) throw new Error('VNC 主机地址无效');
   if (!Number.isInteger(remotePort) || remotePort < 1 || remotePort > 65535) throw new Error('VNC 端口无效');
+  // VNC 仅允许连接私网/环回地址, 防止 token 持有者探测公网
+  const vncIp = parseIPv4(remoteHost);
+  if (vncIp !== null && !isPrivateIPv4(remoteHost)) {
+    throw new Error('VNC 目标必须是私网/环回地址');
+  }
   return { remoteHost, remotePort };
 }
 
@@ -1018,6 +1055,52 @@ vncWss.on('connection', async (ws, req) => {
     if (ws.readyState < 2) ws.close(1008, error.message.slice(0, 120));
   }
 });
+
+function sanitizeSession(s) {
+  if (!s || typeof s !== 'object') return null;
+  const out = JSON.parse(JSON.stringify(s)); // drops hostile prototypes
+  // Whitelist of allowed top-level fields
+  const allowed = ['id', 'name', 'type', 'host', 'port', 'username', 'user', 'auth',
+    'password', 'privateKey', 'passphrase', 'loginPass', 'rememberPassword',
+    'autoLogin', 'loginUser', 'reconnect', 'sortOrder', 'proxyJump', 'readyTimeout',
+    'encoding', 'baudRate', 'dataBits', 'stopBits', 'parity', 'flowControl',
+    'tunnels', 'proxy', 'jumpAuth', 'agentForward'];
+  for (const key of Object.keys(out)) {
+    if (!allowed.includes(key)) delete out[key];
+  }
+  // Validate type
+  if (!['ssh', 'telnet', 'vnc', 'serial'].includes(out.type)) return null;
+  // Validate name
+  out.name = String(out.name || '').trim().slice(0, 120);
+  if (!out.name) return null;
+  // Validate port
+  if (out.port !== undefined) {
+    const p = Number(out.port);
+    if (!Number.isInteger(p) || p < 1 || p > 65535) out.port = (out.type === 'vnc' ? 5901 : 22);
+  }
+  // Validate host
+  if (out.host !== undefined) out.host = String(out.host || '').trim().slice(0, 253);
+  // Validate proxy
+  if (out.proxy && typeof out.proxy === 'object') {
+    const proxy = { host: String(out.proxy.host || '').trim().slice(0, 253),
+      port: Number(out.proxy.port) };
+    if (!Number.isInteger(proxy.port) || proxy.port < 1 || proxy.port > 65535) {
+      delete out.proxy;
+    } else {
+      if (typeof out.proxy.password === 'string') proxy.password = out.proxy.password.slice(0, 256);
+      out.proxy = proxy;
+    }
+  }
+  // Validate jumpAuth
+  if (out.jumpAuth && typeof out.jumpAuth === 'object') {
+    const ja = {};
+    if (typeof out.jumpAuth.password === 'string') ja.password = out.jumpAuth.password.slice(0, 256);
+    if (typeof out.jumpAuth.privateKey === 'string') ja.privateKey = out.jumpAuth.privateKey;
+    if (typeof out.jumpAuth.passphrase === 'string') ja.passphrase = out.jumpAuth.passphrase.slice(0, 256);
+    out.jumpAuth = ja;
+  }
+  return out;
+}
 
 function send(ws, obj) {
   if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
@@ -1157,7 +1240,8 @@ async function handle(ws, m) {
       break;
     }
     case 'save': {
-      const s = m.session;
+      const s = sanitizeSession(m.session);
+      if (!s) return send(ws, { type: 'error', msg: '会话数据无效' });
       if (!s.name) return send(ws, { type: 'error', msg: '会话名不能为空' });
       if (s.id && sessions[s.id]) {
         // 编辑保存: 前端表单密码框留空 = 不修改, 保留存储中的敏感字段
@@ -1288,7 +1372,11 @@ async function handle(ws, m) {
       // 支持: 192.168.1.216 | 192.168.1.0/24 | 192.168.1.1-192.168.1.254 | 192.168.1.100-200
       const { target } = m;
       if (!target) return send(ws, { type: 'error', msg: '缺少扫描目标' });
-      const ips = expandTarget(String(target).trim());
+      const trimmed = String(target).trim();
+      if (!isScanAllowed(trimmed)) {
+        return send(ws, { type: 'error', msg: '扫描目标必须是私网/网段地址' });
+      }
+      const ips = expandTarget(trimmed);
       if (ips.error) return send(ws, { type: 'error', msg: ips.error });
       if (!ips.length) return send(ws, { type: 'error', msg: '目标格式无法解析: ' + target });
       const probePorts = [22, 23, 21, 80, 443, 3389, 5555, 8080];
@@ -1331,20 +1419,31 @@ async function handle(ws, m) {
       if (!host || !Array.isArray(ports) || !ports.length) {
         return send(ws, { type: 'error', msg: '扫描参数错误' });
       }
+      // 仅允许扫描私网/环回地址
+      const targetHost = String(host).trim();
+      const targetIp = parseIPv4(targetHost);
+      if (targetIp !== null && !isPrivateIPv4(targetHost)) {
+        return send(ws, { type: 'error', msg: '扫描目标必须是私网/环回地址' });
+      }
+      // 端口去重 + 范围校验 + 数量上限
+      const uniquePorts = [...new Set(ports.map(Number))].filter(p => Number.isInteger(p) && p >= 1 && p <= 65535);
+      if (uniquePorts.length > 1024) {
+        return send(ws, { type: 'error', msg: '端口数量超过上限(1024)' });
+      }
       const net = require('net');
       const open = [];
       let idx = 0;
       const test = (port) => new Promise((resolve) => {
-        const s = net.connect({ host, port, timeout: 800 });
+        const s = net.connect({ host: targetHost, port, timeout: 800 });
         s.on('connect', () => { open.push(port); s.destroy(); resolve(); });
         s.on('error', () => resolve());
         s.on('timeout', () => { s.destroy(); resolve(); });
       });
       const workers = Array.from({ length: 20 }, async () => {
-        while (idx < ports.length) { const p = ports[idx++]; await test(p); }
+        while (idx < uniquePorts.length) { const p = uniquePorts[idx++]; await test(p); }
       });
       await Promise.all(workers);
-      send(ws, { type: 'scan', host, open: open.sort((a, b) => a - b) });
+      send(ws, { type: 'scan', host: targetHost, open: open.sort((a, b) => a - b) });
       break;
     }
     case 'cleanup': {
@@ -1604,6 +1703,33 @@ async function doConnect(ws, cfg, tabId) {
 // ---------- 启动 ----------
 // 网段解析: correct IPv4 integer expansion with a safe workload limit.
 const MAX_SCAN_HOSTS = 4096;
+
+// Scan targets are restricted to private/loopback/link-local networks and valid
+// hostnames.  A token holder must not be able to port-scan the public internet.
+function isPrivateIPv4(ip) {
+  const n = parseIPv4(ip);
+  if (n === null) return false;
+  const a = n >>> 24, b = (n >>> 16) & 255;
+  if (a === 127) return true;            // loopback
+  if (a === 10) return true;             // 10/8
+  if (a === 172 && b >= 16 && b <= 31) return true;  // 172.16/12
+  if (a === 192 && b === 168) return true;           // 192.168/16
+  if (a === 169 && b === 254) return true;           // link-local
+  if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT 100.64/10
+  return false;
+}
+
+function isScanAllowed(target) {
+  // Single IP
+  const single = parseIPv4(target);
+  if (single !== null) return isPrivateIPv4(target);
+  // CIDR or range: expand and verify every address
+  const expanded = expandTarget(target);
+  if (expanded.error) return false;
+  if (!expanded.length) return false;
+  return expanded.every(isPrivateIPv4);
+}
+
 function parseIPv4(s) {
   const p = String(s).split('.').map(Number);
   if (p.length !== 4 || p.some(n => !Number.isInteger(n) || n < 0 || n > 255)) return null;
@@ -1669,8 +1795,8 @@ server.on('error', (e) => {
 process.on('SIGINT', () => { for (const c of connections.values()) c.close(); process.exit(0); });
 // 崩溃保护: 单个请求异常不杀死整个服务端
 process.on('uncaughtException', (e) => {
-  console.error('[uncaughtException]', e.message);
-  log('error', `服务端异常: ${e.message}`);
+  console.error('[uncaughtException]', e && (e.stack || e.message));
+  log('error', `服务端异常: ${e && (e.stack || e.message)}`);
 });
 process.on('unhandledRejection', (e) => {
   console.error('[unhandledRejection]', e && e.message);

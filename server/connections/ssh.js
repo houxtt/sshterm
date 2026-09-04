@@ -60,6 +60,17 @@ function makeHostVerifier(connection, hostName) {
 function applyAuth(cfg, config) {
   const { auth = 'password', password, privateKey, passphrase } = config;
   if (auth === 'key') {
+    // Private key path whitelist: only allow files under ~/.ssh or ~/.sshterm.
+    // A token holder must not be able to read arbitrary local files as a key.
+    if (privateKey) {
+      const resolved = path.resolve(privateKey);
+      const sshDir = path.join(os.homedir(), '.ssh');
+      const sshtermDir = path.join(os.homedir(), '.sshterm');
+      const allowed = resolved === sshDir
+        || resolved.startsWith(sshDir + path.sep)
+        || resolved.startsWith(sshtermDir + path.sep);
+      if (!allowed) throw new Error('私钥路径不在允许目录内: ' + privateKey);
+    }
     cfg.privateKey = fs.readFileSync(privateKey);
     if (passphrase) cfg.passphrase = passphrase;
   } else if (auth === 'agent') {
@@ -152,7 +163,7 @@ class SSHConnection extends BaseConnection {
       if (upstream) jumpCfg.sock = await forwardThrough(upstream, hop.host, hop.port);
       const jump = new Client();
       if (jumpCredentials.auth === 'keyboard-interactive') {
-        jump.on('keyboard-interactive', (n, i, l, prompts, finish) => finish(prompts.map(() => jumpCredentials.password || '')));
+        jump.on('keyboard-interactive', (n, i, l, prompts, finish) => finish(answerInteractivePrompts(prompts, jumpCredentials.password)));
       }
       await waitReady(jump, jumpCfg);
       this.jumpClients.push(jump);
@@ -166,10 +177,10 @@ class SSHConnection extends BaseConnection {
       let connectErrorReported = false;
       if (auth === 'keyboard-interactive') {
         client.on('keyboard-interactive', (name, instructions, lang, prompts, finish) => {
-          // One password is appropriate for common OTP/password prompts.  For
-          // arbitrary MFA challenges the server will reject rather than expose
-          // the prompt content to untrusted local pages.
-          finish(prompts.map(() => password || ''));
+          // Only fill password-like prompts; for arbitrary MFA challenges send
+          // empty strings so the server rejects instead of leaking the login
+          // password to an unexpected prompt.
+          finish(answerInteractivePrompts(prompts, password));
         });
       }
       client.on('ready', () => {
@@ -244,14 +255,20 @@ class SSHConnection extends BaseConnection {
   getSftp() {
     return new Promise((resolve, reject) => {
       if (this._sftp) return resolve(this._sftp);
+      // 单飞: 并发请求共享一次子系统打开, 避免重复初始化
+      if (this._sftpPending) {
+        this._sftpPending.then(resolve, reject);
+        return;
+      }
       if (!this.client) return reject(new Error('SSH 未连接'));
-      // ssh2 的首个参数是子系统环境变量，并不能调整 SFTP 通道窗口。
-      // 文件传输吞吐由 server/sftp-transfer.js 的并发读写请求提升。
-      this.client.sftp((err, sftp) => {
-        if (err) return reject(err);
-        this._sftp = sftp;
-        resolve(sftp);
+      this._sftpPending = new Promise((res, rej) => {
+        this.client.sftp((err, sftp) => {
+          if (err) return rej(err);
+          this._sftp = sftp;
+          res(sftp);
+        });
       });
+      this._sftpPending.then(resolve, reject);
     });
   }
 
@@ -328,35 +345,20 @@ class SSHConnection extends BaseConnection {
 
   getSftpInst() { return this._sftp; }
 
-  // 获取 shell 当前目录 (通过 shell 通道发 pwd, 带标记; 终端会显示命令回显)
-  // 实现: data 只累积, 轮询解析 (避免事件回调时序问题)
+  // 获取 shell 当前目录 (通过独立 exec 通道执行 pwd, 不污染交互式 PTY)
   getShellCwd() {
-    if (!this.stream || this.state !== 'connected') return Promise.resolve(null);
-    const stream = this.stream;
-    const marker = '__SSHTERM_CWD_END__';
-    let buf = '';
-    const onData = (d) => { buf += d.toString('utf8'); };
-    stream.on('data', onData);
-    stream.write(`pwd && echo ${marker}\r\n`);
+    if (!this.client || this.state !== 'connected') return Promise.resolve(null);
     return new Promise((resolve) => {
-      const t0 = Date.now();
-      const check = () => {
-        const idx = buf.lastIndexOf(marker);
-        if (idx >= 0) {
-          stream.removeListener('data', onData);
-          // 提取绝对路径: 白名单字符 + 至少两级目录 (排除提示符 ~/xxx 的干扰)
-          const text = buf.slice(0, idx);
-          const match = text.match(/(\/[a-zA-Z0-9_\-\.\/]+)/g) || [];
-          const paths = match.filter(p => (p.match(/\//g) || []).length >= 2);
-          resolve(paths.length ? paths.reduce((a, b) => (b.length > a.length ? b : a)) : null);
-        } else if (Date.now() - t0 > 5000) {
-          stream.removeListener('data', onData);
-          resolve(null);
-        } else {
-          setTimeout(check, 50);
-        }
-      };
-      setTimeout(check, 50);
+      this.client.exec('pwd', (err, stream) => {
+        if (err) return resolve(null);
+        let out = '';
+        stream.on('data', (d) => { out += d.toString('utf8'); });
+        stream.on('close', () => {
+          const lines = out.trim().split(/\r?\n/).filter(Boolean);
+          resolve(lines.length ? lines[lines.length - 1].trim() : null);
+        });
+        stream.on('error', () => resolve(null));
+      });
     });
   }
 
@@ -553,20 +555,6 @@ class SSHConnection extends BaseConnection {
         this.resolveHostKey(false);
       } catch (e) { /* 忽略 */ }
       setTimeout(() => this._emitClose('已断开'), 50);
-    }
-
-    // ---------- ZMODEM 文件发送 ----------
-    // 通过 sz 命令发送文件到远端 (终端需要支持 ZMODEM)
-    // 用法: conn.sendZmodem(filePath) → 终端会显示文件传输进度
-    sendZmodem(filePath) {
-      if (!this.stream || this.state !== 'connected') {
-        return Promise.reject(new Error('SSH 未连接'));
-      }
-      // 发送 sz 命令，终端会自动收发 ZMODEM 协议
-      const cmd = `sz -vv "${filePath}"
-\n`;
-      this.stream.write(cmd);
-      return Promise.resolve();
     }
 
     // ---------- 远端主机状态采集 (RAM / 磁盘挂载 / CPU 负载 / 主机名) ----------

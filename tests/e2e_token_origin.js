@@ -1,9 +1,13 @@
 // P0 Token 鉴权漏洞回归测试
 // 验证: 1) 非可信 origin 无法获取 token 2) 非可信 origin 无法调用 API
+// 3) 无 Origin 的请求无法获取 token (CLI 需使用 X-SSHTERM-Token 头)
 // 用法: node tests/e2e_token_origin.js [http://127.0.0.1:PORT]
 const http = require('http');
 const https = require('https');
 const url = require('url');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 const WebSocket = require('ws');
 
 async function fetch(urlStr, options = {}) {
@@ -21,9 +25,20 @@ async function fetch(urlStr, options = {}) {
   });
 }
 
+function getCliToken() {
+  try {
+    const tokenFile = path.join(os.homedir(), '.sshterm', 'token');
+    return fs.readFileSync(tokenFile, 'utf8').trim();
+  } catch { return null; }
+}
+
 function getBootstrapToken(base) {
+  // 使用 CLI token 头获取 bootstrap.js (非浏览器客户端方式)
+  const cliToken = getCliToken();
   return new Promise((resolve, reject) => {
-    fetch(`${base}/bootstrap.js`)
+    fetch(`${base}/bootstrap.js`, {
+      headers: { 'X-SSHTERM-Token': cliToken || '' }
+    })
       .then(res => {
         const tokenMatch = res.data.match(/window\.__SSHTERM_TOKEN=([^;]+);/);
         const rawToken = tokenMatch ? tokenMatch[1].trim() : null;
@@ -78,16 +93,39 @@ async function test() {
     failed++;
   }
 
-  // Test 3: 无 origin 的请求能获取 bootstrap.js (CLI/非浏览器请求)
-  console.log('Test 3: 无 Origin 头访问 /bootstrap.js (应返回 200，CLI 请求)');
+  // Test 3: 无 Origin 且无 CLI token 的请求应返回 403 (防止跨站 <script> 抓取)
+  console.log('Test 3: 无 Origin 无 CLI token 访问 /bootstrap.js (应返回 403)');
   try {
     const res = await fetch(`${base}/bootstrap.js`);
-    if (res.status === 200 && res.data.includes('window.__SSHTERM_TOKEN=')) {
-      console.log('  ✅ 通过: 返回 200 + token\n');
+    if (res.status === 403) {
+      console.log('  ✅ 通过: 返回 403 forbidden\n');
       passed++;
     } else {
-      console.log(`  ❌ 失败: 状态 ${res.status}\n`);
+      console.log(`  ❌ 失败: 状态 ${res.status}, 应为 403\n`);
       failed++;
+    }
+  } catch (e) {
+    console.log(`  ❌ 错误: ${e.message}\n`);
+    failed++;
+  }
+
+  // Test 3b: CLI token 可获取 bootstrap.js (非浏览器客户端)
+  console.log('Test 3b: CLI token 访问 /bootstrap.js (应返回 200 + token)');
+  try {
+    const cliToken = getCliToken();
+    if (!cliToken) {
+      console.log('  ⚠️ 跳过: 无法读取 CLI token 文件\n');
+    } else {
+      const res = await fetch(`${base}/bootstrap.js`, {
+        headers: { 'X-SSHTERM-Token': cliToken }
+      });
+      if (res.status === 200 && res.data.includes('window.__SSHTERM_TOKEN=')) {
+        console.log('  ✅ 通过: 返回 200 + token\n');
+        passed++;
+      } else {
+        console.log(`  ❌ 失败: 状态 ${res.status}\n`);
+        failed++;
+      }
     }
   } catch (e) {
     console.log(`  ❌ 错误: ${e.message}\n`);

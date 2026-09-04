@@ -12,7 +12,7 @@ function hexdumpLine(data) {
   const ascii = Array.from(bytes).map(b => (b >= 0x20 && b < 0x7f) ? String.fromCharCode(b) : '.').join('');
   return `${hex.padEnd(48, ' ')} │ ${ascii}`;
 }
-const esc = (s) => s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 // FitAddon/SearchAddon 兼容: UMD 可能是 { Xxx: class } 命名空间
 const FitAddonCtor = (typeof FitAddon === 'function') ? FitAddon
@@ -367,8 +367,8 @@ function handleMsg(m) {
       const list = m.list || [];
       const tbody = $('sshcfg-list').querySelector('tbody');
       tbody.innerHTML = list.map(h => `
-        <tr style="cursor:pointer" data-name="${h.name}">
-          <td>${h.name}</td><td>${h.host}</td><td>${h.port}</td><td>${h.user}</td><td>${h.key ? '✅' : ''}</td>
+        <tr style="cursor:pointer" data-name="${esc(h.name)}">
+          <td>${esc(h.name)}</td><td>${esc(h.host)}</td><td>${esc(h.port)}</td><td>${esc(h.user)}</td><td>${h.key ? '✅' : ''}</td>
         </tr>`).join('');
       tbody.querySelectorAll('tr').forEach(tr => {
         tr.onclick = () => {
