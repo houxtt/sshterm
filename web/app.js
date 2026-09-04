@@ -564,7 +564,7 @@ function handleMsg(m) {
 // ---------- 国际化 (中/英) ----------
 const I18N = {
   zh: {
-    btn_new: '＋ 新建连接', btn_save: '💾 保存会话', btn_log: '📋 日志',
+    btn_new: '＋ 新建连接', btn_log: '📋 日志',
     btn_sftp: '📁 文件', btn_killall: '⏹ 全部关闭', btn_lang: '🌐 EN', btn_split: '⊞ 分屏',
     dl_title_new: '新建连接', dl_title_edit: '编辑会话',
     dl_conn: '连接', dl_save_conn: '保存并连接', dl_cancel: '取消',
@@ -580,7 +580,7 @@ const I18N = {
     ws_ok: '服务器已连接', ws_off: '服务器已断开', ws_init: '未连接服务器',
   },
   en: {
-    btn_new: '＋ New', btn_save: '💾 Save', btn_log: '📋 Log',
+    btn_new: '＋ New', btn_log: '📋 Log',
     btn_sftp: '📁 Files', btn_killall: '⏹ Close All', btn_lang: '🌐 中文', btn_split: '⊞ Split',
     dl_title_new: 'New Connection', dl_title_edit: 'Edit Session',
     dl_conn: 'Connect', dl_save_conn: 'Save & Connect', dl_cancel: 'Cancel',
@@ -770,7 +770,7 @@ let LANG = localStorage.getItem('sshterm.lang') || 'zh';
 function t(key) { return (I18N[LANG] && I18N[LANG][key]) || I18N.zh[key] || key; }
 function applyI18n() {
   const map = {
-    'btn-new': 'btn_new', 'btn-save': 'btn_save',
+    'btn-new': 'btn_new',
     'btn-sftp': 'btn_sftp', 'btn-killall': 'btn_killall', 'btn-split': 'btn_split',
     'side-title': 'side_title', 'btn-batch': 'side_batch',
   };
@@ -1418,7 +1418,7 @@ function renderSessionList() {
           <button title="编辑" data-act="edit">✏️</button>
           <button title="删除" data-act="del" class="danger">🗑</button>
         </span>`;
-      row.ondblclick = () => { if (!batchMode) connectTo(s); };
+      row.ondblclick = () => { if (!batchMode) openDlg(s); };
       row.addEventListener('dragstart', (e) => {
         if (batchMode || !e.target.closest('.session-drag-handle')) {
           e.preventDefault();
@@ -2852,11 +2852,6 @@ async function connectVncTab(tab) {
 // ---------- 事件绑定 ----------
 $('btn-new').onclick = () => openDlg();
 $('btn-welcome-new').onclick = () => openDlg();
-$('btn-save').onclick = () => {
-  const tab = tabs.find(t => t.id === activeTabId);
-  if (!tab) return setStatus('没有激活的连接可保存');
-  openDlg(tab.cfg);
-};
 // ---------- 更多工具下拉 (日志/语言/定时/扫描) ----------
 $('btn-more').onclick = (e) => {
   e.stopPropagation();
