@@ -714,8 +714,10 @@ const I18N = {
     f_passphrase: '密钥口令', f_proxy: '代理', f_proxy_addr: '代理地址',
     t_autologin: '自动登录', s_baud: '波特率', s_hex: 'HEX 显示/发送',
     sftp_up: '上级', sftp_upload: '上传', sftp_upload_dir: '传文件夹',
-    sftp_refresh: '刷新', sftp_close: '关闭', sftp_dl: '下载', sftp_dir_dl: '打包下载',
+    sftp_refresh: '刷新', sftp_close: '关闭', sftp_dl: '下载', sftp_dir_dl: '下载目录',
     sftp_local_dir: '📂 本地目录', sftp_download_dir: '⬇ 下载当前目录',
+    sftp_multi: '☑ 多选', sftp_multi_exit: '✕ 退出多选', sftp_select_all: '全选',
+    sftp_download_sel: '⬇ 下载选中',
     side_title: '已保存会话', side_batch: '批量', side_foot: '双击连接 · 悬停可编辑/删除',
     batch_all: '全选', batch_del: '删除选中', batch_cancel: '取消',
     close_title: '关闭会话?', close_ok: '确认关闭', welcome_p: 'SSH · Telnet · VNC · 串口 一体化连接工具',
@@ -731,8 +733,10 @@ const I18N = {
     f_passphrase: 'Passphrase', f_proxy: 'Proxy', f_proxy_addr: 'Proxy Address',
     t_autologin: 'Auto login', s_baud: 'Baud', s_hex: 'HEX mode',
     sftp_up: 'Up', sftp_upload: 'Upload', sftp_upload_dir: 'Folder',
-    sftp_refresh: 'Refresh', sftp_close: 'Close', sftp_dl: 'Download', sftp_dir_dl: 'Zip',
+    sftp_refresh: 'Refresh', sftp_close: 'Close', sftp_dl: 'Download', sftp_dir_dl: 'Download folder',
     sftp_local_dir: '📂 Local folder', sftp_download_dir: '⬇ Download here',
+    sftp_multi: '☑ Multi', sftp_multi_exit: '✕ Exit multi', sftp_select_all: 'All',
+    sftp_download_sel: '⬇ Download selected',
     side_title: 'Saved Sessions', side_batch: 'Batch', side_foot: 'Double-click to connect · hover to edit/delete',
     batch_all: 'All', batch_del: 'Delete', batch_cancel: 'Cancel',
     close_title: 'Close session?', close_ok: 'Close', welcome_p: 'SSH · Telnet · VNC · Serial all-in-one',
@@ -766,6 +770,9 @@ const DOM_TEXT_EN = {
   '未选择（下载前需指定）': 'Not selected (pick a folder before download)',
   '本地目录:': 'Local folder:',
   '下载失败': 'Download Failed',
+  '已选': 'Selected', '项 · 目录将递归下载全部文件': ' · folders download all files recursively',
+  '☑ 多选': '☑ Multi-select', '✕ 退出多选': '✕ Exit multi-select', '全选': 'Select all',
+  '⬇ 下载选中': '⬇ Download selected',
   '⬆️传': '⬆ Upload', '📂传': '📂 Upload Folder', '⏸ 暂停队列': '⏸ Pause Queue',
   'SSH · Telnet · VNC · 串口 一体化连接工具': 'SSH · Telnet · VNC · Serial all-in-one',
   '新建连接': 'New Connection', '编辑会话': 'Edit Session', '会话名称': 'Session Name',
@@ -842,6 +849,9 @@ const DOM_ATTR_EN = {
   '上传整个文件夹(含子目录)': 'Upload Folder Recursively', '刷新': 'Refresh',
   '选择下载保存的本地目录': 'Choose local folder for downloads',
   '将当前远端目录下载到本地目录': 'Download current remote folder to local directory',
+  '多选文件/目录后批量下载': 'Multi-select files/folders for batch download',
+  '全选当前目录': 'Select all in current folder',
+  '下载选中项(目录递归展开)': 'Download selected (recursive for folders)',
   '关闭面板': 'Close Panel',
   '取消当前下载': 'Cancel Current Download', '拖动调整本地与远端目录宽度': 'Drag to Resize Local and Remote Columns',
   '如: 开发板串口': 'e.g. Board Serial', '如: 开发板 / 服务器': 'e.g. Boards / Servers',
@@ -938,6 +948,8 @@ function applyI18n() {
     'sftp-up': 'sftp_up', 'sftp-upload': 'sftp_upload', 'sftp-upload-dir': 'sftp_upload_dir',
     'sftp-refresh': 'sftp_refresh', 'sftp-close': 'sftp_close',
     'sftp-pick-download-dir': 'sftp_local_dir', 'sftp-download-current-dir': 'sftp_download_dir',
+    'sftp-toggle-select': 'sftp_multi', 'sftp-select-all': 'sftp_select_all',
+    'sftp-download-selected': 'sftp_download_sel',
     'batch-del-text': 'batch_del', 'batch-cancel': 'batch_cancel',
   };
   for (const [id, key] of Object.entries(dyn)) {
@@ -1843,6 +1855,9 @@ let sftpOpen = false;
 let sftpConnId = null;
 let sftpDownloadDirHandle = null;
 let sftpPendingScan = null;
+let sftpSelectMode = false;
+let sftpSelectedItems = new Map();
+let sftpListEntries = [];
 
 function renderSftpDownloadDirLabel() {
   const label = $('sftp-download-dir-label');
@@ -2066,19 +2081,53 @@ async function downloadSftpCurrentDir() {
   if (activeDownload) return setStatus('已有下载进行中，请先完成或取消');
   const localRoot = await ensureSftpDownloadDir();
   if (!localRoot) return;
-  const remotePath = sftpPath;
-  const folderName = sftpRemoteBaseName(remotePath);
-  const task = newTransferTask('下载目录', folderName);
-  renderSftpFailures([]);
-  showProgress(`扫描远端目录: ${remotePath}`, undefined);
-  let scan;
-  try {
-    scan = await sftpScanRemoteDir(remotePath);
-  } catch (e) {
-    $('sftp-progress').classList.add('hidden');
-    updateTransferTask(task, undefined, 'failed', e.message);
-    return setStatus(`扫描失败: ${e.message}`);
+  await runSftpBatchDownload([{
+    name: sftpRemoteBaseName(sftpPath),
+    isDir: true,
+    full: sftpPath,
+  }], localRoot, '下载目录');
+}
+
+function updateSftpSelectUi() {
+  const on = sftpSelectMode;
+  $('sftp-toggle-select')?.classList.toggle('active', on);
+  if ($('sftp-toggle-select')) $('sftp-toggle-select').textContent = on ? t('sftp_multi_exit') : t('sftp_multi');
+  $('sftp-select-all')?.classList.toggle('hidden', !on);
+  $('sftp-download-selected')?.classList.toggle('hidden', !on);
+  $('sftp-select-bar')?.classList.toggle('hidden', !on);
+  $('sftp-select-count') && ($('sftp-select-count').textContent = String(sftpSelectedItems.size));
+}
+
+function toggleSftpSelectMode() {
+  sftpSelectMode = !sftpSelectMode;
+  if (!sftpSelectMode) sftpSelectedItems.clear();
+  updateSftpSelectUi();
+  if (sftpListEntries.length) renderSftpList(sftpListEntries);
+}
+
+function toggleSftpSelection(full, entry) {
+  if (sftpSelectedItems.has(full)) sftpSelectedItems.delete(full);
+  else sftpSelectedItems.set(full, { name: entry.name, isDir: entry.isDir, full });
+  updateSftpSelectUi();
+  const row = [...($('sftp-list')?.querySelectorAll('.sftp-item') || [])].find((r) => r.dataset.full === full);
+  row?.classList.toggle('selected', sftpSelectedItems.has(full));
+  const cb = row?.querySelector('.sftp-select-cb');
+  if (cb) cb.checked = sftpSelectedItems.has(full);
+  if ($('sftp-status') && sftpListEntries.length) {
+    $('sftp-status').textContent = `${sftpListEntries.length} 项 · 已选 ${sftpSelectedItems.size}`;
   }
+}
+
+function selectAllSftpEntries() {
+  for (const e of sftpListEntries) {
+    const full = sftpJoin(sftpPath, e.name);
+    sftpSelectedItems.set(full, { name: e.name, isDir: e.isDir, full });
+  }
+  updateSftpSelectUi();
+  renderSftpList(sftpListEntries);
+}
+
+function prepareMirrorFileList(scan) {
   const files = (scan.files || [])
     .filter((f) => f.name && splitRelativePath(f.name).length)
     .sort((a, b) => {
@@ -2087,94 +2136,165 @@ async function downloadSftpCurrentDir() {
       return d || String(a.name).localeCompare(String(b.name));
     });
   const skipped = (scan.skipped || 0) + ((scan.files || []).length - files.length);
-  if (!files.length) {
-    $('sftp-progress').classList.add('hidden');
-    updateTransferTask(task, undefined, 'done', skipped ? `空目录，跳过 ${skipped} 项` : '空目录');
-    return setStatus(skipped ? `目录为空或不可读 (跳过 ${skipped} 项)` : '目录为空');
+  return { files, skipped };
+}
+
+function newDownloadCtx(task, controller) {
+  return {
+    task, controller, doneFiles: 0, totalFiles: 0, loadedBytes: 0, totalBytes: 0,
+    skipped: 0, failedFiles: [], renamedFiles: [],
+  };
+}
+
+async function downloadMirrorFiles(files, targetRoot, label, ctx) {
+  ctx.totalFiles += files.length;
+  ctx.totalBytes += files.reduce((s, f) => s + (f.size || 0), 0);
+  for (const file of files) {
+    if (ctx.controller.signal.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+    const url = apiUrl('/api/sftp/download', { conn: sftpConnId, path: file.path });
+    const fileStart = ctx.loadedBytes;
+    try {
+      const { handle, localName } = await sftpLocalNestedFileHandle(targetRoot, file.name);
+      await streamDownloadToFile(url, Promise.resolve(handle), (loaded) => {
+        const overall = fileStart + loaded;
+        const pct = ctx.totalBytes > 0 ? Math.min(100, overall / ctx.totalBytes * 100) : undefined;
+        const failText = ctx.failedFiles.length ? `，失败 ${ctx.failedFiles.length}` : '';
+        const skippedText = ctx.skipped ? `，跳过 ${ctx.skipped}` : '';
+        showProgress(
+          `下载: ${label} ${ctx.doneFiles}/${ctx.totalFiles} 文件 (${fmtSize(overall)}/${fmtSize(ctx.totalBytes)}${failText}${skippedText})`,
+          pct,
+        );
+        updateTransferTask(ctx.task, pct);
+      }, 3, { controller: ctx.controller, manageActive: false });
+      ctx.loadedBytes += file.size || 0;
+      ctx.doneFiles++;
+      const baseName = file.name.split('/').pop();
+      const savedBase = localName.split('/').pop();
+      if (savedBase !== baseName) ctx.renamedFiles.push({ name: file.name, localName });
+    } catch (e) {
+      if (e.name === 'AbortError') throw e;
+      ctx.failedFiles.push({ name: `${label}/${file.name}`, error: e.message || String(e) });
+    }
   }
-  let targetRoot;
+}
+
+async function downloadRemoteDirMirror(remotePath, localRoot, subfolderName, ctx) {
+  showProgress(`扫描远端目录: ${remotePath}`, undefined);
+  const scan = await sftpScanRemoteDir(remotePath);
+  const { files, skipped } = prepareMirrorFileList(scan);
+  ctx.skipped += skipped;
+  if (!files.length) return;
+  const targetRoot = await sftpGetOrCreateDir(localRoot, subfolderName);
+  await downloadMirrorFiles(files, targetRoot, subfolderName, ctx);
+}
+
+async function downloadRemoteFileMirror(remotePath, localRoot, fileName, ctx) {
+  ctx.totalFiles += 1;
+  if (ctx.controller.signal.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
+  const url = apiUrl('/api/sftp/download', { conn: sftpConnId, path: remotePath });
   try {
-    // 在本地目录下创建 deploy/ 子目录，例如 F:\deploy\
-    targetRoot = await sftpGetOrCreateDir(localRoot, folderName);
+    const { handle, localName } = await sftpLocalNestedFileHandle(localRoot, fileName);
+    await streamDownloadToFile(url, Promise.resolve(handle), (loaded, total) => {
+      ctx.loadedBytes += loaded;
+      ctx.totalBytes += total || 0;
+      showProgress(`下载: ${fileName} ${fmtSize(loaded)}`, undefined);
+    }, 3, { controller: ctx.controller, manageActive: false });
+    ctx.doneFiles++;
+    if (localName.split('/').pop() !== fileName.split('/').pop()) {
+      ctx.renamedFiles.push({ name: fileName, localName });
+    }
   } catch (e) {
-    $('sftp-progress').classList.add('hidden');
-    updateTransferTask(task, undefined, 'failed', e.message);
-    return setStatus(`无法创建本地目录 ${folderName}: ${e.message}`);
+    if (e.name === 'AbortError') throw e;
+    ctx.failedFiles.push({ name: fileName, error: e.message || String(e) });
   }
-  const totalBytes = files.reduce((s, f) => s + (f.size || 0), 0);
-  let loadedBytes = 0;
-  let doneFiles = 0;
-  const failedFiles = [];
-  const renamedFiles = [];
+}
+
+function finalizeDownloadCtx(ctx, label) {
+  const { task, failedFiles, renamedFiles, doneFiles, totalFiles, skipped } = ctx;
+  const skippedText = skipped ? `，远端跳过 ${skipped}` : '';
+  if (failedFiles.length) {
+    const failList = formatFailedFileSummary(failedFiles);
+    const summary = `完成 ${doneFiles}/${totalFiles}，失败 ${failedFiles.length}${skippedText}`;
+    renderSftpFailures(failedFiles);
+    doneProgress(`⚠ 部分下载: ${label} (${summary})，失败: ${failList}`);
+    updateTransferTask(task, 100, 'partial', summary, failedFiles);
+    setStatus(`部分下载: 失败 ${failList}`);
+    $('sftp-status').textContent = failedFiles.map((f) => `${f.name}: ${f.error}`).join('；');
+  } else {
+    renderSftpFailures([]);
+    const renameText = renamedFiles.length ? `，${renamedFiles.length} 个已改名保存` : '';
+    doneProgress(`✅ 已下载: ${label} (${totalFiles} 文件${skippedText}${renameText})`);
+    updateTransferTask(task, 100, 'done', skipped ? `完成，跳过 ${skipped}` : '完成');
+    setStatus(`下载完成: ${label} (${totalFiles} 文件${renameText})`);
+    if (renamedFiles.length) {
+      $('sftp-status').textContent = renamedFiles.map((f) => `${f.name} → ${f.localName}`).join('；');
+    }
+  }
+}
+
+async function runSftpBatchDownload(items, localRoot, taskKind) {
+  const sorted = [...items].sort((a, b) => (b.isDir - a.isDir) || a.name.localeCompare(b.name));
+  const label = sorted.length === 1 ? sorted[0].name : `${sorted.length} 项`;
+  const task = newTransferTask(taskKind, label);
+  renderSftpFailures([]);
   const controller = new AbortController();
   activeDownload = { controller };
   const cancel = $('sftp-cancel-transfer');
   cancel.classList.remove('hidden');
   cancel.onclick = cancelActiveDownload;
+  const ctx = newDownloadCtx(task, controller);
   try {
-    for (const file of files) {
-      if (controller.signal.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
-      const url = apiUrl('/api/sftp/download', { conn: sftpConnId, path: file.path });
-      const fileStart = loadedBytes;
+    for (const item of sorted) {
       try {
-        const { handle, localName } = await sftpLocalNestedFileHandle(targetRoot, file.name);
-        await streamDownloadToFile(url, Promise.resolve(handle), (loaded, total) => {
-          const overall = fileStart + loaded;
-          const pct = totalBytes > 0 ? Math.min(100, overall / totalBytes * 100) : undefined;
-          const failText = failedFiles.length ? `，失败 ${failedFiles.length}` : '';
-          const skippedText = skipped ? `，跳过 ${skipped} 项` : '';
-          showProgress(
-            `下载: ${folderName} ${doneFiles}/${files.length} 文件 (${fmtSize(overall)}/${fmtSize(totalBytes)}${failText}${skippedText})`,
-            pct,
-          );
-          updateTransferTask(task, pct);
-        }, 3, { controller, manageActive: false });
-        loadedBytes += file.size || 0;
-        doneFiles++;
-        const baseName = file.name.split('/').pop();
-        const savedBase = localName.split('/').pop();
-        if (savedBase !== baseName) {
-          renamedFiles.push({ name: file.name, localName });
-        }
+        if (item.isDir) await downloadRemoteDirMirror(item.full, localRoot, item.name, ctx);
+        else await downloadRemoteFileMirror(item.full, localRoot, item.name, ctx);
       } catch (e) {
         if (e.name === 'AbortError') throw e;
-        failedFiles.push({ name: file.name, error: e.message || String(e) });
+        ctx.failedFiles.push({ name: item.name, error: e.message || String(e) });
       }
     }
-    const skippedText = skipped ? `，远端跳过 ${skipped} 项` : '';
-    if (failedFiles.length) {
-      const failList = formatFailedFileSummary(failedFiles);
-      const summary = `完成 ${doneFiles}/${files.length}，失败 ${failedFiles.length}${skippedText}`;
-      renderSftpFailures(failedFiles);
-      doneProgress(`⚠ 部分下载: ${folderName}/ (${summary})，失败: ${failList}`);
-      updateTransferTask(task, 100, 'partial', summary, failedFiles);
-      setStatus(`部分下载: 失败 ${failList}`);
-      $('sftp-status').textContent = failedFiles.map((f) => `${f.name}: ${f.error}`).join('；');
-    } else {
-      renderSftpFailures([]);
-      const renameText = renamedFiles.length
-        ? `，${renamedFiles.length} 个已改名保存`
-        : '';
-      doneProgress(`✅ 已下载目录到本地: ${folderName}/ (${files.length} 文件${skippedText}${renameText})`);
-      updateTransferTask(task, 100, 'done', skipped ? `完成，跳过 ${skipped} 项` : '完成');
-      setStatus(`目录已下载到本地: ${folderName}/ (${files.length} 文件${renameText})`);
-      if (renamedFiles.length) {
-        $('sftp-status').textContent = renamedFiles.map((f) => `${f.name} → ${f.localName}`).join('；');
-      }
+    if (!ctx.totalFiles) {
+      $('sftp-progress').classList.add('hidden');
+      updateTransferTask(task, undefined, 'done', ctx.skipped ? `空目录，跳过 ${ctx.skipped}` : '空目录');
+      return setStatus('所选目录为空或无可下载文件');
     }
+    finalizeDownloadCtx(ctx, label);
   } catch (err) {
     $('sftp-progress').classList.add('hidden');
     const cancelled = err && err.name === 'AbortError';
     const msg = cancelled ? '下载已取消' : (err.message || '失败');
     $('sftp-status').textContent = cancelled ? '下载已取消' : `下载失败: ${msg}`;
-    updateTransferTask(task, undefined, cancelled ? 'cancelled' : 'failed',
-      cancelled ? '已取消' : msg);
-    if (!cancelled) setStatus(`目录下载失败: ${msg}`);
+    updateTransferTask(task, undefined, cancelled ? 'cancelled' : 'failed', cancelled ? '已取消' : msg);
+    if (!cancelled) setStatus(`下载失败: ${msg}`);
   } finally {
     activeDownload = null;
     cancel.classList.add('hidden');
     cancel.onclick = null;
   }
+}
+
+async function downloadSftpSelected() {
+  if (!sftpConnId) return setStatus('请先打开文件面板');
+  if (!sftpSelectedItems.size) return setStatus('请先勾选要下载的文件或目录');
+  const localRoot = await ensureSftpDownloadDir();
+  if (!localRoot) return;
+  const items = [...sftpSelectedItems.values()];
+  await runSftpBatchDownload(items, localRoot, '下载选中');
+  sftpSelectMode = false;
+  sftpSelectedItems.clear();
+  updateSftpSelectUi();
+  if (sftpListEntries.length) renderSftpList(sftpListEntries);
+}
+
+async function downloadSftpItem(entry, fullPath) {
+  if (!sftpConnId) return setStatus('请先打开文件面板');
+  const localRoot = await ensureSftpDownloadDir();
+  if (!localRoot) return;
+  await runSftpBatchDownload([{
+    name: entry.name,
+    isDir: !!entry.isDir,
+    full: fullPath,
+  }], localRoot, '下载');
 }
 let sftpPath = '.';
 let sftpBusy = false;          // 加载锁: 防止双击/连点导致路径重复拼接
@@ -2239,174 +2359,47 @@ function sftpJoin(dir, name) {
 }
 
 function renderSftpList(entries) {
+  sftpListEntries = entries;
   const el = $('sftp-list');
   el.innerHTML = '';
-  $('sftp-status').textContent = `${entries.length} 项`;
+  const selHint = sftpSelectMode ? ` · 已选 ${sftpSelectedItems.size}` : '';
+  $('sftp-status').textContent = `${entries.length} 项${selHint}`;
   if (!entries.length) {
     el.innerHTML = '<div class="muted" style="padding:12px">(空目录)</div>';
     return;
   }
   for (const e of entries) {
+    const full = sftpJoin(sftpPath, e.name);
+    const selected = sftpSelectedItems.has(full);
     const row = document.createElement('div');
-    row.className = 'sftp-item ' + (e.isDir ? 'dir' : 'file');
+    row.className = 'sftp-item ' + (e.isDir ? 'dir' : 'file') + (selected ? ' selected' : '');
+    row.dataset.full = full;
     const size = e.isDir ? '—' : fmtSize(e.size);
     const time = new Date(e.mtime).toLocaleString('zh-CN',
       { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
     row.innerHTML = `
+      ${sftpSelectMode ? `<input type="checkbox" class="sftp-select-cb" ${selected ? 'checked' : ''}>` : ''}
       <span class="sftp-ico">${e.isDir ? '📁' : '📄'}</span>
       <span class="sftp-name" title="${esc(e.name)}">${esc(e.name)}</span>
       <span class="sftp-size">${size}</span>
       <span class="sftp-time">${time}</span>
-      ${e.isDir
-        ? '<button class="mini sftp-dl" title="打包下载整个目录 (zip)">📦</button>'
-        : '<button class="mini sftp-dl" title="下载">⬇</button>'}`;
-    row.onclick = () => {
-      if (!e.isDir) return;
-      sftpPath = sftpJoin(sftpPath, e.name);
-      sftpLoad();
-    };
-    row.querySelector('.sftp-dl')?.addEventListener('click', async (ev) => {
+      ${sftpSelectMode ? '' : '<button class="mini sftp-dl" title="' + (e.isDir ? '下载整个目录到本地' : '下载') + '">⬇</button>'}`;
+    row.querySelector('.sftp-select-cb')?.addEventListener('click', (ev) => {
       ev.stopPropagation();
-      if (activeDownload) return setStatus('已有下载进行中，请先完成或取消');
-      const full = sftpJoin(sftpPath, e.name);
-      const jobId = e.isDir ? `dir_${Date.now()}_${Math.random().toString(36).slice(2)}` : '';
-      const url = e.isDir
-        ? apiUrl('/api/sftp/download-dir', { conn: sftpConnId, path: full, job: jobId })
-        : apiUrl('/api/sftp/download', { conn: sftpConnId, path: full });
-      const dlName = e.isDir ? e.name + '.zip' : e.name;
-      const task = newTransferTask('下载', dlName);
-      showProgress(`下载: ${dlName} 准备中...`, 0);
-      let fileHandlePromise;
-      try {
-        const handle = await sftpLocalFileHandle(dlName);
-        if (!handle) {
-          updateTransferTask(task, undefined, 'cancelled', '未选择本地目录');
-          $('sftp-progress').classList.add('hidden');
-          return;
-        }
-        fileHandlePromise = Promise.resolve(handle);
-      } catch (err) {
-        $('sftp-progress').classList.add('hidden');
-        $('sftp-status').textContent = err.message;
-        updateTransferTask(task, undefined, 'failed', err.message);
+      toggleSftpSelection(full, e);
+    });
+    row.onclick = () => {
+      if (sftpSelectMode) {
+        toggleSftpSelection(full, e);
         return;
       }
-      try {
-        // ZIP 输出字节数受压缩率影响，不能拿它除以原文件总大小。轮询
-        // 服务端实际读取的远端字节数，扫描目录时也显示不定进度状态。
-        const dirDownload = async (handlePromise) => {
-          const handle = await handlePromise;
-          const writable = await handle.createWritable();
-          let committed = false;
-          const controller = new AbortController();
-          const cancel = $('sftp-cancel-transfer');
-          activeDownload = { controller };
-          cancel.classList.remove('hidden');
-          cancel.onclick = cancelActiveDownload;
-          let polling = true;
-          let progressError = null;
-          let skippedFiles = 0;
-          const progressUrl = apiUrl('/api/sftp/download-progress', {
-            conn: sftpConnId, job: jobId,
-          });
-          const applyDirectoryProgress = (progress) => {
-            skippedFiles = progress.skipped || 0;
-            const skippedText = skippedFiles ? `，跳过 ${skippedFiles} 项` : '';
-            if (progress.phase === 'scanning') {
-              showProgress(`下载: ${dlName} 正在扫描目录…`, undefined);
-            } else if (progress.total > 0) {
-              const pct = Math.min(100, progress.loaded / progress.total * 100);
-              showProgress(`下载: ${dlName} ${pct.toFixed(0)}% (${fmtSize(progress.loaded)}/${fmtSize(progress.total)}，${progress.filesDone}/${progress.filesTotal} 文件${skippedText})`, pct);
-              updateTransferTask(task, pct);
-            } else if (progress.phase === 'transferring') {
-              showProgress(`下载: ${dlName} 正在处理空目录或不可读项${skippedText}…`, undefined);
-            }
-            if (progress.phase === 'failed') {
-              progressError = new Error(progress.error || '目录下载失败');
-            }
-          };
-          const pollProgress = async () => {
-            while (polling) {
-              try {
-                const progressResp = await fetch(progressUrl, { cache: 'no-store', signal: controller.signal });
-                if (progressResp.ok) {
-                  const progress = await progressResp.json();
-                  applyDirectoryProgress(progress);
-                  if (progressError) {
-                    controller.abort();
-                    return;
-                  }
-                }
-              } catch (error) {
-                if (error.name === 'AbortError') return;
-              }
-              await new Promise(resolve => setTimeout(resolve, 250));
-            }
-          };
-          const pollingPromise = pollProgress();
-          try {
-            const resp = await fetch(url, { signal: controller.signal });
-            if (!resp.ok) throw new Error(`下载请求失败: ${resp.status}`);
-            if (!resp.body) throw new Error('浏览器不支持流式下载');
-            const reader = resp.body.getReader();
-            let outputBytes = 0;
-            while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              outputBytes += value.byteLength;
-              await writable.write(value);
-            }
-            await writable.close();
-            committed = true;
-            return { saved: true, size: outputBytes, skipped: skippedFiles };
-          } catch (error) {
-            // A destroyed chunked ZIP response is reported by fetch only as a
-            // generic network error. Query the job once more to surface the
-            // real SFTP/archive failure recorded by the server.
-            if (!progressError && error.name !== 'AbortError') {
-              try {
-                const progressResp = await fetch(progressUrl, { cache: 'no-store' });
-                if (progressResp.ok) applyDirectoryProgress(await progressResp.json());
-              } catch {}
-            }
-            if (writable && !committed) {
-              try { await writable.abort(); } catch {}
-            }
-            throw progressError || error;
-          } finally {
-            polling = false;
-            await pollingPromise;
-            activeDownload = null;
-            cancel.classList.add('hidden');
-            cancel.onclick = null;
-          }
-        };
-        const reportFileProgress = (loaded, total) => {
-          if (total > 0) {
-            showProgress(`下载: ${dlName} ${(loaded / total * 100).toFixed(0)}% (${fmtSize(loaded)}/${fmtSize(total)})`,
-              loaded / total * 100); updateTransferTask(task, loaded / total * 100);
-          } else {
-            showProgress(`下载: ${dlName} ${fmtSize(loaded)}`, undefined);
-          }
-        };
-        const download = e.isDir
-          ? dirDownload(fileHandlePromise)
-          : streamDownloadToFile(url, fileHandlePromise, reportFileProgress);
-        const result = await download;
-        if (result?.saved) {
-          const skippedText = result.skipped ? `，跳过 ${result.skipped} 项` : '';
-          doneProgress(`✅ 已下载到本地目录: ${dlName} (${fmtSize(result.size)}${skippedText})`);
-          updateTransferTask(task, 100, 'done', result.skipped ? `完成，跳过 ${result.skipped} 项` : '完成');
-        } else {
-          throw new Error('下载未完成');
-        }
-      } catch (err) {
-        $('sftp-progress').classList.add('hidden');
-        const cancelled = err && err.name === 'AbortError';
-        $('sftp-status').textContent = cancelled ? '下载已取消' : `下载失败: ${err.message}`;
-        updateTransferTask(task, undefined, cancelled ? 'cancelled' : 'failed',
-          cancelled ? '已取消' : (err.message || '失败'));
-      }
+      if (!e.isDir) return;
+      sftpPath = full;
+      sftpLoad();
+    };
+    row.querySelector('.sftp-dl')?.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      downloadSftpItem(e, full);
     });
     el.appendChild(row);
   }
@@ -3524,7 +3517,11 @@ $('openssh-import').onclick = async () => {
 $('btn-sftp').onclick = toggleSftpPanel;
 $('sftp-pick-download-dir').onclick = () => { pickSftpDownloadDir(); };
 $('sftp-download-current-dir').onclick = () => { downloadSftpCurrentDir(); };
+$('sftp-toggle-select').onclick = () => { toggleSftpSelectMode(); };
+$('sftp-select-all').onclick = () => { selectAllSftpEntries(); };
+$('sftp-download-selected').onclick = () => { downloadSftpSelected(); };
 renderSftpDownloadDirLabel();
+updateSftpSelectUi();
 $('btn-tunnel').onclick = () => {
   const tab = tabs.find(t => t.id === activeTabId);
   if (!tab || tab.cfg.type !== 'ssh') return setStatus('隧道仅适用于 SSH 会话');

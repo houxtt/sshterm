@@ -224,6 +224,7 @@ button.mini { padding: 2px 8px; font-size: 11px; }
   cursor: pointer; font-size: 12px; border-bottom: 1px solid #1f2030;
 }
 .sftp-item:hover { background: #1f2030; }
+.sftp-item.selected { background: #2a354f; box-shadow: inset 0 0 0 1px #3b82f6; }
 .sftp-item.dir .sftp-name { color: #7dcfff; }
 .sftp-ico { width: 18px; text-align: center; }
 .sftp-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #c0caf5; }
@@ -306,6 +307,10 @@ button.mini { padding: 2px 8px; font-size: 11px; }
 .sftp-failure-item:first-child { border-top:none; }
 .sftp-failure-name { color:#fecaca; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:45%; }
 .sftp-failure-error { flex:1; color:#fca5a5; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.sftp-select-bar { padding: 4px 10px; font-size: 11px; color: #a9b1d6; border-bottom: 1px solid #2a2b3a; }
+.sftp-select-bar.hidden { display: none; }
+.sftp-select-cb { flex-shrink: 0; margin: 0 4px 0 0; cursor: pointer; }
+.sftp-head .mini.active { background: #3b4261; color: #7dcfff; }
 
 #dlg-occ-mask {
   position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 115;

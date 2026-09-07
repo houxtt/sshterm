@@ -84,11 +84,15 @@
                 <button id="sftp-upload" class="mini" title="上传文件到当前目录">⬆️传</button>
                 <button id="sftp-upload-dir" class="mini" title="上传整个文件夹(含子目录)">📂传</button>
                 <button id="sftp-refresh" class="mini" title="刷新">⟳</button>
+                <button id="sftp-toggle-select" class="mini" title="多选文件/目录后批量下载">☑ 多选</button>
+                <button id="sftp-select-all" class="mini hidden" title="全选当前目录">全选</button>
+                <button id="sftp-download-selected" class="mini hidden" title="下载选中项(目录递归展开)">⬇ 下载选中</button>
                 <button id="sftp-pick-download-dir" class="mini" title="选择下载保存的本地目录">📂 本地目录</button>
                 <button id="sftp-download-current-dir" class="mini" title="将当前远端目录下载到本地目录">⬇ 下载当前目录</button>
                 <button id="sftp-close" class="mini" title="关闭面板">✕</button>
               </div>
               <div id="sftp-download-dir-hint" class="sftp-download-dir-hint muted">本地目录: <span id="sftp-download-dir-label">未选择（下载前需指定）</span></div>
+              <div id="sftp-select-bar" class="sftp-select-bar hidden">已选 <span id="sftp-select-count">0</span> 项 · 目录将递归下载全部文件</div>
         <input type="file" id="sftp-file-input" class="hidden" multiple>
         <input type="file" id="sftp-dir-input" class="hidden" webkitdirectory>
         <div id="sftp-progress" class="hidden">
