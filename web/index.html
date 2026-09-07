@@ -59,7 +59,7 @@
         <button id="batch-del" class="danger mini"><span id="batch-del-text">删除选中</span>(<span id="batch-n">0</span>)</button>
         <button id="batch-cancel" class="mini">取消</button>
       </div>
-      <div class="side-foot muted">双击编辑配置 · 或单击编辑按钮</div>
+      <div class="side-foot muted" id="side-foot">双击编辑配置 · 或单击编辑按钮</div>
     </aside>
     <div id="sidebar-divider" title="拖动调整已保存会话宽度"></div>
 
@@ -311,6 +311,18 @@
   </div>
 </div>
 
+<div id="dlg-mfa-mask" class="hidden">
+  <div id="dlg-mfa">
+    <h3>SSH 多因素认证</h3>
+    <p id="mfa-instructions" class="muted"></p>
+    <div id="mfa-prompts" class="form"></div>
+    <div class="dlg-actions">
+      <button id="btn-mfa-submit" class="primary">提交</button>
+      <button id="btn-mfa-cancel">取消</button>
+    </div>
+  </div>
+</div>
+
 <!-- 端口扫描对话框 -->
 <div id="dlg-scan-mask" class="hidden">
   <div id="dlg-scan">
@@ -424,6 +436,7 @@
 </div>
 
 <script src="/bootstrap.js"></script>
+<script src="/encoding-client.js"></script>
 <script src="/vendor/@xterm/xterm/lib/xterm.js"></script>
 <script src="/vendor/@xterm/addon-fit/lib/addon-fit.js"></script>
 <script src="/vendor/@xterm/addon-search/lib/addon-search.js"></script>

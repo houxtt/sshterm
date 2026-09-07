@@ -1,0 +1,61 @@
+[
+  {
+    "id": "SSH_PRE_READY_CLOSE",
+    "evidence": {
+      "state": "closed",
+      "promiseSettled": false
+    }
+  },
+  {
+    "id": "SSH_REMOTE_CLOSE_CLEANUP",
+    "evidence": {
+      "tunnelListenersClosed": 0
+    }
+  },
+  {
+    "id": "ZIP_SCAN_FAILURE",
+    "evidence": []
+  },
+  {
+    "id": "ZIP_MULTI_LARGE",
+    "evidence": [
+      {
+        "name": "0.bin",
+        "actualBytes": 2097152,
+        "expectedBytes": 2097152
+      },
+      {
+        "name": "1.bin",
+        "actualBytes": 2097152,
+        "expectedBytes": 2097152
+      },
+      {
+        "name": "2.bin",
+        "actualBytes": 2097152,
+        "expectedBytes": 2097152
+      }
+    ]
+  },
+  {
+    "id": "DUPLICATE_START_TOKEN",
+    "evidence": {
+      "secondExit": 1,
+      "tokenOverwritten": true,
+      "newFileTokenStatus": 403
+    }
+  },
+  {
+    "id": "HTTP_PROXY_BANNER",
+    "evidence": {
+      "received": "",
+      "expected": "SSH-2.0-audit\r\n"
+    }
+  },
+  {
+    "id": "SOCKS_IDLE",
+    "evidence": {
+      "closed": true,
+      "idleMs": 15015
+    }
+  }
+]

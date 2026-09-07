@@ -16,6 +16,68 @@ function readyTimeoutFor(config) {
     ? Math.trunc(value) : DEFAULT_READY_TIMEOUT;
 }
 
+function answerInteractivePrompts(prompts, password) {
+  return (prompts || []).map((p) => {
+    const prompt = String((p && p.prompt) || p || '');
+    if (/password|passcode|passphrase|口令|密码/i.test(prompt)) return password || '';
+    return '';
+  });
+}
+
+function promptsNeedUserInput(prompts, password) {
+  return (prompts || []).some((p) => {
+    const prompt = String((p && p.prompt) || p || '');
+    if (/password|passcode|passphrase|口令|密码/i.test(prompt)) return !password;
+    return true;
+  });
+}
+
+function attachKeyboardInteractive(client, connection, password) {
+  client.on('keyboard-interactive', (name, instructions, lang, prompts, finish) => {
+    const normalized = (prompts || []).map((p) => ({
+      prompt: String((p && p.prompt) || p || ''),
+      echo: !(p && p.echo === false),
+    }));
+    if (!promptsNeedUserInput(prompts, password)) {
+      finish(answerInteractivePrompts(prompts, password));
+      return;
+    }
+    if (connection._pendingInteractive) {
+      finish([]);
+      return;
+    }
+    connection._pendingInteractive = {
+      finish,
+      timer: setTimeout(() => {
+        if (!connection._pendingInteractive) return;
+        connection._pendingInteractive = null;
+        try { finish([]); } catch {}
+        connection._emitError('MFA 验证超时');
+      }, 120000),
+    };
+    connection.emit('interactive-auth', {
+      name: String(name || ''),
+      instructions: String(instructions || ''),
+      prompts: normalized,
+    });
+  });
+}
+
+function keepaliveOpts() {
+  // ssh2 keepalive is GLOBAL_REQUEST keepalive@openssh.com with wantReply.
+  // BusyBox/old dropbear/network-gear sshd often ignore it. countMax=3 then
+  // looks like a dead peer after ~45s idle even though TCP is fine. Tolerate
+  // many unanswered SSH keepalives; TCP keepalive still refreshes NAT.
+  return { keepaliveInterval: 20000, keepaliveCountMax: 12 };
+}
+
+function armSocketKeepalive(client) {
+  const sock = client && client._sock;
+  if (sock && !sock.destroyed && typeof sock.setKeepAlive === 'function') {
+    try { sock.setKeepAlive(true, 10000); } catch {}
+  }
+}
+
 function connectionErrorMessage(error, timeout) {
   if (error && error.level === 'client-timeout') {
     return `SSH 服务端未发送握手信息（TCP 已连接，等待 ${Math.round(timeout / 1000)} 秒超时）。`
@@ -122,8 +184,7 @@ class SSHConnection extends BaseConnection {
     const readyTimeout = readyTimeoutFor(this.config);
     const cfg = {
       host, port, username, readyTimeout,
-      keepaliveInterval: 15000,   // 15 秒心跳, 防空闲断链(网络设备 idle timeout)
-      keepaliveCountMax: 3,       // 连续 3 次无响应才判定连接死亡
+      ...keepaliveOpts(),
     };
     cfg.hostVerifier = makeHostVerifier(this, `${host}:${port}`);
 
@@ -158,7 +219,7 @@ class SSHConnection extends BaseConnection {
       // in ProxyJump remains the highest-priority username.
       const jumpCredentials = jumpAuth ? { ...this.config, ...jumpAuth } : this.config;
       const jumpCfg = { host: hop.host, port: hop.port, username: hop.username || jumpAuth?.username || username, readyTimeout,
-        keepaliveInterval: 15000, keepaliveCountMax: 3, hostVerifier: makeHostVerifier(this, `${hop.host}:${hop.port}`) };
+        ...keepaliveOpts(), hostVerifier: makeHostVerifier(this, `${hop.host}:${hop.port}`) };
       applyAuth(jumpCfg, jumpCredentials);
       if (upstream) jumpCfg.sock = await forwardThrough(upstream, hop.host, hop.port);
       const jump = new Client();
@@ -166,6 +227,7 @@ class SSHConnection extends BaseConnection {
         jump.on('keyboard-interactive', (n, i, l, prompts, finish) => finish(answerInteractivePrompts(prompts, jumpCredentials.password)));
       }
       await waitReady(jump, jumpCfg);
+      armSocketKeepalive(jump);
       this.jumpClients.push(jump);
       upstream = jump;
     }
@@ -175,32 +237,31 @@ class SSHConnection extends BaseConnection {
       const client = new Client();
       this.client = client;
       let connectErrorReported = false;
+      let settled = false;
+      const finish = (fn) => { if (settled) return; settled = true; fn(); };
       if (auth === 'keyboard-interactive') {
-        client.on('keyboard-interactive', (name, instructions, lang, prompts, finish) => {
-          // Only fill password-like prompts; for arbitrary MFA challenges send
-          // empty strings so the server rejects instead of leaking the login
-          // password to an unexpected prompt.
-          finish(answerInteractivePrompts(prompts, password));
-        });
+        attachKeyboardInteractive(client, this, password);
       }
       client.on('ready', () => {
+        armSocketKeepalive(client);
         // The browser commonly sends its fitted size while SSH is still
         // authenticating.  Use the cached value when allocating the PTY so
         // progress displays do not start at the obsolete 120x32 fallback.
         client.shell(this._shellOptions(), (err, stream) => {
-          if (err) { this._emitError(`shell: ${err.message}`); return reject(err); }
+          if (err) { this._emitError(`shell: ${err.message}`); return finish(() => reject(err)); }
           this.stream = stream;
           this.state = 'connected';
           stream.on('data', (d) => {
+            this._trackOsc7Cwd(d);
             this._emitData(d);
           });
           stream.on('close', () => {
             this._emitClose('SSH 会话已关闭');
-            client.end();
+            this._disposeResources();
           });
           stream.on('error', (e) => this._emitError(e.message));
           this.emit('open');
-          resolve();
+          finish(() => resolve());
         });
       });
       client.on('error', (e) => {
@@ -217,20 +278,21 @@ class SSHConnection extends BaseConnection {
         if (this.state !== 'connected' && connectErrorReported) return;
         if (this.state !== 'connected') connectErrorReported = true;
         this._emitError(msg);
-        if (this.state !== 'connected') reject(e);
+        if (this.state !== 'connected') finish(() => reject(e));
       });
       client.on('close', (hadError) => {
         if (this.state === 'closing') {
-          const error = new Error('SSH 连接已取消');
-          error.code = 'SSH_CONNECT_CANCELLED';
-          reject(error);
+          finish(() => reject(Object.assign(new Error('SSH 连接已取消'), { code: 'SSH_CONNECT_CANCELLED' })));
           return;
         }
-        // 连接建立后 client 关闭: 报告具体原因
         if (this.state === 'connected' || this.state === 'connecting') {
           this._emitClose(hadError
             ? `SSH 连接异常中断(网络问题)`
             : 'SSH 连接已关闭(远端)');
+          if (this.state !== 'connected') {
+            finish(() => reject(new Error(hadError ? 'SSH 连接异常中断(网络问题)' : 'SSH 连接已关闭(远端)')));
+          }
+          this._disposeResources();
         }
       });
       client.connect(cfg);
@@ -251,6 +313,26 @@ class SSHConnection extends BaseConnection {
     return true;
   }
 
+  submitInteractiveAuth(responses) {
+    const pending = this._pendingInteractive;
+    if (!pending) return false;
+    clearTimeout(pending.timer);
+    this._pendingInteractive = null;
+    try {
+      pending.finish(Array.isArray(responses) ? responses.map(v => String(v ?? '')) : []);
+    } catch {}
+    return true;
+  }
+
+  cancelInteractiveAuth() {
+    const pending = this._pendingInteractive;
+    if (!pending) return false;
+    clearTimeout(pending.timer);
+    this._pendingInteractive = null;
+    try { pending.finish([]); } catch {}
+    return true;
+  }
+
   // ---------- SFTP 文件访问 (独立子系统, 与 shell 通道共存) ----------
   getSftp() {
     return new Promise((resolve, reject) => {
@@ -263,12 +345,18 @@ class SSHConnection extends BaseConnection {
       if (!this.client) return reject(new Error('SSH 未连接'));
       this._sftpPending = new Promise((res, rej) => {
         this.client.sftp((err, sftp) => {
-          if (err) return rej(err);
-          this._sftp = sftp;
-          res(sftp);
+          queueMicrotask(() => {
+            if (err) return rej(err);
+            this._sftp = sftp;
+            const clear = () => { if (this._sftp === sftp) this._sftp = null; };
+            sftp.once('close', clear);
+            sftp.once('end', clear);
+            res(sftp);
+          });
         });
       });
-      this._sftpPending.then(resolve, reject);
+      const pending = this._sftpPending;
+      pending.finally(() => { if (this._sftpPending === pending) this._sftpPending = null; }).then(resolve, reject);
     });
   }
 
@@ -302,29 +390,36 @@ class SSHConnection extends BaseConnection {
   async sftpCollectFiles(dir, base = '', limit = 4) {
     const sftp = await this.getSftp();
     const files = [];
+    const emptyDirs = [];
+    const skipped = [];
     const seen = new Set([dir]);
-    const stack = [{ dir, base }];
+    const stack = [{ dir, base, isRoot: true }];
     const readdirWithTimeout = (d, ms = 30000) => new Promise((resolve) => {
       let done = false;
-      const timer = setTimeout(() => { if (!done) { done = true; resolve(null); } }, ms);
+      const timer = setTimeout(() => { if (!done) { done = true; resolve({ err: new Error('readdir timeout') }); } }, ms);
       sftp.readdir(d, (err, list) => {
         if (done) return;
         done = true;
         clearTimeout(timer);
-        resolve(err ? null : list);
+        resolve(err ? { err } : { list });
       });
     });
     while (stack.length) {
       const batch = stack.splice(0, limit * 8);
       const results = await Promise.all(batch.map(async (item) => {
         const entries = await readdirWithTimeout(item.dir);
-        if (!entries) return null;                 // 无法读取/超时的目录跳过
+        if (entries.err || !entries.list) {
+          if (item.isRoot) throw entries.err || new Error(`无法读取目录 ${item.dir}`);
+          skipped.push({ dir: item.dir, reason: entries.err ? entries.err.message : 'readdir failed' });
+          return null;
+        }
         const sub = { files: [], dirs: [] };
-        for (const e of entries) {
+        if (!entries.list.length) emptyDirs.push(item.base || '.');
+        for (const e of entries.list) {
           const full = item.dir.endsWith('/') ? item.dir + e.filename : `${item.dir}/${e.filename}`;
           const name = item.base ? `${item.base}/${e.filename}` : e.filename;
           if (e.attrs.isDirectory()) {
-            if (!seen.has(full)) { seen.add(full); sub.dirs.push({ dir: full, base: name }); }
+            if (!seen.has(full)) { seen.add(full); sub.dirs.push({ dir: full, base: name, isRoot: false }); }
           } else {
             sub.files.push({
               path: full, name, size: e.attrs.size,
@@ -340,13 +435,14 @@ class SSHConnection extends BaseConnection {
         stack.push(...r.dirs);
       }
     }
-    return files;
+    return { files, emptyDirs, skipped };
   }
 
   getSftpInst() { return this._sftp; }
 
   // 获取 shell 当前目录 (通过独立 exec 通道执行 pwd, 不污染交互式 PTY)
   getShellCwd() {
+    if (this._shellCwd) return Promise.resolve(this._shellCwd);
     if (!this.client || this.state !== 'connected') return Promise.resolve(null);
     return new Promise((resolve) => {
       this.client.exec('pwd', (err, stream) => {
@@ -375,13 +471,41 @@ class SSHConnection extends BaseConnection {
   get tunnels() { return this._tunnels || (this._tunnels = new Map()); }
   _pipeTunnel(tunnel, socket, stream) {
     tunnel.connections++;
+    if (!tunnel.active) tunnel.active = new Set();
+    tunnel.active.add(socket);
+    tunnel.active.add(stream);
     const count = (field) => chunk => { tunnel[field] += chunk.length; };
     socket.on('data', count('txBytes'));
     stream.on('data', count('rxBytes'));
-    const done = () => { tunnel.connections = Math.max(0, tunnel.connections - 1); };
+    let closed = false;
+    const done = () => {
+      if (closed) return;
+      closed = true;
+      tunnel.connections = Math.max(0, tunnel.connections - 1);
+      tunnel.active.delete(socket);
+      tunnel.active.delete(stream);
+    };
     socket.once('close', done);
     stream.once('close', done);
     socket.pipe(stream).pipe(socket);
+  }
+
+  _ensureRemoteTunnelDispatcher() {
+    if (this._remoteTunnelDispatcher || !this.client) return;
+    this._remoteTunnelDispatcher = (info, accept, reject) => {
+      for (const tunnel of this.tunnels.values()) {
+        if (tunnel.type !== 'remote' || info.destPort !== tunnel.remotePort) continue;
+        const socket = net.connect({ host: '127.0.0.1', port: tunnel.localPort });
+        socket.once('error', () => { try { reject(); } catch {} });
+        socket.once('connect', () => {
+          const stream = accept();
+          this._pipeTunnel(tunnel, socket, stream);
+        });
+        return;
+      }
+      try { reject(); } catch {}
+    };
+    this.client.on('tcp connection', this._remoteTunnelDispatcher);
   }
 
   async addTunnel({ type = 'local', localPort, remoteHost, remotePort }) {
@@ -398,17 +522,8 @@ class SSHConnection extends BaseConnection {
       // inbound channel is connected to local 127.0.0.1:port. Never bind an
       // unintended LAN interface on the client.
       await new Promise((resolve, reject) => this.client.forwardIn('127.0.0.1', targetPort, err => err ? reject(err) : resolve()));
-      const handler = (info, accept, reject) => {
-        if (info.destPort !== targetPort) return reject();
-        const socket = net.connect({ host: '127.0.0.1', port });
-        socket.once('error', () => { try { reject(); } catch {} });
-        socket.once('connect', () => {
-          const stream = accept();
-          this._pipeTunnel(tunnel, socket, stream);
-        });
-      };
-      this.client.on('tcp connection', handler);
-      const tunnel = { id, type, localPort: port, remoteHost: '127.0.0.1', remotePort: targetPort, handler, state: 'active', createdAt: Date.now(), rxBytes: 0, txBytes: 0, connections: 0, lastError: '' };
+      this._ensureRemoteTunnelDispatcher();
+      const tunnel = { id, type, localPort: port, remoteHost: '127.0.0.1', remotePort: targetPort, state: 'active', createdAt: Date.now(), rxBytes: 0, txBytes: 0, connections: 0, lastError: '', active: new Set() };
       this.tunnels.set(id, tunnel);
       return { id, type, localPort: port, remoteHost: '127.0.0.1', remotePort: targetPort };
     }
@@ -417,7 +532,7 @@ class SSHConnection extends BaseConnection {
       // RFC 1928 CONNECT-only SOCKS5 proxy.  It deliberately listens only on
       // loopback, exposes no UDP/BIND modes, and forwards each approved TCP
       // stream through the already authenticated SSH connection.
-      const tunnel = { id, type, localPort: port, remoteHost: 'SOCKS5', remotePort: 0, server: null, state: 'active', createdAt: Date.now(), rxBytes: 0, txBytes: 0, connections: 0, lastError: '' };
+      const tunnel = { id, type, localPort: port, remoteHost: 'SOCKS5', remotePort: 0, server: null, state: 'active', createdAt: Date.now(), rxBytes: 0, txBytes: 0, connections: 0, lastError: '', active: new Set() };
       await new Promise((resolve, reject) => {
         const server = net.createServer(socket => {
           let buffer = Buffer.alloc(0);
@@ -438,14 +553,14 @@ class SSHConnection extends BaseConnection {
             const [ver, cmd, , atyp] = buffer;
             if (ver !== 0x05 || cmd !== 0x01) return fail();
             let host, portOffset;
-            if (atyp === 0x01) { // IPv4
+            if (atyp === 0x01) {
               if (buffer.length < 10) return;
               host = [...buffer.subarray(4, 8)].join('.'); portOffset = 8;
-            } else if (atyp === 0x03) { // domain
+            } else if (atyp === 0x03) {
               const len = buffer[4];
               if (!len || buffer.length < 7 + len) return;
               host = buffer.subarray(5, 5 + len).toString('utf8'); portOffset = 5 + len;
-            } else if (atyp === 0x04) { // IPv6
+            } else if (atyp === 0x04) {
               if (buffer.length < 22) return;
               const groups = []; for (let i = 4; i < 20; i += 2) groups.push(buffer.readUInt16BE(i).toString(16));
               host = groups.join(':'); portOffset = 20;
@@ -454,6 +569,7 @@ class SSHConnection extends BaseConnection {
             if (!host || !dstPort || host.length > 253) return fail();
             const rest = buffer.subarray(portOffset + 2);
             socket.removeListener('data', onData);
+            socket.setTimeout(0);
             this.client.forwardOut(socket.remoteAddress || '127.0.0.1', socket.remotePort || 0, host, dstPort, (err, stream) => {
               if (err) return fail();
               socket.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
@@ -476,7 +592,7 @@ class SSHConnection extends BaseConnection {
       return { id, type, localPort: port, remoteHost: 'SOCKS5', remotePort: 0 };
     }
     if (type !== 'local') throw new Error('未知隧道类型');
-    const tunnel = { id, type, localPort: port, remoteHost, remotePort: targetPort, server: null, state: 'active', createdAt: Date.now(), rxBytes: 0, txBytes: 0, connections: 0, lastError: '' };
+    const tunnel = { id, type, localPort: port, remoteHost, remotePort: targetPort, server: null, state: 'active', createdAt: Date.now(), rxBytes: 0, txBytes: 0, connections: 0, lastError: '', active: new Set() };
     await new Promise((resolve, reject) => {
       const server = net.createServer(socket => {
         this.client.forwardOut(socket.remoteAddress || '127.0.0.1', socket.remotePort || 0, remoteHost, targetPort, (err, stream) => {
@@ -500,13 +616,18 @@ class SSHConnection extends BaseConnection {
     const t = this.tunnels.get(id);
     if (!t) return false;
     try {
-      if (t.handler) {
+      if (t.type === 'remote' && this.client && this._remoteTunnelDispatcher) {
         this.client.unforwardIn('127.0.0.1', t.remotePort, () => {});
-        this.client.removeListener('tcp connection', t.handler);
       } else if (t.server) {
         t.server.close();
       }
-      if (t._remoteStream) t._remoteStream.end();
+      if (t.active) {
+        for (const s of t.active) {
+          try { s.destroy ? s.destroy() : s.end(); } catch {}
+        }
+        t.active.clear();
+      }
+      t.state = 'closed';
     } catch {}
     this.tunnels.delete(id);
     return true;
@@ -521,41 +642,47 @@ class SSHConnection extends BaseConnection {
     }));
   }
 
-  close() {
-      if (this.state === 'closed') return;
-      const wasConnected = this.state === 'connected';
-      this.state = 'closing';
-      try {
-        // 关闭所有隧道
-        if (this._tunnels) {
-          for (const t of this._tunnels.values()) {
-            try {
-              if (t.handler) {
-                this.client.unforwardIn('127.0.0.1', t.remotePort, () => {});
-                this.client.removeListener('tcp connection', t.handler);
-              } else if (t.server) {
-                t.server.close();
+  _disposeResources() {
+    if (this._disposed) return;
+    this._disposed = true;
+    try {
+      if (this._tunnels) {
+        for (const t of this._tunnels.values()) {
+          try {
+            if (t.type === 'remote' && this.client && this._remoteTunnelDispatcher) {
+              this.client.unforwardIn('127.0.0.1', t.remotePort, () => {});
+            } else if (t.server) {
+              t.server.close();
+            }
+            if (t.active) {
+              for (const s of t.active) {
+                try { s.destroy ? s.destroy() : s.end(); } catch {}
               }
-            } catch {}
-            try { if (t._remoteStream) t._remoteStream.end(); } catch {}
-          }
-          this._tunnels = new Map();
+            }
+          } catch {}
         }
-        if (this._sftp) { this._sftp.end(); this._sftp = null; }
-        if (this.stream) { this.stream.end(); this.stream = null; }
-      // During the pre-auth handshake `end()` attempts to send an SSH
-      // disconnect packet that cannot be encoded yet.  destroy() is the only
-      // reliable way to cancel immediately and release the server's pre-auth
-      // slot.
-      if (this.client) {
-        if (wasConnected) this.client.end();
-        else forceDestroyClient(this.client);
+        this._tunnels = new Map();
       }
-        for (const jump of this.jumpClients || []) { try { jump.end(); } catch {} }
-        this.resolveHostKey(false);
-      } catch (e) { /* 忽略 */ }
-      setTimeout(() => this._emitClose('已断开'), 50);
-    }
+      if (this._remoteTunnelDispatcher && this.client) {
+        this.client.removeListener('tcp connection', this._remoteTunnelDispatcher);
+        this._remoteTunnelDispatcher = null;
+      }
+      if (this._sftp) { this._sftp.end(); this._sftp = null; }
+      if (this.stream) { this.stream.end(); this.stream = null; }
+      if (this.client) forceDestroyClient(this.client);
+      for (const jump of this.jumpClients || []) { try { jump.end(); } catch {} }
+      this.jumpClients = [];
+      this.resolveHostKey(false);
+    } catch (e) { /* 忽略 */ }
+  }
+
+  close() {
+    if (this.state === 'closing' && this._disposed) return;
+    const wasConnected = this.state === 'connected';
+    this.state = 'closing';
+    this._disposeResources();
+    setTimeout(() => this._emitClose('已断开'), 50);
+  }
 
     // ---------- 远端主机状态采集 (RAM / 磁盘挂载 / CPU 负载 / 主机名) ----------
     // 通过 exec 通道执行只读命令, 解析 free/df/loadavg/hostname; 不污染 shell 通道
@@ -564,6 +691,44 @@ class SSHConnection extends BaseConnection {
       if (!this.client || this.state !== 'connected') {
         return Promise.reject(new Error('SSH 未连接'));
       }
+      if (this._hostStatsPending) return this._hostStatsPending;
+      this._hostStatsPending = this._collectHostStats().finally(() => { this._hostStatsPending = null; });
+      return this._hostStatsPending;
+    }
+
+    _joinRemote(_sftp, oldPath, name) {
+      const n = String(name || '');
+      if (!n || n === '.' || n === '..' || /[\\/]/.test(n)) throw new Error('名称无效');
+      const trimmed = String(oldPath || '').replace(/\/+$/, '');
+      const parent = trimmed.includes('/') ? trimmed.replace(/[^/]+$/, '') : '/';
+      const dir = parent.endsWith('/') ? parent : `${parent}/`;
+      return `${dir}${n}`.replace(/\/{2,}/g, '/');
+    }
+
+    _trackOsc7Cwd(chunk) {
+      try {
+        const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+        this._osc7Remain = Buffer.concat([this._osc7Remain || Buffer.alloc(0), data]);
+        if (this._osc7Remain.length > 4096) this._osc7Remain = this._osc7Remain.subarray(-2048);
+        const text = this._osc7Remain.toString('latin1');
+        const re = /\x1b\]7;([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
+        let m;
+        let last = 0;
+        while ((m = re.exec(text))) {
+          last = m.index + m[0].length;
+          const payload = m[1] || '';
+          const pathPart = payload.replace(/^file:\/\/[^/]*/, '');
+          if (!pathPart) continue;
+          try {
+            const decoded = decodeURIComponent(pathPart);
+            if (decoded.startsWith('/')) this._shellCwd = decoded;
+          } catch { /* ignore malformed percent-encoding */ }
+        }
+        this._osc7Remain = Buffer.from(text.slice(last), 'latin1');
+      } catch { /* directory tracking must never break the shell stream */ }
+    }
+
+    _collectHostStats() {
       // 单条命令尽量兼容主流 Linux/macOS (BusyBox 也基本支持)
       const script = [
         'echo __SSHTERM_STATS_START__',
@@ -590,7 +755,10 @@ class SSHConnection extends BaseConnection {
             if (e) return reject(e);
             resolve(data);
           };
-          const timer = setTimeout(() => finish(new Error('采集主机状态超时')), 8000);
+          const timer = setTimeout(() => {
+            try { stream.destroy(); } catch {}
+            finish(new Error('采集主机状态超时'));
+          }, 8000);
           stream.on('data', (d) => { buf += d.toString('utf8'); });
           stream.stderr.on('data', () => {});
           stream.on('close', () => {

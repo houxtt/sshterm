@@ -1,0 +1,59 @@
+{
+  "date": "2026-09-07",
+  "baseCommit": "16d3c48ec0733dc5b4932d9aacb13f287e0038ac",
+  "scope": "Working tree including existing uncommitted edits",
+  "files": [
+    {
+      "file": "package.json",
+      "sha256": "4117282ece76639d26ba7130993a6d092bcff84bd2b786be27280a03bbf8b376"
+    },
+    {
+      "file": "package-lock.json",
+      "sha256": "49d44c1bb76eb8aa2f77502095ebfe5bd0a33f8c02c6530e3db28a89aa8c8f51"
+    },
+    {
+      "file": "server/index.js",
+      "sha256": "bc427b647d7d1e1e4f5d9fa2151d6b156d77c13a42573ce2c6ad5bf3c17c2f0b"
+    },
+    {
+      "file": "server/encoding.js",
+      "sha256": "6b4edd582407b39e381108fc5d0a8ae888d8844164e93950d7e511b2dba5340c"
+    },
+    {
+      "file": "server/connections/ssh.js",
+      "sha256": "05e10418a3a0d00838ece136dcdb495f9012f90c1ce55597887d69f07353af2f"
+    },
+    {
+      "file": "server/connections/telnet.js",
+      "sha256": "d018ba9f3c6b36bb7288031baa3a857884c7bfd55082310671e78e48673758d3"
+    },
+    {
+      "file": "server/connections/serial.js",
+      "sha256": "b0d6e6c0fcb45e2d06a915de46b38a92f5de376f0ddeee249155aedcaa70b7a9"
+    },
+    {
+      "file": "server/connections/proxy.js",
+      "sha256": "a82542d30dad2b451ed68755fd9af7c20d69d846bf1b1cc308e3b00671d73c6a"
+    },
+    {
+      "file": "server/sftp-transfer.js",
+      "sha256": "4da5eea1f7e7e4a18719233125a69d3e37c22311d2ad9bc543b9002d3f72963a"
+    },
+    {
+      "file": "server/session-backup.js",
+      "sha256": "e8210edc46b2c9acabedfbdaf7fc053231de85897bfbfc28cfecd43da7dd26ed"
+    },
+    {
+      "file": "server/dpapi.js",
+      "sha256": "9b919618a3847409f7ffb452ea5740d214236beef8174ed8e4ff5f3f5d7ccdbc"
+    },
+    {
+      "file": "web/app.js",
+      "sha256": "6c9b6501c7cadc2621ddd169653ddefea3147610961e003e91cd4880303ae52a"
+    },
+    {
+      "file": "web/index.html",
+      "sha256": "947646aec336b538436be4d0f2306de6d039cc21d0ef6bc73bca4fc126e4a3af"
+    }
+  ]
+}

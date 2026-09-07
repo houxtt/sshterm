@@ -16,9 +16,14 @@ const TARGET = path.join(OUT, 'sshterm.exe');
 
 console.log('┌─ sshterm EXE 构建 ───────────────────┐');
 
-// 1. 检查 caxa
-try { execSync('npx caxa --version', { stdio: 'pipe' }); console.log('│ caxa: ✓'); }
-catch { console.log('│ caxa: 安装中…'); execSync('npm install -g caxa', { stdio: 'inherit' }); }
+// 1. 检查 caxa (优先使用项目 devDependency)
+try {
+  execSync('npx caxa --version', { stdio: 'pipe', cwd: ROOT });
+  console.log('│ caxa: ✓');
+} catch {
+  console.log('│ caxa: 安装中…');
+  execSync('npm install --no-save caxa@3.0.0', { stdio: 'inherit', cwd: ROOT });
+}
 
 // 2. 确保 dist/
 mkdirSync(OUT, { recursive: true });
@@ -27,9 +32,21 @@ mkdirSync(OUT, { recursive: true });
 const EXCLUDE = [
   '.git', 'tests', 'perf-proto', 'dist', 'assets',
   'node_modules/.cache', '*.log', 'scripts',
-  '*.bat', '*.vbs', '*.ps1', 'README.md', 'package-lock.json'
+  '*.bat', '*.vbs', 'README.md', 'package-lock.json'
 ];
 const excludeArgs = EXCLUDE.map(e => ` --exclude "${e}"`).join('');
+
+// 5. 验证运行时资源 (串口释放脚本必须包含在产物中)
+function assertRuntimeResources() {
+  const required = [
+    path.join(ROOT, 'server', 'free-serial.ps1'),
+    path.join(ROOT, 'server', 'index.js'),
+  ];
+  for (const file of required) {
+    if (!existsSync(file)) throw new Error(`缺少运行时资源: ${file}`);
+  }
+}
+assertRuntimeResources();
 
 // 4. 构建 (不传 --no-open, 双击自动开浏览器; 对方如需静默可加 --no-open)
 console.log(`│ 输出: ${TARGET}`);

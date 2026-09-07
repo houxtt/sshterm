@@ -22,7 +22,7 @@ if not exist node_modules (
 )
 
 rem 3. already running?
-curl -s -o nul -m 2 http://127.0.0.1:8787/ >nul 2>nul
+curl -s -m 2 http://127.0.0.1:8787/launcher-info 2>nul | findstr /C:"sshterm" >nul
 if not errorlevel 1 (
     start http://127.0.0.1:8787
     exit /b 0

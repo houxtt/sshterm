@@ -84,6 +84,7 @@ function handshakeSocks5(sock, target, cfg) {
           if (addressLength < 0 || buf.length < frameLength) return;
           const status = buf[1]; buf = buf.subarray(frameLength);
           if (status !== 0x00) return fail(new Error(`SOCKS5 连接失败 code=${status}`));
+          if (buf.length) sock.unshift(buf);
           return succeed();
         }
       }
@@ -94,26 +95,45 @@ function handshakeSocks5(sock, target, cfg) {
   });
 }
 
-// HTTP CONNECT 握手
+// HTTP CONNECT 握手 — 保留头后粘包的 SSH banner 等数据
 function handshakeHttp(sock, target, cfg) {
   return new Promise((resolve, reject) => {
-    let buf = '';
+    let buf = Buffer.alloc(0);
+    let settled = false;
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      sock.removeListener('data', onData);
+      reject(error);
+    };
+    const succeed = (rest) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      sock.removeListener('data', onData);
+      if (rest && rest.length) {
+        sock.unshift(rest);
+        if (typeof sock.readableFlowing === 'boolean' && sock.readableFlowing === false) sock.resume();
+      }
+      resolve();
+    };
     const auth = (cfg.username && cfg.password)
       ? 'Proxy-Authorization: Basic ' + Buffer.from(`${cfg.username}:${cfg.password}`).toString('base64') + '\r\n'
       : '';
     sock.write(`CONNECT ${target.host}:${target.port} HTTP/1.1\r\nHost: ${target.host}:${target.port}\r\n${auth}\r\n`);
     const onData = (d) => {
-      buf += d.toString('latin1');
-      if (buf.includes('\r\n\r\n')) {
-        sock.removeListener('data', onData);
-        const status = buf.match(/HTTP\/1\.[01] (\d+)/);
-        if (status && status[1] === '200') resolve();
-        else reject(new Error(`HTTP CONNECT 失败: ${buf.split('\r\n')[0]}`));
-      }
+      buf = Buffer.concat([buf, d]);
+      const marker = buf.indexOf('\r\n\r\n');
+      if (marker < 0) return;
+      const header = buf.subarray(0, marker).toString('latin1');
+      const status = header.match(/HTTP\/1\.[01] (\d+)/);
+      if (status && status[1] === '200') succeed(buf.subarray(marker + 4));
+      else fail(new Error(`HTTP CONNECT 失败: ${header.split('\r\n')[0]}`));
     };
     sock.on('data', onData);
-    setTimeout(() => { reject(new Error('HTTP CONNECT 超时')); }, 10000);
+    const timer = setTimeout(() => fail(new Error('HTTP CONNECT 超时')), 10000);
   });
 }
 
-module.exports = { connectProxy };
+module.exports = { connectProxy, handshakeHttp, handshakeSocks5 };

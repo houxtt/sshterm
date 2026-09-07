@@ -1,0 +1,195 @@
+[
+  {
+    "id": "SAVE_SERIAL",
+    "evidence": {
+      "type": "serial",
+      "name": "audit",
+      "port": "COM27",
+      "port2": "COM27",
+      "rtscts": true,
+      "hexMode": true,
+      "timestamp": true,
+      "trigger": "ready",
+      "group": "boards"
+    }
+  },
+  {
+    "id": "SAVE_AUTH",
+    "evidence": {
+      "type": "ssh",
+      "name": "audit",
+      "host": "target",
+      "autoCmds": [
+        "echo ready"
+      ],
+      "proxy": {
+        "type": "socks5",
+        "host": "proxy",
+        "port": 1080,
+        "username": "audit",
+        "password": "fake"
+      },
+      "jumpAuth": {
+        "auth": "key",
+        "username": "jump-user",
+        "privateKey": "fake-path"
+      }
+    }
+  },
+  {
+    "id": "LOG_SPLIT",
+    "evidence": {
+      "gbk": "��",
+      "utf8": "��"
+    }
+  },
+  {
+    "id": "GBK_INPUT",
+    "evidence": {
+      "actualFrame": "0100d6d0",
+      "expectedFrame": "0100d6d0"
+    }
+  },
+  {
+    "id": "SCRIPT_OLD_OUTPUT",
+    "evidence": {
+      "staleMatch": false,
+      "blocked": true
+    }
+  },
+  {
+    "id": "UPLOAD_SAME_SIZE",
+    "evidence": {
+      "status": 200,
+      "payload": {
+        "hash": "abc"
+      },
+      "skipped": true
+    }
+  },
+  {
+    "id": "TELNET_WIRE",
+    "evidence": {
+      "naws": [
+        255,
+        250,
+        31,
+        0,
+        255,
+        255,
+        0,
+        24,
+        255,
+        240
+      ],
+      "rawFF": [
+        255,
+        255
+      ],
+      "echoReply": [
+        255,
+        253,
+        1
+      ]
+    }
+  },
+  {
+    "id": "OPENSSH_MATCH",
+    "evidence": [
+      {
+        "name": "app",
+        "group": "OpenSSH 导入",
+        "type": "ssh",
+        "host": "app.internal",
+        "port": 22,
+        "username": "normal",
+        "auth": "password",
+        "rememberPassword": false
+      }
+    ]
+  },
+  {
+    "id": "SFTP_REORDER_BUFFER",
+    "evidence": {
+      "readCalls": 2,
+      "bufferedChunks": 1,
+      "configuredConcurrency": 2
+    }
+  },
+  {
+    "id": "SFTP_CANCEL_OPEN",
+    "evidence": {
+      "closedHandles": 1,
+      "handleStillPresent": false
+    }
+  },
+  {
+    "id": "UPLOAD_CLOSE_ERROR",
+    "evidence": {
+      "rejected": true,
+      "message": "remote flush failed"
+    }
+  },
+  {
+    "id": "SERIAL_CANCEL_CONNECT",
+    "evidence": {
+      "state": "closed",
+      "deviceOpen": false
+    }
+  },
+  {
+    "id": "REMOTE_TUNNEL_DISPATCH",
+    "evidence": {
+      "unrelatedListenerRejects": 0
+    }
+  },
+  {
+    "id": "BROWSER_SENTRY",
+    "evidence": {
+      "sentry": true,
+      "recorded": 1,
+      "cached": 3,
+      "captured": 1,
+      "screen": "41 42 43 "
+    }
+  },
+  {
+    "id": "BROWSER_IMAGE_API",
+    "evidence": {
+      "addon": true,
+      "registerImage": "undefined"
+    }
+  },
+  {
+    "id": "BROWSER_ERROR_STATE",
+    "evidence": "closed"
+  },
+  {
+    "id": "BROWSER_SPLIT",
+    "evidence": {
+      "panes": 3,
+      "error": null
+    }
+  },
+  {
+    "id": "SERVICE_NULL",
+    "evidence": {
+      "exitCode": null,
+      "error": "┌──────────────────────────────────────────────┐\n│  sshterm  —  SSH / Telnet / VNC / 串口工具   │\n└──────────────────────────────────────────────┘\n  地址: http://127.0.0.1:7410\n  会话: C:\\Users\\Administrator\\AppData\\Local\\Temp\\sshterm-audit-Nlk9i6\\.sshterm\\sessions.json\n  日志: C:\\Users\\Administrator\\AppData\\Local\\Temp\\sshterm-audit-Nlk9i6\\.sshterm\\logs\\sshterm-20260907-155146.log\n"
+    }
+  },
+  {
+    "id": "SERVICE_OVERSIZE",
+    "evidence": {
+      "exitCode": null,
+      "error": "┌──────────────────────────────────────────────┐\n│  sshterm  —  SSH / Telnet / VNC / 串口工具   │\n└──────────────────────────────────────────────┘\n  地址: http://127.0.0.1:7416\n  会话: C:\\Users\\Administrator\\AppData\\Local\\Temp\\sshterm-audit-WZzLY7\\.sshterm\\sessions.json\n  日志: C:\\Users\\Administrator\\AppData\\Local\\Temp\\sshterm-audit-WZzLY7\\.sshterm\\logs\\sshterm-20260907-155149.log\n"
+    }
+  },
+  {
+    "id": "SERVICE_LOG-ERROR",
+    "evidence": {
+      "exitCode": null,
+      "error": "┌──────────────────────────────────────────────┐\n│  sshterm  —  SSH / Telnet / VNC / 串口工具   │\n└──────────────────────────────────────────────┘\n  地址: http://127.0.0.1:7423\n  会话: C:\\Users\\Administrator\\AppData\\Local\\Temp\\sshterm-audit-FNoVAb\\.sshterm\\sessions.json\n  日志: C:\\Users\\Administrator\\AppData\\Local\\Temp\\sshterm-audit-FNoVAb\\.sshterm\\logs\\sshterm-20260907-155151.log\n[conn] telnet 1 open\n"
+    }
+  }
+]

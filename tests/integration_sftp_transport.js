@@ -8,12 +8,14 @@ const path = require('path');
 const { spawn } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
-const PORT = 8902;
-const BASE = `http://127.0.0.1:${PORT}`;
+const net = require('net');
+let PORT = Number(process.env.SSHTERM_TEST_PORT) || 0;
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'sshterm-sftp-'));
 const profile = path.join(temp, 'profile');
+const tokenFile = path.join(profile, '.sshterm', 'token');
 const fixture = path.join(temp, 'remote');
 let clientToken = '';
+let BASE = '';
 fs.mkdirSync(fixture, { recursive: true });
 fs.writeFileSync(path.join(fixture, 'range.txt'), '0123456789');
 fs.mkdirSync(path.join(fixture, 'folder'), { recursive: true });
@@ -21,26 +23,30 @@ fs.writeFileSync(path.join(fixture, 'folder', 'one.bin'), Buffer.alloc(4096, 1))
 fs.writeFileSync(path.join(fixture, 'folder', 'two.bin'), Buffer.alloc(8192, 2));
 
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
-async function waitForServer(deadline = Date.now() + 10000) {
+async function waitForServer(deadline = Date.now() + 15000) {
   while (Date.now() < deadline) {
-    try { await new Promise((resolve, reject) => http.get(BASE, res => { res.resume(); res.statusCode === 200 ? resolve() : reject(); }).on('error', reject)); return; }
-    catch { await sleep(100); }
+    try {
+      await new Promise((resolve, reject) => http.get(BASE, res => {
+        res.resume();
+        res.statusCode === 200 ? resolve() : reject(new Error(`HTTP ${res.statusCode}`));
+      }).on('error', reject));
+      if (fs.existsSync(tokenFile)) return;
+    } catch {}
+    await sleep(100);
   }
   throw new Error('server startup timed out');
 }
 async function loadToken() {
-  const script = await new Promise((resolve, reject) => http.get(`${BASE}/bootstrap.js`, res => {
-    let body = ''; res.setEncoding('utf8'); res.on('data', chunk => { body += chunk; });
-    res.on('end', () => res.statusCode === 200 ? resolve(body) : reject(new Error(`bootstrap HTTP ${res.statusCode}`)));
-  }).on('error', reject));
-  const match = script.match(/__SSHTERM_TOKEN\s*=\s*"([^"]+)"/);
-  if (!match) throw new Error('bootstrap token not found');
-  clientToken = match[1];
+  clientToken = fs.readFileSync(tokenFile, 'utf8').trim();
+  if (!clientToken) throw new Error('token file empty');
 }
 function request(method, target, headers = {}, body) {
   return new Promise((resolve, reject) => {
     const join = target.includes('?') ? '&' : '?';
-    const req = http.request(`${BASE}${target}${join}token=${encodeURIComponent(clientToken)}`, { method, headers }, res => {
+    const req = http.request(`${BASE}${target}${join}token=${encodeURIComponent(clientToken)}`, {
+      method,
+      headers: { 'X-SSHTERM-Token': clientToken, ...headers },
+    }, res => {
       const chunks = []; res.on('data', chunk => chunks.push(chunk));
       res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
     });
@@ -50,7 +56,7 @@ function request(method, target, headers = {}, body) {
 }
 function pendingUpload(name) {
   const req = http.request(`${BASE}/api/sftp/upload?conn=9900&path=.&name=${encodeURIComponent(name)}&token=${encodeURIComponent(clientToken)}`, {
-    method: 'PUT', headers: { 'Content-Length': '2' },
+    method: 'PUT', headers: { 'Content-Length': '2', 'X-SSHTERM-Token': clientToken },
   });
   const done = new Promise((resolve, reject) => {
     req.on('response', res => { const chunks = []; res.on('data', c => chunks.push(c)); res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks) })); });
@@ -61,6 +67,17 @@ function pendingUpload(name) {
 }
 
 (async () => {
+  if (!PORT) {
+    PORT = await new Promise((resolve, reject) => {
+      const probe = net.createServer();
+      probe.once('error', reject);
+      probe.listen(0, '127.0.0.1', () => {
+        const selected = probe.address().port;
+        probe.close(error => error ? reject(error) : resolve(selected));
+      });
+    });
+  }
+  BASE = `http://127.0.0.1:${PORT}`;
   const server = spawn(process.execPath, ['server/index.js', '--port', String(PORT), '--no-open'], {
     cwd: ROOT,
     env: { ...process.env, USERPROFILE: profile, HOME: profile,

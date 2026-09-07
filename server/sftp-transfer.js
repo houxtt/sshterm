@@ -35,6 +35,10 @@ class ParallelSftpReadStream extends Readable {
     }
     sftp.open(remotePath, 'r', (error, handle) => {
       this.opening = false;
+      if (this.destroyed) {
+        if (handle) return sftp.close(handle, () => {});
+        return;
+      }
       if (error) return this.destroy(error);
       this.handle = handle;
       this.emit('open', handle);
@@ -64,11 +68,12 @@ class ParallelSftpReadStream extends Readable {
       return this.sftp.close(handle, (error) => error ? this.destroy(error) : this.push(null));
     }
 
-    // A full concurrency window is at most 2 MiB and matches ssh2's channel
-    // window. Stop refilling it while the downstream consumer applies
-    // backpressure, so a slow browser/ZIP writer cannot grow memory without
-    // bound.
-    while (this.wantData && this.pending < this.concurrency && this.nextRequest <= this.end) {
+    // Bound both in-flight requests and out-of-order cached chunks so a slow
+    // first block cannot grow memory toward the whole file size.
+    while (this.wantData
+      && this.pending < this.concurrency
+      && this.pending + this.results.size < this.concurrency
+      && this.nextRequest <= this.end) {
       const position = this.nextRequest;
       const length = Math.min(this.chunkSize, this.end - position + 1);
       const buffer = Buffer.allocUnsafe(length);
@@ -76,6 +81,7 @@ class ParallelSftpReadStream extends Readable {
       this.pending++;
       this.sftp.read(this.handle, buffer, 0, length, position, (error, bytesRead) => {
         this.pending--;
+        if (this.destroyed) return;
         if (error) return this.destroy(error);
         if (bytesRead !== length) {
           return this.destroy(new Error(`SFTP 文件在下载期间发生变化 (${position}: ${bytesRead}/${length})`));
@@ -130,20 +136,20 @@ function receiveParallelUpload(req, sftp, remotePath, options = {}) {
     const current = handle;
     handle = null;
     if (!current) return callback();
-    sftp.close(current, () => callback());
+    sftp.close(current, (error) => callback(error));
   };
   const fail = (error) => {
     if (settled) return;
     settled = true;
     cleanup();
     try { req.pause(); } catch {}
-    close(() => rejectPromise(error));
+    close((closeErr) => rejectPromise(closeErr || error));
   };
   const finishIfReady = () => {
     if (settled || !inputEnded || pending || queue.length) return;
     settled = true;
     cleanup();
-    close(() => resolvePromise({ received }));
+    close((closeErr) => (closeErr ? rejectPromise(closeErr) : resolvePromise({ received })));
   };
   const drain = () => {
     if (settled || !handle) return;

@@ -2,6 +2,7 @@
 // 启动: node server/index.js [--port 8787] [--no-open]
 const http = require('http');
 const net = require('net');
+const dns = require('dns');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -11,6 +12,9 @@ const { createBackup, readBackup, parseOpenSSHConfig } = require('./session-back
 const { createParallelReadStream, receiveParallelUpload } = require('./sftp-transfer');
 const { connectionConfigForRequest } = require('./connection-config');
 const { writeSecrets, readSecrets } = require('./dpapi');
+const { decodeBuffer, StreamingDecoder } = require('./encoding');
+const { sanitizeSession } = require('./session-schema');
+const { sendBinary, WS_HIGH_WATER, attachWsBackpressure, queueDepth, isBackedUp } = require('./ws-backpressure');
 const sshConnectScheduler = require('./ssh-connect-scheduler');
 
 const ROOT = path.join(__dirname, '..');
@@ -117,14 +121,6 @@ directoryDownloadCleanup.unref();
 const CLIENT_TOKEN = randomBytes(32).toString('base64url');
 const PORT = parseInt(process.argv[process.argv.indexOf('--port') + 1], 10) || 8787; // P0 FIX: 移到此处供 isTrustedOrigin 使用
 const TOKEN_FILE = path.join(CONN_DIR, 'token');
-
-// CLI capability token is persisted so non-browser clients (scripts, tests) can
-// authenticate without a browser Origin.  The file is mode 0600; the desktop
-// launcher writes it once per process start.
-try {
-  fs.mkdirSync(CONN_DIR, { recursive: true });
-  fs.writeFileSync(TOKEN_FILE, CLIENT_TOKEN, { mode: 0o600 });
-} catch {}
 
 // 'wasm-unsafe-eval' is required by @xterm/addon-image: its Sixel decoder is an
 // inline WebAssembly module, and Chrome blocks WebAssembly.instantiate() under
@@ -516,7 +512,11 @@ const server = http.createServer((req, res) => {
     const sftp = conn.getSftpInst();
     sftp.stat(remotePath, (err, st) => {
       if (err) { res.writeHead(404); return res.end(); }
-      res.writeHead(200, { 'Content-Type': 'application/json', 'X-Remote-Size': String(st.size) });
+      res.writeHead(200, {
+        'Content-Type': 'application/json',
+        'X-Remote-Size': String(st.size),
+        'X-Remote-Mtime': statMtimeHeader(st),
+      });
       res.end(JSON.stringify({ size: st.size }));
     });
     return;
@@ -667,18 +667,23 @@ const server = http.createServer((req, res) => {
     };
     if (jobId) directoryDownloads.set(jobId, job);
     const dirName = path.basename(rdir) || 'download';
-    conn.sftpCollectFiles(rdir).then(async (files) => {
+    conn.sftpCollectFiles(rdir).then(async (collected) => {
       try {
+        const files = collected.files || collected;
+        const scanSkipped = collected.skipped || [];
         const collectedCount = files.length;
         const skippedLinks = files.filter(file => file.isSymlink);
-        files = files.filter(file => !file.isSymlink);
-        const totalBytes = files.reduce((s, f) => s + f.size, 0);
+        const usable = files.filter(file => !file.isSymlink);
+        const totalBytes = usable.reduce((s, f) => s + f.size, 0);
         job.phase = 'transferring';
         job.total = totalBytes;
         job.filesTotal = collectedCount;
-        job.filesDone = skippedLinks.length;
-        job.skipped = skippedLinks.length;
-        if (skippedLinks.length) job.warning = `已跳过 ${skippedLinks.length} 个符号链接`;
+        job.filesDone = skippedLinks.length + scanSkipped.length;
+        job.skipped = skippedLinks.length + scanSkipped.length;
+        const warnings = [];
+        if (skippedLinks.length) warnings.push(`已跳过 ${skippedLinks.length} 个符号链接`);
+        if (scanSkipped.length) warnings.push(`已跳过 ${scanSkipped.length} 个不可读目录`);
+        if (warnings.length) job.warning = warnings.join('；');
         job.updatedAt = Date.now();
         res.writeHead(200, {
           'Content-Type': 'application/zip',
@@ -745,8 +750,8 @@ const server = http.createServer((req, res) => {
           console.log(`[sftp-zip] 跳过无法读取的文件 ${file.path}: ${error.message}`);
         };
         const worker = async () => {
-          while (idx < files.length) {
-            const f = files[idx++];
+          while (idx < usable.length) {
+            const f = usable[idx++];
             const rs = createParallelReadStream(conn.getSftpInst(), f.path, {
               start: 0, end: Math.max(-1, f.size - 1),
               concurrency: f.size <= SMALL_FILE_BUFFER ? 4 : 32,
@@ -808,7 +813,7 @@ const server = http.createServer((req, res) => {
         await Promise.all(Array.from({ length: Math.min(MAX_STREAMS, files.length) }, worker));
         job.phase = 'packing'; job.updatedAt = Date.now();
         await archive.finalize();
-        console.log(`[sftp-zip] ${rdir} → ${files.length - (job.skipped - skippedLinks.length)} 文件打包完成, 跳过 ${job.skipped}`);
+        console.log(`[sftp-zip] ${rdir} → ${usable.length - skippedLinks.length} 文件打包完成, 跳过 ${job.skipped}`);
       } catch (e) {
         console.log('[sftp-zip] 异常:', e.message);
         job.phase = 'failed'; job.error = e.message; job.updatedAt = Date.now();
@@ -848,8 +853,14 @@ const server = http.createServer((req, res) => {
       let start = 0;
       let end = Math.max(0, size - 1);
       let partial = false;
+      const identity = remoteFileIdentity(st);
       const range = req.headers.range;
+      const clientIdentity = req.headers['x-remote-identity'];
       if (range) {
+        if (clientIdentity && clientIdentity !== identity) {
+          res.writeHead(412, { 'Content-Type': 'text/plain; charset=utf-8', 'X-Remote-Identity': identity });
+          return res.end('远端文件身份已变化，请重新下载');
+        }
         const m = /^bytes=(\d+)-(\d*)$/.exec(range);
         if (!m) {
           res.writeHead(416, { 'Content-Range': `bytes */${size}` });
@@ -871,6 +882,9 @@ const server = http.createServer((req, res) => {
         'Cache-Control': 'no-cache',
         'Accept-Ranges': 'bytes',
         'Content-Length': String(length),
+        'X-Remote-Size': String(size),
+        'X-Remote-Mtime': statMtimeHeader(st),
+        'X-Remote-Identity': identity,
       };
       if (partial) headers['Content-Range'] = `bytes ${start}-${end}/${size}`;
       res.writeHead(partial ? 206 : 200, headers);
@@ -953,10 +967,18 @@ wss.on('connection', (ws, req) => {
   }
   cancelWindowCleanup(ws.windowId);
   windows.set(ws.windowId, ws);
+  attachWsBackpressure(ws, () => resumePausedConnections(ws));
   send(ws, { type: 'window-id', windowId: ws.windowId });
   wsCount++;
   clearTimeout(idleExitTimer);
+  const pingTimer = setInterval(() => {
+    if (ws.readyState === 1) {
+      try { ws.ping(); } catch {}
+    }
+  }, 25000);
+  pingTimer.unref();
   ws.on('close', () => {
+    clearInterval(pingTimer);
     wsCount--;
     scheduleIdleExit();
     if (windows.get(ws.windowId) === ws) {
@@ -969,10 +991,10 @@ wss.on('connection', (ws, req) => {
       scheduleWindowCleanup(ws.windowId);
     }
   });
+  ws.on('error', (err) => log('error', `WebSocket 错误: ${err && err.message}`));
   ws.on('message', (msg, isBinary) => {
     if (isBinary) {
-      // binary: [connId: 2B LE][data...] → 路由到连接的 write
-      if (msg.length < 2) return;
+      if (msg.length < 2 || msg.length > 8 * 1024 * 1024) return;
       const id = msg.readUInt16LE(0);
       const conn = getConnection(ws, id);
       if (conn && conn.state === 'connected') conn.write(msg.subarray(2));
@@ -980,9 +1002,13 @@ wss.on('connection', (ws, req) => {
     }
     let m;
     try { m = JSON.parse(msg.toString()); } catch { return; }
+    if (!m || typeof m !== 'object' || typeof m.type !== 'string') return;
     handle(ws, m).catch((e) => send(ws, {
-      type: 'error', id: m.id, msg: String(e.message || e),
-      occupied: !!e.sshtermOccupied,   // 串口被占用标记 (前端弹窗: 等待重试/强制释放)
+      type: 'error',
+      id: Number.isInteger(m.id) ? m.id : undefined,
+      action: m.type,
+      msg: String(e.message || e),
+      occupied: !!e.sshtermOccupied,
     }));
   });
 });
@@ -991,18 +1017,44 @@ function validVncHost(value) {
   return value.length > 0 && value.length <= 253 && /^[A-Za-z0-9._:-]+$/.test(value);
 }
 
+function resumePausedConnections(ws) {
+  for (const [key, conn] of connections) {
+    if (!key.startsWith(`${ws.windowId}:`) || conn.ownerWs !== ws || !conn._outputPaused) continue;
+    conn._outputPaused = false;
+    try { conn.stream?.resume(); } catch {}
+  }
+}
+
 function vncTargetForRequest(req) {
   const query = new URL(req.url, 'http://127.0.0.1').searchParams;
   const remoteHost = String(query.get('host') || '127.0.0.1').trim().toLowerCase();
   const remotePort = Number(query.get('port') || 5901);
   if (!validVncHost(remoteHost)) throw new Error('VNC 主机地址无效');
   if (!Number.isInteger(remotePort) || remotePort < 1 || remotePort > 65535) throw new Error('VNC 端口无效');
-  // VNC 仅允许连接私网/环回地址, 防止 token 持有者探测公网
-  const vncIp = parseIPv4(remoteHost);
-  if (vncIp !== null && !isPrivateIPv4(remoteHost)) {
-    throw new Error('VNC 目标必须是私网/环回地址');
-  }
   return { remoteHost, remotePort };
+}
+
+async function resolveVncConnectTarget(remoteHost) {
+  if (net.isIP(remoteHost) === 4) {
+    if (!isPrivateIPv4(remoteHost)) throw new Error('VNC 目标必须是私网/环回地址');
+    return remoteHost;
+  }
+  if (net.isIP(remoteHost) === 6) {
+    if (!isPrivateIPv6(remoteHost)) throw new Error('VNC 目标必须是私网/环回地址');
+    return remoteHost;
+  }
+  const results = await dns.promises.lookup(remoteHost, { all: true, verbatim: true });
+  if (!results.length) throw new Error('VNC 主机解析失败');
+  for (const entry of results) {
+    if (entry.family === 4 && !isPrivateIPv4(entry.address)) {
+      throw new Error(`VNC 目标解析到非公网允许地址: ${entry.address}`);
+    }
+    if (entry.family === 6 && !isPrivateIPv6(entry.address)) {
+      throw new Error(`VNC 目标解析到非公网允许地址: ${entry.address}`);
+    }
+  }
+  const prefer = results.find(r => r.family === 4) || results[0];
+  return prefer.address;
 }
 
 function openDirectVnc(remoteHost, remotePort) {
@@ -1022,84 +1074,83 @@ function openDirectVnc(remoteHost, remotePort) {
 
 vncWss.on('connection', async (ws, req) => {
   let stream = null;
+  let cancelled = false;
   const pending = [];
   let pendingBytes = 0;
   const closeStream = () => {
+    cancelled = true;
     if (!stream) return;
     try { stream.destroy(); } catch { try { stream.end(); } catch {} }
     stream = null;
+  };
+  const flushVncOutbound = () => {
+    if (!stream || cancelled || ws.readyState !== 1) return;
+    while (pending.length && ws.readyState === 1 && ws.bufferedAmount <= WS_HIGH_WATER) {
+      const chunk = pending.shift();
+      pendingBytes -= chunk.length;
+      ws.send(chunk, { binary: true });
+    }
   };
   ws.on('close', closeStream);
   ws.on('error', closeStream);
   ws.on('message', (data) => {
     const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data);
-    if (stream) return stream.write(chunk);
+    if (stream) {
+      if (!stream.write(chunk) && !stream._vncPaused) {
+        stream._vncPaused = true;
+        stream.once('drain', () => { stream._vncPaused = false; });
+      }
+      return;
+    }
     pendingBytes += chunk.length;
     if (pendingBytes > 256 * 1024) return ws.close(1009, 'VNC 握手缓存过大');
     pending.push(chunk);
   });
   try {
     const { remoteHost, remotePort } = vncTargetForRequest(req);
-    stream = await openDirectVnc(remoteHost, remotePort);
-    for (const chunk of pending) stream.write(chunk);
+    const connectHost = await resolveVncConnectTarget(remoteHost);
+    if (cancelled || ws.readyState !== 1) return;
+    stream = await openDirectVnc(connectHost, remotePort);
+    if (cancelled || ws.readyState !== 1) {
+      closeStream();
+      return;
+    }
+    for (const chunk of pending) {
+      if (!stream.write(chunk) && !stream._vncPaused) {
+        stream._vncPaused = true;
+        stream.once('drain', () => { stream._vncPaused = false; });
+      }
+    }
     pending.length = 0;
-    stream.on('data', chunk => { if (ws.readyState === 1) ws.send(chunk, { binary: true }); });
+    pendingBytes = 0;
+    stream.on('data', chunk => {
+      if (cancelled || ws.readyState !== 1) return;
+      pending.push(Buffer.from(chunk));
+      pendingBytes += chunk.length;
+      flushVncOutbound();
+    });
     stream.once('error', error => {
       log('error', `[VNC ${remoteHost}:${remotePort}] 连接失败: ${error.message}`);
       if (ws.readyState < 2) ws.close(1011, 'VNC 连接失败');
     });
     stream.once('close', () => { if (ws.readyState < 2) ws.close(1000, 'VNC 已关闭'); });
-    log('audit', `VNC 直接连接 ${remoteHost}:${remotePort}`);
+    log('audit', `VNC 直接连接 ${remoteHost}:${remotePort} → ${connectHost}:${remotePort}`);
   } catch (error) {
     log('error', `VNC 连接失败: ${error.message}`);
     if (ws.readyState < 2) ws.close(1008, error.message.slice(0, 120));
   }
 });
 
-function sanitizeSession(s) {
-  if (!s || typeof s !== 'object') return null;
-  const out = JSON.parse(JSON.stringify(s)); // drops hostile prototypes
-  // Whitelist of allowed top-level fields
-  const allowed = ['id', 'name', 'type', 'host', 'port', 'username', 'user', 'auth',
-    'password', 'privateKey', 'passphrase', 'loginPass', 'rememberPassword',
-    'autoLogin', 'loginUser', 'reconnect', 'sortOrder', 'proxyJump', 'readyTimeout',
-    'encoding', 'baudRate', 'dataBits', 'stopBits', 'parity', 'flowControl',
-    'tunnels', 'proxy', 'jumpAuth', 'agentForward'];
-  for (const key of Object.keys(out)) {
-    if (!allowed.includes(key)) delete out[key];
-  }
-  // Validate type
-  if (!['ssh', 'telnet', 'vnc', 'serial'].includes(out.type)) return null;
-  // Validate name
-  out.name = String(out.name || '').trim().slice(0, 120);
-  if (!out.name) return null;
-  // Validate port
-  if (out.port !== undefined) {
-    const p = Number(out.port);
-    if (!Number.isInteger(p) || p < 1 || p > 65535) out.port = (out.type === 'vnc' ? 5901 : 22);
-  }
-  // Validate host
-  if (out.host !== undefined) out.host = String(out.host || '').trim().slice(0, 253);
-  // Validate proxy
-  if (out.proxy && typeof out.proxy === 'object') {
-    const proxy = { host: String(out.proxy.host || '').trim().slice(0, 253),
-      port: Number(out.proxy.port) };
-    if (!Number.isInteger(proxy.port) || proxy.port < 1 || proxy.port > 65535) {
-      delete out.proxy;
-    } else {
-      if (typeof out.proxy.password === 'string') proxy.password = out.proxy.password.slice(0, 256);
-      out.proxy = proxy;
-    }
-  }
-  // Validate jumpAuth
-  if (out.jumpAuth && typeof out.jumpAuth === 'object') {
-    const ja = {};
-    if (typeof out.jumpAuth.password === 'string') ja.password = out.jumpAuth.password.slice(0, 256);
-    if (typeof out.jumpAuth.privateKey === 'string') ja.privateKey = out.jumpAuth.privateKey;
-    if (typeof out.jumpAuth.passphrase === 'string') ja.passphrase = out.jumpAuth.passphrase.slice(0, 256);
-    out.jumpAuth = ja;
-  }
-  return out;
+function statMtimeHeader(st) {
+  const value = st && st.mtime;
+  if (value instanceof Date) return String(Math.floor(value.getTime() / 1000));
+  if (Number.isFinite(value)) return String(Math.floor(value));
+  return '0';
+}
+
+function remoteFileIdentity(st) {
+  const size = st && Number.isSafeInteger(st.size) ? st.size : 0;
+  return `${size}:${statMtimeHeader(st)}`;
 }
 
 function send(ws, obj) {
@@ -1163,13 +1214,6 @@ function importSessionEntries(entries, source) {
 function broadcast(obj) {
   for (const c of wss.clients) send(c, obj);
 }
-function sendBinary(ws, id, data) {
-  const frame = Buffer.allocUnsafe(2 + data.length);
-  frame.writeUInt16LE(id, 0);
-  data.copy(frame, 2);
-  if (ws.readyState === 1) ws.send(frame, { binary: true });
-}
-
 function bufferConnectionHistory(conn, data) {
   if (!conn._replayBuffer) conn._replayBuffer = [];
   const chunk = Buffer.from(data);
@@ -1182,7 +1226,13 @@ function bufferConnectionHistory(conn, data) {
 
 function sendConnectionData(conn, id, data) {
   bufferConnectionHistory(conn, data);
-  if (conn.ownerWs && conn.ownerWs.readyState === 1) sendBinary(conn.ownerWs, id, data);
+  const ownerWs = conn.ownerWs;
+  if (!ownerWs || ownerWs.readyState !== 1) return;
+  if (isBackedUp(ownerWs) && conn.stream && typeof conn.stream.pause === 'function' && !conn._outputPaused) {
+    conn._outputPaused = true;
+    try { conn.stream.pause(); } catch {}
+  }
+  sendBinary(ownerWs, id, data);
 }
 
 function attachExistingConnection(ws, conn, id) {
@@ -1495,6 +1545,22 @@ async function handle(ws, m) {
       log('audit', `SSH 主机密钥 ${m.accept === true ? '已信任' : '已拒绝'} (会话 ${m.id})`);
       break;
     }
+    case 'interactive-auth-response': {
+      const conn = getConnection(ws, m.id);
+      if (!conn || conn.config.type !== 'ssh' || !conn.submitInteractiveAuth) {
+        return send(ws, { type: 'error', id: m.id, msg: '没有等待中的 MFA 挑战' });
+      }
+      if (m.cancel === true) {
+        if (!conn.cancelInteractiveAuth()) {
+          return send(ws, { type: 'error', id: m.id, msg: 'MFA 挑战已过期' });
+        }
+        return send(ws, { type: 'interactive-auth-cancelled', id: m.id });
+      }
+      if (!conn.submitInteractiveAuth(m.responses)) {
+        return send(ws, { type: 'error', id: m.id, msg: 'MFA 挑战已过期' });
+      }
+      break;
+    }
     case 'serialports': {
       const { SerialPort } = require('serialport');
       const list = await SerialPort.list();
@@ -1570,11 +1636,11 @@ async function handle(ws, m) {
             saved.tunnels = [...(saved.tunnels || []), { type: item.type, localPort: item.localPort, remoteHost: item.remoteHost, remotePort: item.remotePort }];
             saveSessions(sessions);
           }
-          send(ws, { type: 'tunnel', id: m.id, action: 'add', tunnel: item });
+          send(ws, { type: 'tunnel', id: m.id, action: 'add', tunnel: item, tunnels: conn.listTunnels() });
           log('audit', `创建 ${item.type} 隧道: ${item.localPort} → ${item.remoteHost}:${item.remotePort}`);
         } else if (m.action === 'remove') {
           const ok = conn.removeTunnel ? conn.removeTunnel(m.tunnelId) : false;
-          send(ws, { type: 'tunnel', id: m.id, action: 'remove', ok, tunnelId: m.tunnelId });
+          send(ws, { type: 'tunnel', id: m.id, action: 'remove', ok, tunnelId: m.tunnelId, tunnels: conn.listTunnels() });
           if (ok) log('audit', `删除 SSH 隧道 ${m.tunnelId}`);
           if (ok && conn.config.id && sessions[conn.config.id]) { sessions[conn.config.id].tunnels = conn.listTunnels().map(t => ({ type: t.type, localPort: t.localPort, remoteHost: t.remoteHost, remotePort: t.remotePort })); saveSessions(sessions); }
         }
@@ -1591,7 +1657,12 @@ async function doConnect(ws, cfg, tabId) {
   const fpKey = cfg.type + '|' + (cfg.host || '') + '|' + (cfg.port || '') + '|' + (cfg.baudRate || '');
   const ownerFpKey = `${ws.windowId}|${fpKey}`;
   if (cfg.type === 'serial' && liveByConfig.has(ownerFpKey)) {
-    return send(ws, { type: 'reuse', id: tabId, connId: liveByConfig.get(ownerFpKey) });
+    const existingId = liveByConfig.get(ownerFpKey);
+    const existing = getConnection(ws, existingId);
+    if (existing && existing.state === 'connected' && existing.sp && existing.sp.isOpen) {
+      return send(ws, { type: 'reuse', id: tabId, connId: existingId });
+    }
+    liveByConfig.delete(ownerFpKey);
   }
 
   const ConnCls = { ssh: require('./connections/ssh'),
@@ -1619,15 +1690,20 @@ async function doConnect(ws, cfg, tabId) {
   const sessionLogFile = path.join(SESSION_LOG_DIR, `${safeName}-${sts}.log`);
   try { fs.mkdirSync(SESSION_LOG_DIR, { recursive: true }); } catch (e) {}
   let sessionLogStream = null;
+  let sessionLogDecoder = null;
   try { sessionLogStream = fs.createWriteStream(sessionLogFile, { flags: 'a' }); }
   catch (e) { console.log('[session-log] 创建失败:', e.message); }
+  sessionLogStream?.on('error', (e) => log('error', `[session-log] 写入失败: ${e.message}`));
 
   conn.on('data', (d) => {
     sendConnectionData(conn, connId, d);
     if (sessionLogStream) {
       try {
-        const text = Buffer.isBuffer(d) ? d.toString(enc) : String(d);
-        sessionLogStream.write(text);
+        if (!sessionLogDecoder) sessionLogDecoder = new StreamingDecoder(enc);
+        const text = sessionLogDecoder.decode(d);
+        if (text && !sessionLogStream.write(text)) {
+          sessionLogStream.once('drain', () => {});
+        }
       } catch (e) { /* 忽略解码失败 */ }
     }
   });
@@ -1663,6 +1739,9 @@ async function doConnect(ws, cfg, tabId) {
   });
   conn.on('host-key', (info) => {
     send(conn.ownerWs, { type: 'host-key', id: connId, ...info });
+  });
+  conn.on('interactive-auth', (info) => {
+    send(conn.ownerWs, { type: 'interactive-auth', id: connId, ...info });
   });
   conn.on('zmodem-file', (filename, filePath, size) => {
     console.log(`[zmodem] 收到文件 ${filename} (${size}B)`);
@@ -1706,6 +1785,14 @@ const MAX_SCAN_HOSTS = 4096;
 
 // Scan targets are restricted to private/loopback/link-local networks and valid
 // hostnames.  A token holder must not be able to port-scan the public internet.
+function isPrivateIPv6(ip) {
+  const lower = String(ip).toLowerCase();
+  if (lower === '::1') return true;
+  if (lower.startsWith('fc') || lower.startsWith('fd')) return true;
+  if (lower.startsWith('fe80')) return true;
+  return false;
+}
+
 function isPrivateIPv4(ip) {
   const n = parseIPv4(ip);
   if (n === null) return false;
@@ -1772,6 +1859,12 @@ function expandTarget(t) {
   }
 
   server.listen(PORT, '127.0.0.1', () => {
+  try {
+    fs.mkdirSync(CONN_DIR, { recursive: true });
+    fs.writeFileSync(TOKEN_FILE, CLIENT_TOKEN, { mode: 0o600 });
+  } catch (e) {
+    console.error('[token] 无法写入 CLI token 文件:', e.message);
+  }
   console.log('┌──────────────────────────────────────────────┐');
   console.log('│  sshterm  —  SSH / Telnet / VNC / 串口工具   │');
   console.log('└──────────────────────────────────────────────┘');

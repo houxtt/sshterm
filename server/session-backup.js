@@ -73,10 +73,19 @@ function parseOpenSSHConfig(text) {
         privateKey: cfg.identity || undefined, proxyJump: cfg.proxyJump || undefined, rememberPassword: false,
       });
     }
+    cfg = null;
+    aliases = [];
   };
+  let inMatch = false;
   for (const rawLine of text.split(/\r?\n/)) {
     const line = rawLine.replace(/\s+#.*$/, '').trim();
     if (!line) continue;
+    if (/^Match(\s|$)/i.test(line)) {
+      finish();
+      inMatch = true;
+      continue;
+    }
+    if (inMatch) continue;
     const match = /^(Host|HostName|Port|User|IdentityFile|ProxyJump)\s+(.+)$/i.exec(line);
     if (!match) continue;
     const key = match[1].toLowerCase();

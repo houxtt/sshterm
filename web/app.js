@@ -4,6 +4,12 @@
 // ---------- 工具 ----------
 const $ = (id) => document.getElementById(id);
 const hexOf = (u8) => Array.from(u8).map(b => b.toString(16).padStart(2, '0')).join(' ').toUpperCase();
+const Enc = () => window.SshtermEncoding || {
+  encodeText: (s) => new TextEncoder().encode(s),
+  decodeBuffer: (u8, enc) => new TextDecoder(enc || 'utf-8', { fatal: false }).decode(u8),
+  StreamingDecoder: class { constructor(enc) { this.dec = new TextDecoder(enc || 'utf-8', { fatal: false }); } decode(c) { return this.dec.decode(c, { stream: true }); } },
+};
+const CAPTURE_MAX = 8 * 1024 * 1024;
 
 // 原始抓包格式: HEX + 右侧 ASCII 对照 (可打印字符显示原文, 不可打印显示 .)
 function hexdumpLine(data) {
@@ -67,9 +73,8 @@ function handleUserInput(tab, data) {
       if (m && tab.imageAddon) {
         const paths = pickDisplayPaths(m[1]);
         tab._inputLine = '';
-        tab.term.write('\r\n');
         if (paths.length) displaySequence(tab, connId, paths);
-        return; // 不转发到远端, 避免 "Unable to open X server"
+        return;
       }
       line = '';
     } else if (ch === '\x7f' || ch === '\b') {
@@ -79,7 +84,7 @@ function handleUserInput(tab, data) {
     }
   }
   tab._inputLine = line;
-  safeSendInput(connId, data);
+  safeSendInput(connId, data, tab.cfg?.encoding);
 }
 
 function pickDisplayPaths(rest) {
@@ -106,7 +111,9 @@ async function renderRemoteImage(tab, connId, remotePath) {
             let rows = Math.max(4, Math.round(img.height / cellH));
             const maxCols = Math.max(8, tab.term.cols - 1);
             if (cols > maxCols) { const s = maxCols / cols; cols = maxCols; rows = Math.max(1, Math.round(rows * s)); }
-            tab.imageAddon.registerImage(img, { cols, rows });
+            tab.imageAddon.addImageResource?.(objUrl, { cols, rows })
+              || tab.imageAddon.addImage?.(objUrl, { cols, rows })
+              || tab.term.write(`\x1b]1337;File=inline=1;width=${img.width};height=${img.height}:${objUrl}\x07`);
             tab.term.write(`\r\n\x1b[2m[display] ${img.width}×${img.height} 已显示\x1b[0m`);
           } catch (e) {
             tab.term.write(`\x1b[31m[display] 渲染失败: ${e.message}\x1b[0m\r\n`);
@@ -196,7 +203,7 @@ function configForBrowserStorage(cfg) {
 }
 
 // ---------- 全局状态 ----------
-const clientToken = window.__SSHTERM_TOKEN || '';
+let clientToken = window.__SSHTERM_TOKEN || '';
 const WINDOW_ID_KEY = 'sshterm.window.id';
 function persistentWindowId() {
   try {
@@ -211,7 +218,9 @@ function persistentWindowId() {
   }
 }
 let windowId = persistentWindowId();
-const ws = new WebSocket(`ws://${location.host}/?token=${encodeURIComponent(clientToken)}&window=${encodeURIComponent(windowId)}`);
+let ws = null;
+let wsReconnectTimer = null;
+let wsReconnectAttempt = 0;
 const apiUrl = (pathname, params = {}) => {
   const q = new URLSearchParams({ ...params, token: clientToken, window: windowId });
   return `${pathname}?${q.toString()}`;
@@ -226,24 +235,82 @@ const pendingSavedConnections = new Map();
 let saveRequestSeq = 0;
 const pendingVncCredentials = new Map();
 let vncCredentialRequestSeq = 0;
+const pendingMfaChallenges = new Map();
 
-// ---------- WS 连接 ----------
-ws.binaryType = 'arraybuffer';
-ws.onopen = () => {
+async function refreshBootstrapToken() {
+  try {
+    const resp = await fetch('/bootstrap.js', { cache: 'no-store' });
+    if (!resp.ok) return false;
+    const text = await resp.text();
+    const match = text.match(/window\.__SSHTERM_TOKEN=(.+?);/);
+    if (!match) return false;
+    clientToken = JSON.parse(match[1]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function wsUrl() {
+  return `ws://${location.host}/?token=${encodeURIComponent(clientToken)}&window=${encodeURIComponent(windowId)}`;
+}
+
+function scheduleWsReconnect() {
+  if (wsReconnectTimer) return;
+  wsReconnectAttempt += 1;
+  const delays = [500, 1000, 2000, 5000, 10000, 20000];
+  const delay = delays[Math.min(wsReconnectAttempt - 1, delays.length - 1)];
+  $('conn-status-text').textContent = `服务器已断开，${Math.round(delay / 1000)} 秒后重连 (${wsReconnectAttempt})…`;
+  wsReconnectTimer = setTimeout(async () => {
+    wsReconnectTimer = null;
+    await refreshBootstrapToken();
+    connectWebSocket();
+  }, delay);
+}
+
+function reattachLiveTabs() {
+  for (const tab of tabs) {
+    if (tab.intentionalClose || tab.manualDisconnect) continue;
+    if (tab.state === 'connected' || tab.state === 'connecting' || tab.everConnected) {
+      if (tab.cfg.type === 'vnc') connectVncTab(tab);
+      else send({ type: 'connect', session: tab.cfg, id: tab.id });
+    }
+  }
+}
+
+function onWsOpen() {
+  wsReconnectAttempt = 0;
   $('conn-status').className = 'status-dot ok';
   $('conn-status-text').textContent = '服务器已连接';
   send({ type: 'list' });
   send({ type: 'serialports' });
-  restoreTabs();                  // 恢复刷新前打开的会话 (重新连接)
-};
-ws.onclose = () => {
+  if (tabs.length) reattachLiveTabs();
+  else restoreTabs();
+}
+
+function onWsClose(ev) {
   $('conn-status').className = 'status-dot err';
-  $('conn-status-text').textContent = '服务器已断开';
-  for (const t of tabs) setTabState(t.id, 'closed', '服务器断开');
-};
-ws.onmessage = (ev) => {
+  if (ev && ev.code === 4001) {
+    $('conn-status-text').textContent = '页面已刷新，正在恢复…';
+    return;
+  }
+  $('conn-status-text').textContent = '服务器已断开，重连中…';
+  scheduleWsReconnect();
+}
+
+function connectWebSocket() {
+  if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
+  ws = new WebSocket(wsUrl());
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = onWsOpen;
+  ws.onclose = onWsClose;
+  ws.onerror = () => {};
+  ws.onmessage = onWsMessage;
+}
+
+// ---------- WS 连接 ----------
+function onWsMessage(ev) {
   if (typeof ev.data === 'string') return handleMsg(JSON.parse(ev.data));
-  // binary: [connId: 2B LE][data] → 找对应标签/pane
   const buf = new Uint8Array(ev.data);
   const id = buf[0] | (buf[1] << 8);
   let tab = tabs.find(t => t.id === id);
@@ -255,29 +322,47 @@ ws.onmessage = (ev) => {
     }
   }
   if (!tab) return;
-  const term = pane ? pane.term : tab.term;
   const payload = buf.subarray(2);
   if (!pane && tab.zmodemSentry) {
-    try { tab.zmodemSentry.consume(payload); return; } catch { /* normal terminal fallback below */ }
+    try { tab.zmodemSentry.consume(payload); return; } catch { /* fallback below */ }
   }
+  processTerminalOutput(tab, pane, payload);
+}
+connectWebSocket();
+
+function processTerminalOutput(tab, pane, payload) {
+  const term = pane ? pane.term : tab.term;
   const displayTarget = pane || tab;
+  if (!displayTarget._streamDecoder) {
+    displayTarget._streamDecoder = new (Enc().StreamingDecoder)(tab.cfg.encoding || 'utf-8');
+  }
   const stamp = !pane && tab.cfg.type === 'serial' && tab.cfg.timestamp ? `[${new Date().toLocaleTimeString()}] ` : '';
   if ((pane ? pane.hex : tab.hex)) term.write(stamp + hexOf(payload) + ' ');
-  else { if (stamp) term.write(stamp); term.write(payload); }
+  else {
+    const text = Enc().decodeBuffer(payload, tab.cfg.encoding || 'utf-8');
+    if (stamp) term.write(stamp);
+    term.write(text);
+  }
   if (!pane && tab.cfg.type === 'serial' && tab.cfg.trigger) {
-    try { if (new TextDecoder(tab.cfg.encoding || 'utf-8').decode(payload).includes(tab.cfg.trigger)) setStatus(`串口触发：${tab.cfg.trigger}`); } catch {}
+    try {
+      const trigText = Enc().decodeBuffer(payload, tab.cfg.encoding || 'utf-8');
+      if (trigText.includes(tab.cfg.trigger)) setStatus(`串口触发：${tab.cfg.trigger}`);
+    } catch {}
   }
   if (tab.logging) {
-    const dir = pane ? pane : tab;
+    const dir = pane || tab;
     if (!dir.captureParts) dir.captureParts = [];
-    dir.captureParts.push(`${new Date().toISOString()} RX ${hexdumpLine(payload)}\n`);
+    if (!dir.captureSize) dir.captureSize = 0;
+    const line = `${new Date().toISOString()} RX ${hexdumpLine(payload)}\n`;
+    dir.captureParts.push(line);
+    dir.captureSize += line.length;
+    while (dir.captureSize > CAPTURE_MAX && dir.captureParts.length) {
+      const dropped = dir.captureParts.shift();
+      dir.captureSize -= dropped.length;
+    }
   }
-  // 累积终端内容 (数组 push, 避免高频输出时的字符串拼接卡顿)
   try {
-    const enc = tab.cfg.encoding || 'utf-8';
-    const text = new TextDecoder(enc, { fatal: false }).decode(payload);
-    // Record output only.  Input is deliberately excluded because terminal
-    // input can contain passwords, passphrases and other credentials.
+    const text = displayTarget._streamDecoder.decode(payload);
     if (!pane && tab.recording) {
       tab.recording.events.push({ at: Date.now() - tab.recording.startedAt, text });
       tab.recording.size += text.length;
@@ -290,28 +375,63 @@ ws.onmessage = (ev) => {
     if (!target.recParts) target.recParts = [];
     target.recLen = (target.recLen || 0) + text.length;
     target.recParts.push(text);
+    target._outputSeq = (target._outputSeq || 0) + 1;
     while (target.recLen > BUF_MAX && target.recParts.length) {
       target.recLen -= target.recParts.shift().length;
     }
     scheduleTabsSave();
   } catch (e) { /* 忽略 */ }
-};
-function send(obj) { if (ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+}
+
+function send(obj) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj)); }
 function log(msg) { send({ type: 'log', msg }); }
-function sendInput(tabId, str) {
-  // 支持 Uint8Array (HEX 模式传递的二进制数据)
-  const bytes = str instanceof Uint8Array || str instanceof ArrayBuffer
-    ? new Uint8Array(str)
-    : new TextEncoder().encode(str);
+function sendInput(tabId, str, encoding) {
+  let bytes;
+  if (str instanceof Uint8Array || str instanceof ArrayBuffer) {
+    bytes = new Uint8Array(str);
+  } else {
+    bytes = Enc().encodeText(String(str), encoding || 'utf-8');
+  }
   const frame = new Uint8Array(2 + bytes.length);
   frame[0] = tabId & 0xff; frame[1] = (tabId >> 8) & 0xff;
   frame.set(bytes, 2);
-  if (ws.readyState === 1) ws.send(frame);
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(frame);
   const tab = tabs.find(t => t.id === tabId);
   if (tab && tab.logging) {
     if (!tab.captureParts) tab.captureParts = [];
-    tab.captureParts.push(`${new Date().toISOString()} TX ${hexdumpLine(bytes)}\n`);
+    if (!tab.captureSize) tab.captureSize = 0;
+    const line = `${new Date().toISOString()} TX ${hexdumpLine(bytes)}\n`;
+    tab.captureParts.push(line);
+    tab.captureSize += line.length;
   }
+}
+
+function showMfaDialog(tabId, info) {
+  return new Promise((resolve) => {
+    const mask = $('dlg-mfa-mask');
+    const promptsEl = $('mfa-prompts');
+    const instructionsEl = $('mfa-instructions');
+    const inputs = [];
+    instructionsEl.textContent = [info.name, info.instructions].filter(Boolean).join('\n') || '请输入验证码或多因素认证信息';
+    promptsEl.innerHTML = (info.prompts || []).map((p, i) => {
+      const label = esc(p.prompt || `提示 ${i + 1}`);
+      const type = p.echo ? 'text' : 'password';
+      return `<label class="mfa-field"><span>${label}</span><input data-idx="${i}" type="${type}" autocomplete="one-time-code"></label>`;
+    }).join('');
+    mask.classList.remove('hidden');
+    promptsEl.querySelectorAll('input').forEach((input) => { inputs.push(input); });
+    (inputs[0] || $('btn-mfa-submit')).focus();
+    const cleanup = (result) => {
+      mask.classList.add('hidden');
+      $('btn-mfa-submit').onclick = null;
+      $('btn-mfa-cancel').onclick = null;
+      pendingMfaChallenges.delete(tabId);
+      resolve(result);
+    };
+    $('btn-mfa-submit').onclick = () => cleanup({ cancel: false, responses: inputs.map(i => i.value) });
+    $('btn-mfa-cancel').onclick = () => cleanup({ cancel: true, responses: [] });
+    pendingMfaChallenges.set(tabId, cleanup);
+  });
 }
 
 // ---------- 远端主机状态条 (仅 SSH 会话) ----------
@@ -357,7 +477,7 @@ function startHostInfo(tab) {
   tab.connectedAt = Date.now();
   const tick = () => send({ type: 'hostinfo', id: tab.id });
   tick();
-  tab.hostinfoTimer = setInterval(tick, 3000);
+  tab.hostinfoTimer = setInterval(tick, 8000);
 }
 
 function handleMsg(m) {
@@ -454,7 +574,7 @@ function handleMsg(m) {
           if (!pane) {
             tab.everConnected = true;
             // 刷新重挂接的是同一条远端 shell，不能重复执行登录命令。
-            if (!m.resumed) setTimeout(() => runAutoCmds(tab.cfg), 300);
+            if (!m.resumed) setTimeout(() => runAutoCmds(tab.cfg, tab.id), 300);
             // 启动远端主机状态轮询 (内存/负载/连接时长), 仅 SSH
             if (tab.cfg.type === 'ssh') startHostInfo(tab);
           }
@@ -473,9 +593,14 @@ function handleMsg(m) {
       send({ type: 'host-key-decision', id: m.id, accept });
       break;
     }
+    case 'interactive-auth': {
+      showMfaDialog(m.id, m).then((result) => {
+        send({ type: 'interactive-auth-response', id: m.id, cancel: result.cancel, responses: result.responses });
+      });
+      break;
+    }
     case 'error': {
-      sftpBusy = false;                 // SFTP 加载失败也释放锁
-      // 串口被占用 → 弹窗 (等待重试/强制释放/取消)
+      sftpBusy = false;
       if (m.occupied) { showOccDlg(m); break; }
       let tab = tabs.find(t => t.id === m.id);
       let pane = null;
@@ -484,8 +609,10 @@ function handleMsg(m) {
         if (p) { tab = t; pane = p; break; }
       }
       const term = pane ? pane.term : (tab ? tab.term : null);
-      if (term) { term.writeln(`\r\n\x1b[31m[错误] ${m.msg}\x1b[0m`); if (!pane) setTabState(tab.id, 'closed', '出错'); }
-      else setStatus(`错误: ${m.msg}`);
+      if (term) {
+        term.writeln(`\r\n\x1b[31m[错误] ${m.msg}\x1b[0m`);
+        if (!pane && tab && !m.action && tab.state !== 'connecting') setTabState(tab.id, 'closed', '出错');
+      } else setStatus(`错误: ${m.msg}`);
       break;
     }
     case 'serial-free': {
@@ -612,6 +739,7 @@ const DOM_TEXT_EN = {
   '默认': 'Default',
   '☑ 批量': '☑ Batch', '🔑 SSH 配置': '🔑 SSH Config', '全选': 'Select All',
   '删除选中': 'Delete Selected', '取消': 'Cancel', '双击连接 · 悬停可编辑/删除': 'Double-click to connect · hover to edit/delete',
+  '双击编辑配置 · 或单击编辑按钮': 'Double-click to edit · or use the edit button',
   '就绪': 'Ready', '未连接服务器': 'Server disconnected', '服务器已连接': 'Server connected',
   '服务器已断开': 'Server disconnected', '连接中…': 'Connecting…', '● 已连接': '● Connected',
   '已连接': 'Connected', '已恢复原连接': 'Original Connection Restored',
@@ -675,6 +803,8 @@ const DOM_TEXT_EN = {
   'VNC 主机': 'VNC Host', '(加载中…)': '(Loading…)',
   '点击命令=立即发送到当前会话;连接后自动执行见"新建连接→SSH/Telnet→连接后执行"':
     'Click a command to send it; configure automatic execution in the connection dialog.',
+  'SSH 多因素认证': 'SSH Multi-Factor Authentication',
+  '提交': 'Submit',
 };
 
 const DOM_ATTR_EN = {
@@ -806,7 +936,9 @@ function toggleLang() {
 }
 
 // ---------- 标签持久化 (刷新页面自动恢复打开的会话 + 终端内容) ----------
-const LS_TABS = 'sshterm.tabs';
+const LS_TABS_PREFIX = 'sshterm.tabs.';
+function tabsStorageKey() { return LS_TABS_PREFIX + windowId; }
+const LS_TABS = tabsStorageKey();
 const LS_WORKSPACE = 'sshterm.workspace.default';
 const BUF_MAX = 200 * 1024;   // 每标签保留最近 200KB 输出, 刷新后重放
 let tabsSaveTimer = null;
@@ -831,18 +963,22 @@ function stripTruncatedSequence(text) {
 }
 function saveTabs() {
   try {
-    localStorage.setItem(LS_TABS, JSON.stringify(tabs.map(t => ({
-      id: t.id, cfg: configForBrowserStorage(t.cfg), hex: !!t.hex, buf: (t.recParts || []).join(''),
+    localStorage.setItem(tabsStorageKey(), JSON.stringify(tabs.map(t => ({
+      id: t.id,
+      cfg: configForBrowserStorage(t.cfg),
+      hex: !!t.hex,
+      buf: (t.recParts || []).join(''),
       panes: (t.extraPanes || []).length,
       paneIds: (t.extraPanes || []).map(p => p.connId),
       paneBufs: (t.extraPanes || []).map(p => (p.recParts || []).join('')),
       split: { dir: splitDirection(t), ratio: splitRatio(t) },
+      readonly: !!t.readonly,
     }))));
   } catch (e) { /* 存储失败忽略 */ }
 }
 function restoreTabs() {
   try {
-    const raw = localStorage.getItem(LS_TABS);
+    const raw = localStorage.getItem(tabsStorageKey());
     if (!raw) return;
     const list = JSON.parse(raw);
     if (!Array.isArray(list)) return;
@@ -857,7 +993,11 @@ window.addEventListener('pagehide', () => saveTabs());
 function restoreTabItems(list) {
   for (const item of list) {
     if (!item || !item.cfg || !item.cfg.type) continue;
-    const tab = newTab(item.cfg, { connect: true, hex: item.hex, replay: item.buf, id: item.id });
+    if (item.readonly || item.cfg.type === 'replay') {
+      openReplayTab(item.cfg, item.buf || '');
+      continue;
+    }
+    const tab = newTab(item.cfg, { connect: item.cfg.connect !== false, hex: item.hex, replay: item.buf, id: item.id });
     const split = item.split || { dir: 'row', ratio: 0.5 };
     for (let n = 0; tab.cfg.type !== 'vnc' && n < Math.min(Number(item.panes) || 0, SPLIT_MAX - 1); n++) {
       addPane(tab, split.dir, split.ratio, {
@@ -901,7 +1041,7 @@ function openWorkspacePanel() {
 function saveWorkspace() {
   saveTabs();
   try {
-    const items = JSON.parse(localStorage.getItem(LS_TABS) || '[]');
+    const items = JSON.parse(localStorage.getItem(tabsStorageKey()) || '[]');
     localStorage.setItem(LS_WORKSPACE, JSON.stringify({ version: 1, savedAt: Date.now(), tabs: items }));
     renderWorkspaceSummary();
     setStatus(`工作区已保存：${tabs.length} 个标签`);
@@ -982,9 +1122,8 @@ function newTab(cfg, opts = {}) {
   const tab = { id, cfg, term, host: container, state: 'idle', hex: !!(opts.hex ?? cfg.hexMode), fitAddon, searchAddon, imageAddon, recParts: [], recLen: 0, extraPanes: [], hostinfoBar, hostinfoTimer: null, connectedAt: 0 };
   if (window.Zmodem) {
     tab.zmodemSentry = new Zmodem.Sentry({
-      to_terminal: octets => term.write(octets),
-      // Protocol bytes must bypass paste confirmation and string coercion.
-      sender: octets => sendInput(id, new Uint8Array(octets)),
+      to_terminal: octets => processTerminalOutput(tab, null, new Uint8Array(octets)),
+      sender: octets => sendInput(id, new Uint8Array(octets), cfg.encoding),
       on_detect: detection => {
         // Do not start a transfer implicitly. Future send/receive UI confirms
         // this session before file access is granted.
@@ -1018,8 +1157,9 @@ function newTab(cfg, opts = {}) {
   // 窗口尺寸变化 → 重新适配
   const ro = new ResizeObserver(() => { if (activeTabId === id) fitTerm(tab); });
   ro.observe(container);
+  tab._resizeObserver = ro;
 
-  if (opts.connect !== false) {
+  if (opts.connect !== false && cfg.type !== 'replay' && !cfg.readonly) {
     setTabState(id, 'connecting', '连接中…');
     send({ type: 'connect', session: cfg, id });
   }
@@ -1172,6 +1312,7 @@ function doCloseTab(id) {
   tabs.splice(idx, 1);
   if (tab._splitCleanup) tab._splitCleanup();
   if (tab.hostinfoTimer) { clearInterval(tab.hostinfoTimer); tab.hostinfoTimer = null; }
+  if (tab._resizeObserver) { try { tab._resizeObserver.disconnect(); } catch {} tab._resizeObserver = null; }
   try { tab.term?.dispose(); } catch (e) {}
   tab.host.remove();
   if (activeTabId === id) activeTabId = null;
@@ -2074,31 +2215,36 @@ setTimeout(() => {
   initSftpColumnsDragger();
 }, 100);
 let _timerHandle = null;
+let _timerTargetId = null;
 $('btn-tm-cancel').onclick = () => $('dlg-timer-mask').classList.add('hidden');
 $('btn-tm-start').onclick = () => {
   const tab = tabs.find(t => t.id === activeTabId);
   if (!tab) return;
   const content = $('tm-content').value;
-  const interval = parseInt($('tm-interval').value, 10) || 1000;
+  const interval = Math.max(100, parseInt($('tm-interval').value, 10) || 1000);
   if (!content) return setStatus('请输入发送内容');
   stopTimer();
+  _timerTargetId = tab.id;
   _timerHandle = setInterval(() => {
-    const t = tabs.find(x => x.id === activeTabId);
-    if (!t || t.state !== 'connected') return;
+    const t = tabs.find(x => x.id === _timerTargetId);
+    if (!t || t.state !== 'connected') { stopTimer(); return; }
     if ($('tm-hex').checked) {
-          // HEX 发送: "AB CD EF" → bytes (Uint8Array, 避免 UTF-8 编码导致字节损坏)
-          const byteArr = content.split(/[\s,]+/).filter(Boolean).map(h => parseInt(h, 16));
-          if (byteArr.every(b => !isNaN(b))) sendInput(t.id, new Uint8Array(byteArr));
-        } else {
-      sendInput(t.id, content);
+      const byteArr = content.split(/[\s,]+/).filter(Boolean).map(h => parseInt(h, 16));
+      if (!byteArr.length || byteArr.some(b => Number.isNaN(b) || b < 0 || b > 255)) {
+        stopTimer();
+        return setStatus('HEX 字节无效 (00-FF)');
+      }
+      sendInput(t.id, new Uint8Array(byteArr), t.cfg.encoding);
+    } else {
+      sendInput(t.id, content, t.cfg.encoding);
     }
   }, interval);
   $('dlg-timer-mask').classList.add('hidden');
-  setStatus(`定时发送已开始: ${interval}ms`);
-  log(`定时发送开始: ${interval}ms "${content}"`);
+  setStatus(`定时发送已开始 → ${tab.cfg.name || tab.id} (${interval}ms)`);
+  log(`定时发送开始: tab=${tab.id} ${interval}ms "${content}"`);
 };
 $('btn-tm-stop').onclick = () => { stopTimer(); $('dlg-timer-mask').classList.add('hidden'); setStatus('定时发送已停止'); };
-function stopTimer() { if (_timerHandle) { clearInterval(_timerHandle); _timerHandle = null; } }
+function stopTimer() { if (_timerHandle) { clearInterval(_timerHandle); _timerHandle = null; _timerTargetId = null; } }
 
 // ---------- 快捷命令 (Xshell 命令集: 按 IP 独立, 可连接时自动执行) ----------
 // 存储: localStorage['sshterm.commands.<ip>'] = { auto: bool, items: [{name, cmd}] }
@@ -2162,15 +2308,16 @@ function expandCommand(cmd, cfg) {
   const vars = { IP: cfg.host || '', HOST: cfg.host || '', PORT: cfg.port || '', NAME: cfg.name || '', SERIAL: cfg.port2 || cfg.port || '' };
   return String(cmd).replace(/\{(IP|HOST|PORT|NAME|SERIAL)\}/g, (_, k) => vars[k]);
 }
-let _scriptRun = null;
-function stopCommandScript() {
-  if (_scriptRun) _scriptRun.cancelled = true;
-  _scriptRun = null;
+let _scriptRuns = new Map();
+function stopCommandScript(tab) {
+  const run = tab && _scriptRuns.get(tab.id);
+  if (run) run.cancelled = true;
+  if (tab) _scriptRuns.delete(tab.id);
 }
 async function runCommandScript(tab, commands, options = {}) {
-  stopCommandScript();
-  const run = { cancelled: false };
-  _scriptRun = run;
+  stopCommandScript(tab);
+  const run = { cancelled: false, startSeq: tab._outputSeq || 0 };
+  _scriptRuns.set(tab.id, run);
   const delay = options.delay ?? 800;
   const timeout = options.timeout ?? 10000;
   for (const entry of commands) {
@@ -2182,13 +2329,15 @@ async function runCommandScript(tab, commands, options = {}) {
     let done = false;
     while (!done && attempts++ <= (item.retries || 0)) {
       if (run.cancelled) break;
-      sendInput(tab.id, cmd + (item.newline || '\n'));
+      const beforeSeq = tab._outputSeq || 0;
+      sendInput(tab.id, cmd + (item.newline || '\n'), tab.cfg.encoding);
       if (!item.waitFor) { await new Promise(r => setTimeout(r, item.delay ?? delay)); done = true; continue; }
       const re = new RegExp(item.waitFor, item.flags || '');
       const start = Date.now();
       while (!run.cancelled && Date.now() - start < (item.timeout || timeout)) {
-        const text = (tab.recParts || []).join('');
-        if (re.test(text)) { done = true; break; }
+        const parts = (tab.recParts || []).slice(Math.max(0, (tab.recParts.length - 20)));
+        const text = parts.join('');
+        if ((tab._outputSeq || 0) > beforeSeq && re.test(text)) { done = true; break; }
         await new Promise(r => setTimeout(r, 100));
       }
       if (!done && attempts <= (item.retries || 0)) setStatus(`等待响应超时, 重试 ${attempts}/${item.retries}`);
@@ -2198,13 +2347,11 @@ async function runCommandScript(tab, commands, options = {}) {
       break;
     }
   }
-  if (_scriptRun === run) _scriptRun = null;
+  if (_scriptRuns.get(tab.id) === run) _scriptRuns.delete(tab.id);
 }
-// 连接后自动执行: Xshell 风格 = 该 IP 命令集(auto=true) + 会话 autoCmds 合并执行
-function runAutoCmds(cfg) {
-  const tab = tabs.find(t => t.id === activeTabId && t.cfg === cfg);
-  const id = tab ? tab.id : null;
-  if (!id) return;
+function runAutoCmds(cfg, tabId) {
+  const tab = tabId ? tabs.find(t => t.id === tabId) : tabs.find(t => t.cfg === cfg);
+  if (!tab) return;
   // 1. IP 命令集 (auto 开启)
   const ipCmds = [];
   try {
@@ -2483,10 +2630,10 @@ function applySplitLayout(tab, dir, ratio) {
     container.style.display = 'grid';
     container.style.gridTemplateColumns = '1fr 1fr';
     container.style.gridTemplateRows = '1fr 1fr';
-    [main, ...tab.extraPanes].forEach((host, idx) => {
-      host.style.flex = '';
-      host.style.gridColumn = (idx % 2) + 1;
-      host.style.gridRow = Math.floor(idx / 2) + 1;
+    [main, ...tab.extraPanes.map(p => p.host)].forEach((hostEl, idx) => {
+      hostEl.style.flex = '';
+      hostEl.style.gridColumn = (idx % 2) + 1;
+      hostEl.style.gridRow = Math.floor(idx / 2) + 1;
     });
   }
   // save prefs for first pane dir/ratio
@@ -2724,7 +2871,7 @@ function initVncSession(tab) {
 
 function rememberedVncPassword(tab) {
   if (tab.vncPassword) return Promise.resolve(tab.vncPassword);
-  if (!tab.cfg.id || !tab.cfg.rememberPassword || ws.readyState !== WebSocket.OPEN) return Promise.resolve('');
+  if (!tab.cfg.id || !tab.cfg.rememberPassword || !ws || ws.readyState !== WebSocket.OPEN) return Promise.resolve('');
   const requestId = `vnc-${Date.now()}-${++vncCredentialRequestSeq}`;
   return new Promise(resolve => {
     const timer = setTimeout(() => {
@@ -2885,7 +3032,7 @@ $('mi-capture').onclick = () => {
     $('mi-capture').textContent = '⏹ 停止并保存抓包';
     setStatus('原始抓包已开始 (RX/TX HEX)');
   } else {
-    const blob = new Blob([tab.captureParts || []], { type: 'text/plain;charset=utf-8' });
+    const blob = new Blob((tab.captureParts || []).join(''), { type: 'text/plain;charset=utf-8' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = `sshterm-${tab.cfg.name || tab.id}-capture-${Date.now()}.log`;
@@ -2946,18 +3093,35 @@ async function replayRecording(file) {
   if (file.size > 10 * 1024 * 1024) throw new Error('录制文件超过 10 MB 上限');
   const recording = validateRecording(JSON.parse(await file.text()));
   const speed = Math.max(0.25, Math.min(16, Number(window.prompt('回放速度（0.25 - 16 倍）', '1')) || 1));
-  const cfg = { type: 'ssh', name: `回放：${recording.session?.name || '未命名会话'}`, host: recording.session?.host || '', port: recording.session?.port || 22 };
-  const tab = newTab(cfg, { connect: false });
-  setTabState(tab.id, 'closed', `只读回放（${speed}x）`);
-  tab.term.writeln('\x1b[33m[只读回放：录制文件不含键盘输入]\x1b[0m\r\n');
-  let previous = 0;
-  for (const event of recording.events) {
-    await new Promise(resolve => setTimeout(resolve, Math.min(30000, Math.max(0, event.at - previous) / speed)));
-    if (!tabs.includes(tab)) return;
-    tab.term.write(event.text);
-    previous = event.at;
+  openReplayTab({ type: 'replay', name: `回放：${recording.session?.name || '未命名会话'}`, host: recording.session?.host || '' }, '', recording.events, speed);
+}
+
+function openReplayTab(cfg, replayText = '', events = null, speed = 1) {
+  const tab = newTab({ ...cfg, type: 'replay', connect: false }, { connect: false });
+  tab.readonly = true;
+  tab.cfg = { type: 'replay', name: cfg.name || '只读回放', connect: false };
+  setTabState(tab.id, 'closed', events ? `只读回放（${speed}x）` : '只读回放');
+  if (replayText) {
+    const replay = stripTruncatedSequence(replayText);
+    tab.recParts = [replay];
+    tab.recLen = replay.length;
+    tab.term.write(replay);
   }
-  setStatus('会话回放完成');
+  tab.term.writeln('\r\n\x1b[33m[只读回放：不会建立远端连接]\x1b[0m\r\n');
+  if (events) {
+    (async () => {
+      let previous = 0;
+      for (const event of events) {
+        await new Promise(resolve => setTimeout(resolve, Math.min(30000, Math.max(0, event.at - previous) / speed)));
+        if (!tabs.includes(tab)) return;
+        tab.term.write(event.text);
+        previous = event.at;
+      }
+      setStatus('会话回放完成');
+    })();
+  }
+  saveTabs();
+  return tab;
 }
 $('mi-replay').onclick = () => { $('menu-more').classList.add('hidden'); $('recording-import-file').click(); };
 $('recording-import-file').onchange = async (event) => {
@@ -3117,6 +3281,7 @@ async function streamDownloadToFile(url, handlePromise, onProg, retries = 3) {
   const cancel = $('sftp-cancel-transfer');
   let received = 0;
   let total = 0;
+  let remoteIdentity = '';
   let committed = false;
   activeDownload = { controller };
   cancel.classList.remove('hidden');
@@ -3124,14 +3289,22 @@ async function streamDownloadToFile(url, handlePromise, onProg, retries = 3) {
   try {
     for (let attempt = 0; ; attempt++) {
       try {
-        const headers = received ? { Range: `bytes=${received}-` } : {};
+        const headers = received > 0
+          ? { Range: `bytes=${received}-`, ...(remoteIdentity ? { 'X-Remote-Identity': remoteIdentity } : {}) }
+          : {};
         const response = await fetch(url, { headers, signal: controller.signal });
+        if (response.status === 412) throw new Error('远端文件已变更，无法续传');
+        if (response.status === 416) {
+          if (total > 0 && received === total) break;
+          throw new Error('续传范围无效');
+        }
         if (!response.ok || !response.body) throw new Error(`下载请求失败: ${response.status}`);
-        if (received && response.status !== 206) throw new Error('服务端未接受断点续传');
+        if (received > 0 && response.status !== 206) throw new Error('服务端未接受断点续传');
+        remoteIdentity = response.headers.get('X-Remote-Identity') || remoteIdentity;
         const range = response.headers.get('Content-Range');
         const length = Number(response.headers.get('Content-Length') || 0);
         total = range ? Number(range.split('/')[1]) : (length || total);
-        if (received) await writable.seek(received);
+        if (received > 0) await writable.seek(received);
         const reader = response.body.getReader();
         while (true) {
           const { done, value } = await reader.read();
@@ -3145,7 +3318,7 @@ async function streamDownloadToFile(url, handlePromise, onProg, retries = 3) {
         }
         await writable.close();
         committed = true;
-        return { saved: true, size: received };
+        return { saved: true, size: received, remoteIdentity };
       } catch (error) {
         if (error.name === 'AbortError' || attempt >= retries) throw error;
         setStatus(`下载中断，已从 ${fmtSize(received)} 处自动续传 ${attempt + 1}/${retries}`);
@@ -3168,6 +3341,7 @@ async function resumableDownload(url, onProg, retries = 3) {
   const chunks = [];
   let received = 0;
   let total = 0;
+  let remoteIdentity = '';
   const cancel = $('sftp-cancel-transfer');
   cancel.classList.remove('hidden');
   cancel.onclick = cancelActiveDownload;
@@ -3176,9 +3350,20 @@ async function resumableDownload(url, onProg, retries = 3) {
       const controller = new AbortController();
       activeDownload = { controller };
       try {
-        const headers = received ? { Range: `bytes=${received}-` } : {};
+        const headers = received > 0
+          ? { Range: `bytes=${received}-`, ...(remoteIdentity ? { 'X-Remote-Identity': remoteIdentity } : {}) }
+          : {};
         const response = await fetch(url, { headers, signal: controller.signal });
+        if (response.status === 412) throw new Error('远端文件已变更，无法续传');
+        if (response.status === 416) {
+          if (total > 0 && received === total) {
+            return new Blob(chunks, { type: 'application/octet-stream' });
+          }
+          throw new Error('续传范围无效');
+        }
         if (!response.ok || !response.body) throw new Error(`下载请求失败: ${response.status}`);
+        if (received > 0 && response.status !== 206) throw new Error('服务端未接受断点续传');
+        remoteIdentity = response.headers.get('X-Remote-Identity') || remoteIdentity;
         const range = response.headers.get('Content-Range');
         const length = Number(response.headers.get('Content-Length') || 0);
         total = range ? Number(range.split('/')[1]) : (length || total);
@@ -3189,6 +3374,9 @@ async function resumableDownload(url, onProg, retries = 3) {
           chunks.push(value);
           received += value.byteLength;
           if (onProg) onProg(received, total);
+        }
+        if (total > 0 && received !== total) {
+          throw new Error(`下载不完整: ${fmtSize(received)}/${fmtSize(total)}`);
         }
         return new Blob(chunks, { type: 'application/octet-stream' });
       } catch (err) {
@@ -3224,25 +3412,40 @@ function remoteSize(url) {
     xhr.open('HEAD', url);
     xhr.onload = () => {
       const sz = xhr.getResponseHeader('X-Remote-Size');
-      resolve(sz ? parseInt(sz, 10) : 0);
+      const mt = xhr.getResponseHeader('X-Remote-Mtime');
+      resolve({
+        size: sz ? parseInt(sz, 10) : 0,
+        mtime: mt ? parseInt(mt, 10) : 0,
+        status: xhr.status,
+      });
     };
-    xhr.onerror = () => resolve(0);
+    xhr.onerror = () => resolve({ size: 0, mtime: 0, status: 0 });
     xhr.send();
   });
 }
-// 上传单个文件: HEAD 检查远端已有大小后单流续传。过去的浏览器
-// 多分块并发会让 r+ 分块抢在首个 w 创建文件之前执行，并且会绕过
-// 服务端的资源控制；并发由服务端在“文件”粒度统一管理。
+async function remoteChecksum(tabId, dirPath, name) {
+  const url = apiUrl('/api/sftp/checksum', { conn: tabId, path: `${dirPath}/${name}`.replace(/\/+/g, '/') });
+  try {
+    const resp = await fetch(url, { cache: 'no-store' });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    return data.hash || null;
+  } catch { return null; }
+}
 async function uploadFileSmart(tabId, dirPath, name, file, onProg) {
   const base = apiUrl('/api/sftp/upload', { conn: tabId, path: dirPath, name });
   const remote = await remoteSize(base);
-  let offset = remote > file.size ? 0 : remote;
+  let offset = remote.size > file.size ? 0 : remote.size;
   if (file.size > 0 && offset === file.size) {
-    onProg(1);
-    return { status: 200, payload: null, skipped: true };
+    const localHash = await sha256File(file);
+    const remoteHash = localHash ? await remoteChecksum(tabId, dirPath, name) : null;
+    if (localHash && remoteHash && localHash === remoteHash) {
+      onProg(1);
+      return { status: 200, payload: { hash: remoteHash }, skipped: true };
+    }
+    offset = 0;
   }
 
-  // 单线程续传: 从 offset 继续
   const blob = file.slice(offset);
   const result = await xhrUpload(`${base}&offset=${offset}`, blob, (loaded, t) => {
     onProg((offset + loaded) / file.size);
@@ -3264,12 +3467,13 @@ function startNativeDownload(url, name) {
 $('sftp-upload').onclick = () => $('sftp-file-input').click();
 $('sftp-file-input').onchange = async (e) => {
   const files = [...(e.target.files || [])]; if (!files.length) return;
+  const snapshot = { connId: sftpConnId, path: sftpPath };
   $('sftp-local-list').innerHTML = files.map(f => `<div class="sftp-item"><span class="sftp-ico">📄</span><span class="sftp-name">${esc(f.name)}</span><span class="sftp-size">${fmtSize(f.size)}</span></div>`).join('');
   for (const file of files) {
     await waitForUploadQueue();
     const task = newTransferTask('上传', file.name); showProgress(`上传: ${file.name} 0%`, 0);
     try {
-      const result = await uploadFileSmart(sftpConnId, sftpPath, file.name, file,
+      const result = await uploadFileSmart(snapshot.connId, snapshot.path, file.name, file,
         p => { showProgress(`上传: ${file.name} ${(p * 100).toFixed(0)}%`, p * 100); updateTransferTask(task, p * 100); });
       if (result.status !== 200) throw new Error('服务端返回 ' + result.status);
       updateTransferTask(task, 100, 'running', '校验中');
@@ -3290,6 +3494,7 @@ $('sftp-upload-dir').onclick = () => $('sftp-dir-input').click();
 $('sftp-dir-input').onchange = async (e) => {
   const files = [...(e.target.files || [])];
   if (!files.length) return;
+  const snapshot = { connId: sftpConnId, path: sftpPath };
   const total = files.length;
   const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
   const progressByFile = new Array(total).fill(0);
@@ -3311,7 +3516,7 @@ $('sftp-dir-input').onchange = async (e) => {
       const f = files[i];
       const rel = f.webkitRelativePath || f.name;
       try {
-        const result = await uploadFileSmart(sftpConnId, sftpPath, rel, f,
+        const result = await uploadFileSmart(snapshot.connId, snapshot.path, rel, f,
           filePct => updateOverallProgress(i, filePct, rel));
         if (result.status === 200) { ok++; updateOverallProgress(i, 1, rel); } else fail++;
       } catch (err) { fail++; }

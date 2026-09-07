@@ -1,0 +1,39 @@
+[
+  {
+    "id": "TIMER_TARGET_CHANGED",
+    "evidence": [
+      {
+        "id": 2,
+        "s": "DEVICE_COMMAND"
+      }
+    ]
+  },
+  {
+    "id": "DISPLAY_PENDING_REMOTE_LINE",
+    "evidence": [
+      "display /tmp/a.png"
+    ]
+  },
+  {
+    "id": "MULTIWINDOW_STORAGE",
+    "evidence": {
+      "visible": [
+        "WINDOW_A"
+      ],
+      "saved": [
+        "WINDOW_B"
+      ]
+    }
+  },
+  {
+    "id": "REPLAY_AUTO_RECONNECT",
+    "evidence": {
+      "savedConfig": {
+        "type": "ssh",
+        "name": "readonly replay",
+        "host": "audit.invalid"
+      },
+      "persistedConnectFlag": null
+    }
+  }
+]
