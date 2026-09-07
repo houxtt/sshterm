@@ -1377,7 +1377,7 @@ function activateTab(id) {
   closeSearch();
   if (sftpOpen) {
     const tab = tabs.find(t => t.id === id);
-    if (tab && tab.cfg.type === 'ssh' && tab.state === 'connected') {
+    if (isSftpEligibleTab(tab)) {
       sftpConnId = tab.id;
       sftpPath = '.';
       sftpBusy = true;
@@ -2309,10 +2309,29 @@ function fmtSize(n) {
   return (n / 1073741824).toFixed(2) + 'GB';
 }
 
+function isSftpEligibleTab(tab) {
+  return !!(tab && tab.cfg.type === 'ssh' && tab.state === 'connected');
+}
+
+function closeSftpPanel() {
+  sftpOpen = false;
+  sftpConnId = null;
+  sftpBusy = false;
+  sftpSelectMode = false;
+  sftpSelectedItems.clear();
+  sftpListEntries = [];
+  $('sftp-panel')?.classList.add('hidden');
+  $('terms')?.classList.remove('sftp-open');
+  if ($('sftp-path')) $('sftp-path').value = '';
+  if ($('sftp-list')) $('sftp-list').innerHTML = '';
+  if ($('sftp-status')) $('sftp-status').textContent = '';
+  updateSftpSelectUi();
+}
+
 // 文件面板按钮可用性: 仅 SSH 已连接时可用
 function updateSftpBtn() {
   const tab = tabs.find(t => t.id === activeTabId);
-  const ok = !!(tab && tab.cfg.type === 'ssh' && tab.state === 'connected');
+  const ok = isSftpEligibleTab(tab);
   $('btn-sftp').disabled = !ok;
   $('btn-sftp').title = ok ? 'SSH 文件浏览/下载 (SFTP)' : '文件面板仅 SSH 已连接时可用';
   $('btn-tunnel').disabled = !ok;
@@ -2320,27 +2339,29 @@ function updateSftpBtn() {
   const terminalSession = !!(tab && tab.cfg.type !== 'vnc');
   $('btn-split').disabled = !terminalSession;
   $('btn-cmds').disabled = !terminalSession;
+  if (sftpOpen && !ok) closeSftpPanel();
 }
 
 function toggleSftpPanel() {
   const tab = tabs.find(t => t.id === activeTabId);
   if (!tab) return setStatus('没有激活的会话');
-  if (tab.cfg.type !== 'ssh') return setStatus('文件面板仅支持 SSH 会话');
-  if (tab.state !== 'connected') return setStatus('SSH 未连接, 无法访问文件');
-  sftpOpen = !sftpOpen;
-  $('sftp-panel').classList.toggle('hidden', !sftpOpen);
-  $('terms').classList.toggle('sftp-open', sftpOpen);
+  if (!isSftpEligibleTab(tab)) return setStatus('文件面板仅支持 SSH 已连接会话');
   if (sftpOpen) {
-    sftpConnId = tab.id;
-    sftpPath = '.';
-    sftpBusy = true;
-    $('sftp-path').value = '';
-    $('sftp-list').innerHTML = '';
-    $('sftp-status').textContent = '定位当前目录…';
-    // 每次打开都向交互式 shell 查询 pwd，与终端 cwd 同步
-    send({ type: 'sftp', id: sftpConnId, action: 'cwd', fresh: true });
-    setTimeout(constrainSftpColumns, 0);
+    closeSftpPanel();
+    return;
   }
+  sftpOpen = true;
+  $('sftp-panel').classList.remove('hidden');
+  $('terms').classList.add('sftp-open');
+  sftpConnId = tab.id;
+  sftpPath = '.';
+  sftpBusy = true;
+  $('sftp-path').value = '';
+  $('sftp-list').innerHTML = '';
+  $('sftp-status').textContent = '定位当前目录…';
+  // 每次打开都向交互式 shell 查询 pwd，与终端 cwd 同步
+  send({ type: 'sftp', id: sftpConnId, action: 'cwd', fresh: true });
+  setTimeout(constrainSftpColumns, 0);
 }
 
 function sftpLoad() {
@@ -3555,7 +3576,7 @@ $('btn-killall').onclick = () => {
   for (const t of [...tabs]) doCloseTab(t.id);
   setStatus(`已关闭 ${n} 个会话`);
 };
-$('sftp-close').onclick = () => { sftpOpen = false; $('sftp-panel').classList.add('hidden'); $('terms').classList.remove('sftp-open'); };
+$('sftp-close').onclick = () => { closeSftpPanel(); };
 $('sftp-up').onclick = () => {
   if (sftpPath === '/' || sftpPath === '.') return;
   const idx = sftpPath.lastIndexOf('/');
