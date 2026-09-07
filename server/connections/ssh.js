@@ -167,6 +167,30 @@ function forwardThrough(client, host, port) {
   return new Promise((resolve, reject) => client.forwardOut('127.0.0.1', 0, host, port, (err, stream) => err ? reject(err) : resolve(stream)));
 }
 
+function parseRemoteMem(body) {
+  const readKb = (text, key) => {
+    const m = text.match(new RegExp(`^${key}:\\s+(\\d+)`, 'm'));
+    return m ? Number(m[1]) : 0;
+  };
+  const infoStart = body.indexOf('MEMINFO_START');
+  const infoEnd = body.indexOf('MEMINFO_END');
+  if (infoStart >= 0 && infoEnd > infoStart) {
+    const info = body.slice(infoStart, infoEnd);
+    const totalKb = readKb(info, 'MemTotal');
+    const availKb = readKb(info, 'MemAvailable') || readKb(info, 'MemFree');
+    if (totalKb > 0) {
+      const usedKb = Math.max(0, totalKb - availKb);
+      return { memUsed: usedKb * 1024, memTotal: totalKb * 1024 };
+    }
+  }
+  const memMatches = body.match(/MEM\s+(\d+)\s+(\d+)/g);
+  const memLine = memMatches ? memMatches[memMatches.length - 1].match(/MEM\s+(\d+)\s+(\d+)/) : null;
+  if (memLine) {
+    return { memUsed: Number(memLine[1]), memTotal: Number(memLine[2]) };
+  }
+  return { memUsed: 0, memTotal: 0 };
+}
+
 class SSHConnection extends BaseConnection {
   constructor(config) {
     super(config);
@@ -252,8 +276,10 @@ class SSHConnection extends BaseConnection {
           this.stream = stream;
           this.state = 'connected';
           stream.on('data', (d) => {
-            this._trackOsc7Cwd(d);
-            this._emitData(d);
+            for (const chunk of this._consumeShellData(d)) {
+              this._trackOsc7Cwd(chunk);
+              this._emitData(chunk);
+            }
           });
           stream.on('close', () => {
             this._emitClose('SSH 会话已关闭');
@@ -416,8 +442,10 @@ class SSHConnection extends BaseConnection {
         const sub = { files: [], dirs: [] };
         if (!entries.list.length) emptyDirs.push(item.base || '.');
         for (const e of entries.list) {
-          const full = item.dir.endsWith('/') ? item.dir + e.filename : `${item.dir}/${e.filename}`;
-          const name = item.base ? `${item.base}/${e.filename}` : e.filename;
+          const filename = String(e.filename || '').trim();
+          if (!filename || filename === '.' || filename === '..') continue;
+          const full = item.dir.endsWith('/') ? item.dir + filename : `${item.dir}/${filename}`;
+          const name = item.base ? `${item.base}/${filename}` : filename;
           if (e.attrs.isDirectory()) {
             if (!seen.has(full)) { seen.add(full); sub.dirs.push({ dir: full, base: name, isRoot: false }); }
           } else {
@@ -440,21 +468,88 @@ class SSHConnection extends BaseConnection {
 
   getSftpInst() { return this._sftp; }
 
-  // 获取 shell 当前目录 (通过独立 exec 通道执行 pwd, 不污染交互式 PTY)
-  getShellCwd() {
+  // fresh: 通过交互式 shell 执行 pwd (与终端 cwd 一致); 否则优先 OSC7 缓存
+  getShellCwd(opts = {}) {
+    if (!this.client || this.state !== 'connected') return Promise.resolve(this._shellCwd || null);
+    if (opts.fresh && this.stream) return this._queryShellCwdViaPty();
     if (this._shellCwd) return Promise.resolve(this._shellCwd);
-    if (!this.client || this.state !== 'connected') return Promise.resolve(null);
+    return this._execPwdFallback();
+  }
+
+  _execPwdFallback() {
     return new Promise((resolve) => {
       this.client.exec('pwd', (err, stream) => {
-        if (err) return resolve(null);
+        if (err) return resolve(this._shellCwd || null);
         let out = '';
         stream.on('data', (d) => { out += d.toString('utf8'); });
         stream.on('close', () => {
           const lines = out.trim().split(/\r?\n/).filter(Boolean);
-          resolve(lines.length ? lines[lines.length - 1].trim() : null);
+          const pwd = lines.length ? lines[lines.length - 1].trim() : null;
+          if (pwd && pwd.startsWith('/')) this._shellCwd = pwd;
+          resolve(pwd || this._shellCwd || null);
         });
-        stream.on('error', () => resolve(null));
+        stream.on('error', () => resolve(this._shellCwd || null));
       });
+    });
+  }
+
+  _finishPwdCapture(pwd) {
+    const cap = this._pwdCapture;
+    if (!cap) return;
+    clearTimeout(cap.timer);
+    this._pwdCapture = null;
+    cap.resolve(pwd || this._shellCwd || null);
+  }
+
+  _consumeShellData(chunk) {
+    if (!this._pwdCapture) {
+      return [Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk))];
+    }
+    const cap = this._pwdCapture;
+    cap.buf = Buffer.concat([
+      cap.buf,
+      Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)),
+    ]);
+    const text = cap.buf.toString('utf8');
+    const re = new RegExp(`${cap.startRe}\\r?\\n([^\\r\\n]+)\\r?\\n${cap.endRe}`);
+    const m = re.exec(text);
+    if (!m) {
+      if (text.length > 16384) {
+        const leftover = cap.buf;
+        this._finishPwdCapture(null);
+        return leftover.length ? [leftover] : [];
+      }
+      return [];
+    }
+    const pwd = m[1].trim();
+    if (pwd.startsWith('/')) this._shellCwd = pwd;
+    const after = text.slice(m.index + m[0].length);
+    this._finishPwdCapture(pwd);
+    // 探测命令的回显/输出全部丢弃，只放行结束标记之后的数据
+    return after ? [Buffer.from(after, 'utf8')] : [];
+  }
+
+  _queryShellCwdViaPty(timeoutMs = 3500) {
+    if (this._pwdCapture) return Promise.resolve(this._shellCwd || null);
+    const token = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    const start = `__SSHTERM_PWD_START_${token}__`;
+    const end = `__SSHTERM_PWD_END_${token}__`;
+    const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new Promise((resolve) => {
+      this._pwdCapture = {
+        startRe: esc(start),
+        endRe: esc(end),
+        buf: Buffer.alloc(0),
+        resolve,
+        timer: setTimeout(() => {
+          if (!this._pwdCapture) return;
+          this._finishPwdCapture(null);   // 超时丢弃全部缓冲，不回灌终端
+        }, timeoutMs),
+      };
+      // stty -echo 降低命令回显；服务端仍会过滤 START..END 之间的所有输出
+      this.stream.write(
+        `{ stty -echo 2>/dev/null; printf '\\n${start}\\n'; pwd; printf '${end}\\n\\n'; stty echo 2>/dev/null; } 2>/dev/null\n`,
+      );
     });
   }
 
@@ -732,8 +827,10 @@ class SSHConnection extends BaseConnection {
       // 单条命令尽量兼容主流 Linux/macOS (BusyBox 也基本支持)
       const script = [
         'echo __SSHTERM_STATS_START__',
-        // RAM (free -b 输出 bytes; 兼容无 -b 的旧版, 用 awk 兜底)
-        'free -b 2>/dev/null | awk \'/Mem:/{printf "MEM %d %d\\n", $3, $2}\' || free | awk \'/Mem:/{printf "MEM %d %d\\n", $3*1024, $2*1024}\'',
+        'echo MEMINFO_START',
+        'head -n 24 /proc/meminfo 2>/dev/null || true',
+        'echo MEMINFO_END',
+        'free -b 2>/dev/null | awk \'/Mem:/{printf "MEM %d %d\\n", $3, $2; exit}\' || free | awk \'/Mem:/{printf "MEM %d %d\\n", $3*1024, $2*1024; exit}\'',
         // 1/5/15 分钟负载 + CPU 核数
         'echo LOAD $(cat /proc/loadavg 2>/dev/null | awk \'{print $1" "$2" "$3}\') $(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 0)',
         // 主机名
@@ -767,7 +864,7 @@ class SSHConnection extends BaseConnection {
             const end = buf.indexOf('__SSHTERM_STATS_END__');
             if (start < 0 || end < 0) return finish(new Error('主机状态输出无法解析'));
             const body = buf.slice(start, end);
-            const mem = body.match(/MEM\s+(\d+)\s+(\d+)/);
+            const { memUsed, memTotal } = parseRemoteMem(body);
             const load = body.match(/LOAD\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+(\d+)/);
             const host = body.match(/HOST\s+(.+)/);
             // 磁盘: 每个 DISK 行 -> 挂载点 用量% 可用 总量
@@ -784,8 +881,6 @@ class SSHConnection extends BaseConnection {
               disk.sort((a, b) => b.pct - a.pct);
               disk.splice(5);
             }
-            const memUsed = mem ? Number(mem[1]) : 0;
-            const memTotal = mem ? Number(mem[2]) : 0;
             finish(null, {
               memUsed,
               memTotal,
@@ -803,5 +898,5 @@ class SSHConnection extends BaseConnection {
     }
 }
 
-SSHConnection._test = { readyTimeoutFor, connectionErrorMessage, forceDestroyClient };
+SSHConnection._test = { readyTimeoutFor, connectionErrorMessage, forceDestroyClient, parseRemoteMem };
 module.exports = SSHConnection;

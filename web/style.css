@@ -209,6 +209,7 @@ button.mini { padding: 2px 8px; font-size: 11px; }
   flex: 1; background: #1a1b26; color: #a9b1d6; border: 1px solid #3a3b4d;
   border-radius: 4px; padding: 3px 6px; font-size: 12px;
 }
+.sftp-download-dir-hint { padding: 2px 10px 5px; font-size: 11px; border-bottom: 1px solid #2a2b3a; color: #565f89; }
 #sftp-columns { flex:1; display:flex; min-height:0; }
 .sftp-column { flex:1 1 0; min-width:0; display:flex; flex-direction:column; border-right:1px solid #2a2b3a; }
 .sftp-column:last-child { border-right:0; }
@@ -295,7 +296,16 @@ button.mini { padding: 2px 8px; font-size: 11px; }
 #sftp-tasks.hidden { display:none; }
 .sftp-task { display:flex; gap:6px; padding:2px 0; }
 .sftp-task-name { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.sftp-task.failed { color:#f87171; }.sftp-task.done { color:#86efac; }
+.sftp-task.failed { color:#f87171; }.sftp-task.done { color:#86efac; }.sftp-task.partial { color:#fbbf24; }
+.sftp-task-failure { display:flex; gap:8px; padding:2px 0 2px 12px; font-size:10px; color:#f87171; }
+.sftp-task-failure .sftp-failure-error { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#fca5a5; }
+#sftp-failures { padding:6px 10px; border-bottom:1px solid #3f2a2a; background:#1a1010; font-size:11px; max-height:120px; overflow:auto; }
+#sftp-failures.hidden { display:none; }
+.sftp-failures-title { color:#f87171; font-weight:600; margin-bottom:4px; }
+.sftp-failure-item { display:flex; gap:8px; padding:3px 0; border-top:1px solid #2a2020; }
+.sftp-failure-item:first-child { border-top:none; }
+.sftp-failure-name { color:#fecaca; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:45%; }
+.sftp-failure-error { flex:1; color:#fca5a5; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
 #dlg-occ-mask {
   position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 115;

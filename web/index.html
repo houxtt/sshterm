@@ -59,7 +59,7 @@
         <button id="batch-del" class="danger mini"><span id="batch-del-text">删除选中</span>(<span id="batch-n">0</span>)</button>
         <button id="batch-cancel" class="mini">取消</button>
       </div>
-      <div class="side-foot muted" id="side-foot">双击编辑配置 · 或单击编辑按钮</div>
+      <div class="side-foot muted" id="side-foot">双击连接 · 悬停可编辑/删除</div>
     </aside>
     <div id="sidebar-divider" title="拖动调整已保存会话宽度"></div>
 
@@ -84,8 +84,11 @@
                 <button id="sftp-upload" class="mini" title="上传文件到当前目录">⬆️传</button>
                 <button id="sftp-upload-dir" class="mini" title="上传整个文件夹(含子目录)">📂传</button>
                 <button id="sftp-refresh" class="mini" title="刷新">⟳</button>
+                <button id="sftp-pick-download-dir" class="mini" title="选择下载保存的本地目录">📂 本地目录</button>
+                <button id="sftp-download-current-dir" class="mini" title="将当前远端目录下载到本地目录">⬇ 下载当前目录</button>
                 <button id="sftp-close" class="mini" title="关闭面板">✕</button>
               </div>
+              <div id="sftp-download-dir-hint" class="sftp-download-dir-hint muted">本地目录: <span id="sftp-download-dir-label">未选择（下载前需指定）</span></div>
         <input type="file" id="sftp-file-input" class="hidden" multiple>
         <input type="file" id="sftp-dir-input" class="hidden" webkitdirectory>
         <div id="sftp-progress" class="hidden">
@@ -94,6 +97,10 @@
           <button id="sftp-cancel-transfer" class="mini danger hidden" title="取消当前下载">取消</button>
         </div>
         <div id="sftp-tasks" class="hidden"><button id="sftp-queue-toggle" class="mini">⏸ 暂停队列</button></div>
+        <div id="sftp-failures" class="hidden">
+          <div class="sftp-failures-title">下载失败</div>
+          <div id="sftp-failures-list"></div>
+        </div>
         <div id="sftp-columns">
           <section id="sftp-local-column" class="sftp-column"><div class="sftp-col-title">本地待传文件</div><div id="sftp-local-list"></div></section>
           <div id="sftp-columns-divider" title="拖动调整本地与远端目录宽度"></div>

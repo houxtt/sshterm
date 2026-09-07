@@ -1275,10 +1275,10 @@ async function handle(ws, m) {
       if (!conn || conn.state !== 'connected') break;
       if (typeof conn.getHostStats !== 'function') break; // 仅 SSH 支持
       conn.getHostStats().then(stats => {
-        send(ws, { type: 'hostinfo', id: m.id, ...stats });
+        send(ws, { type: 'hostinfo', id: m.id, localUptimeSec: Math.floor(os.uptime()), ...stats });
       }).catch(e => {
         // 采集失败不打断终端, 仅回空 (前端显示 —)
-        send(ws, { type: 'hostinfo', id: m.id, error: String(e.message || e) });
+        send(ws, { type: 'hostinfo', id: m.id, error: String(e.message || e), localUptimeSec: Math.floor(os.uptime()) });
       });
       break;
     }
@@ -1609,9 +1609,25 @@ async function handle(ws, m) {
           send(ws, { type: 'error', id: m.id, msg: `SFTP: ${e.message}` });
         }
       } else if (m.action === 'cwd') {
-        // 获取 shell 当前目录 (定位文件面板)
-        const cwd = await conn.getShellCwd();
+        // 获取 shell 当前目录 (定位文件面板; fresh 走交互式 shell pwd)
+        const cwd = await conn.getShellCwd({ fresh: !!m.fresh });
         send(ws, { type: 'sftp', id: m.id, action: 'cwd', path: cwd });
+      } else if (m.action === 'scan') {
+        try {
+          const listed = await conn.sftpList(m.path || '.');
+          const collected = await conn.sftpCollectFiles(listed.path);
+          const symlinks = (collected.files || []).filter((f) => f.isSymlink).length;
+          const skippedDirs = Array.isArray(collected.skipped) ? collected.skipped.length : 0;
+          send(ws, {
+            type: 'sftp', id: m.id, action: 'scan', path: listed.path,
+            files: (collected.files || []).filter((f) => !f.isSymlink).map((f) => ({
+              path: f.path, name: f.name, size: f.size,
+            })),
+            skipped: symlinks + skippedDirs,
+          });
+        } catch (e) {
+          send(ws, { type: 'error', id: m.id, msg: `SFTP: ${e.message}` });
+        }
       }
       break;
     }

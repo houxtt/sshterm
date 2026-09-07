@@ -103,6 +103,47 @@ function mockPipeable() {
     assert.throws(() => conn._joinRemote({}, '/opt/app/old.txt', 'a/b'), /名称无效/);
   }
 
+  // ---------- 6) 远端 RAM 解析 (/proc/meminfo 优先) ----------
+  {
+    const { parseRemoteMem } = SSHConnection._test;
+    const sample = [
+      '__SSHTERM_STATS_START__',
+      'MEMINFO_START',
+      'MemTotal:       67108864 kB',
+      'MemAvailable:   33554432 kB',
+      'MemFree:        16777216 kB',
+      'MEMINFO_END',
+      '__SSHTERM_STATS_END__',
+    ].join('\n');
+    const mem = parseRemoteMem(sample);
+    assert.strictEqual(mem.memTotal, 67108864 * 1024);
+    assert.strictEqual(mem.memUsed, (67108864 - 33554432) * 1024);
+    const fallback = parseRemoteMem('MEM 2048 4096\n');
+    assert.deepStrictEqual(fallback, { memUsed: 2048, memTotal: 4096 });
+  }
+
+  // ---------- 7) 交互式 shell pwd 查询 (过滤终端输出) ----------
+  {
+    const conn = makeConn();
+    conn._emitData = () => {};
+    conn.stream = { write: () => {}, on: () => {}, removeListener: () => {} };
+    const token = 'abc123';
+    const start = `__SSHTERM_PWD_START_${token}__`;
+    const end = `__SSHTERM_PWD_END_${token}__`;
+    conn._pwdCapture = {
+      startRe: start.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+      endRe: end.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+      buf: Buffer.alloc(0),
+      resolve: () => {},
+      timer: setTimeout(() => {}, 1000),
+    };
+    const out = conn._consumeShellData(Buffer.from(`noise\r\n${start}\r\n/home/logic\r\n${end}\r\nrest`));
+    assert.strictEqual(conn._shellCwd, '/home/logic');
+    assert.strictEqual(out.length, 1);
+    assert.ok(out[0].toString('utf8').includes('rest'));
+    assert.ok(!out[0].toString('utf8').includes('noise'));
+  }
+
   console.log('✅ SSH reliability contract passed');
 })().catch((e) => {
   console.error(e);
