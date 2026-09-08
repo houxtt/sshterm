@@ -447,26 +447,142 @@ function fmtDuration(ms) {
   if (m > 0) return `${m}分${sec}秒`;
   return `${sec}秒`;
 }
+const CPU_SPARK_N = 64;
+const CPU_SPARK_W = 96;
+const CPU_SPARK_H = 16;
+const CPU_SPARK_FILL = '#3ecf8e';
+const CPU_SPARK_STROKE = '#7eecc0';
+
+function cpuSampleValue(hist, i, n) {
+  const raw = hist[hist.length - n + i];
+  const val = raw == null ? 0 : Number(raw);
+  return Number.isFinite(val) ? Math.max(0, Math.min(100, val)) : 0;
+}
+
+function cpuSparkPoints(hist) {
+  const w = CPU_SPARK_W, h = CPU_SPARK_H, n = CPU_SPARK_N;
+  const pts = [];
+  for (let i = 0; i < n; i++) {
+    const val = cpuSampleValue(hist, i, n);
+    pts.push({
+      x: n <= 1 ? 0 : (i / (n - 1)) * w,
+      y: 0.5 + (1 - val / 100) * (h - 1),
+    });
+  }
+  return pts;
+}
+
+function cpuCatmullPath(pts) {
+  if (!pts.length) return '';
+  const h = CPU_SPARK_H;
+  const clampY = (y) => Math.max(0, Math.min(h, y));
+  let d = `M ${pts[0].x.toFixed(2)} ${pts[0].y.toFixed(2)}`;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[i - 1] || pts[i];
+    const p1 = pts[i];
+    const p2 = pts[i + 1];
+    const p3 = pts[i + 2] || p2;
+    const c1x = p1.x + (p2.x - p0.x) / 6;
+    const c1y = clampY(p1.y + (p2.y - p0.y) / 6);
+    const c2x = p2.x - (p3.x - p1.x) / 6;
+    const c2y = clampY(p2.y - (p3.y - p1.y) / 6);
+    d += ` C ${c1x.toFixed(2)} ${c1y.toFixed(2)} ${c2x.toFixed(2)} ${c2y.toFixed(2)} ${p2.x.toFixed(2)} ${p2.y.toFixed(2)}`;
+  }
+  return d;
+}
+
+function cpuSparkSvg(hist) {
+  const w = CPU_SPARK_W, h = CPU_SPARK_H;
+  const pts = cpuSparkPoints(hist || []);
+  if (!pts.length) {
+    return `<svg class="hi-spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-hidden="true"></svg>`;
+  }
+  const top = cpuCatmullPath(pts);
+  const rest = top.replace(/^M [-\d.]+ [-\d.]+/, '').trim();
+  const area = `M 0 ${h} L ${pts[0].x.toFixed(2)} ${pts[0].y.toFixed(2)}${rest ? ` ${rest}` : ''} L ${w} ${h} Z`;
+  return `<svg class="hi-spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-hidden="true">` +
+    `<path d="${area}" fill="${CPU_SPARK_FILL}" fill-opacity="0.92"/>` +
+    `<path d="${top}" fill="none" stroke="${CPU_SPARK_STROKE}" stroke-width="1.1" stroke-linejoin="round" stroke-linecap="round"/>` +
+    `</svg>`;
+}
+
+function pushCpuSample(tab, pct) {
+  if (!Array.isArray(tab.cpuHist)) tab.cpuHist = [];
+  if (!Array.isArray(tab.cpuDraw)) tab.cpuDraw = tab.cpuHist.slice();
+  const v = Math.max(0, Math.min(100, Number(pct)));
+  if (!Number.isFinite(v)) return;
+  tab.cpuHist.push(v);
+  if (tab.cpuHist.length > CPU_SPARK_N) tab.cpuHist.splice(0, tab.cpuHist.length - CPU_SPARK_N);
+  const prev = tab.cpuDraw.length ? tab.cpuDraw[tab.cpuDraw.length - 1] : v;
+  tab.cpuDraw.push(prev);
+  if (tab.cpuDraw.length > CPU_SPARK_N) tab.cpuDraw.splice(0, tab.cpuDraw.length - CPU_SPARK_N);
+}
+
+function cpuPctClass(pct) {
+  return pct >= 85 ? 'hi-warn' : (pct >= 60 ? 'hi-caution' : 'hi-ok');
+}
+
+function paintCpuWidget(tab, hist) {
+  const wrap = tab.hostinfoBar && tab.hostinfoBar.querySelector('.hi-spark-wrap');
+  if (!wrap) return;
+  const pct = hist.length ? hist[hist.length - 1] : 0;
+  const label = wrap.querySelector('[data-cpu-pct]');
+  if (label) {
+    label.className = cpuPctClass(pct);
+    label.textContent = `${Math.round(pct)}%`;
+  }
+  const next = cpuSparkSvg(hist);
+  const svg = wrap.querySelector('.hi-spark');
+  if (svg) svg.outerHTML = next;
+  else wrap.insertAdjacentHTML('beforeend', next);
+}
+
+function startCpuAnim(tab) {
+  if (tab._cpuRaf) return;
+  const step = () => {
+    tab._cpuRaf = 0;
+    const hist = tab.cpuHist || [];
+    if (!Array.isArray(tab.cpuDraw)) tab.cpuDraw = hist.slice();
+    while (tab.cpuDraw.length < hist.length) tab.cpuDraw.push(hist[tab.cpuDraw.length] ?? 0);
+    let dirty = false;
+    const len = Math.min(tab.cpuDraw.length, hist.length);
+    for (let i = 0; i < len; i++) {
+      const target = hist[i] ?? 0;
+      const cur = tab.cpuDraw[i] ?? target;
+      const next = cur + (target - cur) * 0.28;
+      tab.cpuDraw[i] = next;
+      if (Math.abs(target - next) > 0.2) dirty = true;
+    }
+    paintCpuWidget(tab, tab.cpuDraw);
+    if (dirty) tab._cpuRaf = requestAnimationFrame(step);
+  };
+  tab._cpuRaf = requestAnimationFrame(step);
+}
+
+function stopCpuAnim(tab) {
+  if (tab._cpuRaf) { cancelAnimationFrame(tab._cpuRaf); tab._cpuRaf = 0; }
+}
+
 function renderHostInfo(tab, s) {
   const bar = tab.hostinfoBar;
   if (!bar) return;
   if (s.error) {
-    const localDur = s.localUptimeSec != null ? fmtDuration(s.localUptimeSec * 1000) : '—';
-    bar.innerHTML = `<span class="hi-item hi-muted">状态采集不可用</span>` +
-      `<span class="hi-item">💻 本机开机 <span class="hi-ok">${localDur}</span></span>`;
+    bar.innerHTML = `<span class="hi-item hi-muted">状态采集不可用</span>`;
     return;
   }
   const memPct = s.memPct != null ? s.memPct : 0;
   const memCls = memPct >= 85 ? 'hi-warn' : (memPct >= 60 ? 'hi-caution' : 'hi-ok');
   const dur = tab.connectedAt ? fmtDuration(Date.now() - tab.connectedAt) : '—';
-  const localDur = s.localUptimeSec != null ? fmtDuration(s.localUptimeSec * 1000) : '—';
+  const cpuHist = tab.cpuDraw && tab.cpuDraw.length ? tab.cpuDraw : (tab.cpuHist || []);
+  const cpuPct = cpuHist.length ? cpuHist[cpuHist.length - 1] : 0;
+  const cpuCls = cpuPctClass(cpuPct);
   const ip = tab.cfg.host || '';
   const name = s.hostname || '';
   let html =
     `<span class="hi-item"><b>🖥 ${esc(name || ip)}</b> <span class="hi-muted">${esc(ip)}</span></span>` +
     `<span class="hi-item">💾 RAM <span class="${memCls}">${memPct}%</span> <span class="hi-muted">${fmtSize(s.memUsed)}/${fmtSize(s.memTotal)}</span></span>` +
     `<span class="hi-item">⚡ 负载 <span class="${memCls}">${s.load1}</span> <span class="hi-muted">(${s.load5}/${s.load15}, ${s.cores}核)</span></span>` +
-    `<span class="hi-item">💻 本机开机 <span class="hi-ok">${localDur}</span></span>` +
+    `<span class="hi-item hi-spark-wrap">💻 <span data-cpu-pct class="${cpuCls}">${Math.round(cpuPct)}%</span> ${cpuSparkSvg(cpuHist)}</span>` +
     `<span class="hi-item">⏱ 连接 <span class="hi-ok">${dur}</span></span>`;
   // 磁盘/挂载: 列出主要挂载点及用量 (按用量降序, 已取前 5)
   if (Array.isArray(s.disk) && s.disk.length) {
@@ -481,10 +597,17 @@ function renderHostInfo(tab, s) {
 }
 function startHostInfo(tab) {
   if (tab.hostinfoTimer) clearInterval(tab.hostinfoTimer);
+  if (tab.cpuTimer) clearInterval(tab.cpuTimer);
+  stopCpuAnim(tab);
   tab.connectedAt = Date.now();
+  tab.cpuHist = [];
+  tab.cpuDraw = [];
   const tick = () => send({ type: 'hostinfo', id: tab.id });
+  const tickCpu = () => send({ type: 'hostcpu', id: tab.id });
   tick();
+  tickCpu();
   tab.hostinfoTimer = setInterval(tick, 8000);
+  tab.cpuTimer = setInterval(tickCpu, 400);
 }
 
 function handleMsg(m) {
@@ -592,6 +715,13 @@ function handleMsg(m) {
     case 'hostinfo': {
       const tab = tabs.find(t => t.id === m.id);
       if (tab && tab.hostinfoBar) renderHostInfo(tab, m);
+      break;
+    }
+    case 'hostcpu': {
+      const tab = tabs.find(t => t.id === m.id);
+      if (!tab || m.cpuPct == null) break;
+      pushCpuSample(tab, m.cpuPct);
+      startCpuAnim(tab);
       break;
     }
     case 'host-key': {
@@ -763,7 +893,6 @@ const DOM_TEXT_EN = {
   '就绪': 'Ready', '未连接服务器': 'Server disconnected', '服务器已连接': 'Server connected',
   '服务器已断开': 'Server disconnected', '连接中…': 'Connecting…', '● 已连接': '● Connected',
   '已连接': 'Connected', '已恢复原连接': 'Original Connection Restored',
-  '💻 本机开机': '💻 Local Uptime',
   '✕ 已断开': '✕ Disconnected', '已断开': 'Disconnected', '出错': 'Error',
   '本地待传文件': 'Local Files', '远端目录': 'Remote Directory',
   '📂 本地目录': '📂 Local Folder', '⬇ 下载当前目录': '⬇ Download Folder',
@@ -1349,6 +1478,8 @@ function doCloseTab(id) {
   tabs.splice(idx, 1);
   if (tab._splitCleanup) tab._splitCleanup();
   if (tab.hostinfoTimer) { clearInterval(tab.hostinfoTimer); tab.hostinfoTimer = null; }
+  if (tab.cpuTimer) { clearInterval(tab.cpuTimer); tab.cpuTimer = null; }
+  stopCpuAnim(tab);
   if (tab._resizeObserver) { try { tab._resizeObserver.disconnect(); } catch {} tab._resizeObserver = null; }
   try { tab.term?.dispose(); } catch (e) {}
   tab.host.remove();

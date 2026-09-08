@@ -191,6 +191,25 @@ function parseRemoteMem(body) {
   return { memUsed: 0, memTotal: 0 };
 }
 
+function parseCpuTicks(body, label = 'CPUSTAT') {
+  const m = String(body || '').match(new RegExp(`${label}\\s+([0-9]+(?:\\s+[0-9]+)*)`));
+  if (!m) return null;
+  const n = m[1].trim().split(/\s+/).map(Number);
+  if (n.length < 4 || n.some((x) => !Number.isFinite(x))) return null;
+  const idle = n[3] + (n[4] || 0);
+  let total = 0;
+  for (const x of n) total += x;
+  return { idle, total };
+}
+
+function cpuPctBetween(prev, cur) {
+  if (!prev || !cur) return null;
+  const total = cur.total - prev.total;
+  if (total <= 0) return null;
+  const used = Math.max(0, total - (cur.idle - prev.idle));
+  return Math.round((used / total) * 1000) / 10;
+}
+
 class SSHConnection extends BaseConnection {
   constructor(config) {
     super(config);
@@ -768,6 +787,7 @@ class SSHConnection extends BaseConnection {
       for (const jump of this.jumpClients || []) { try { jump.end(); } catch {} }
       this.jumpClients = [];
       this.resolveHostKey(false);
+      this._prevCpuStat = null;
     } catch (e) { /* 忽略 */ }
   }
 
@@ -779,9 +799,48 @@ class SSHConnection extends BaseConnection {
     setTimeout(() => this._emitClose('已断开'), 50);
   }
 
-    // ---------- 远端主机状态采集 (RAM / 磁盘挂载 / CPU 负载 / 主机名) ----------
+    // 轻量 CPU 占用: 只读 /proc/stat, 供状态栏心跳面积图高频轮询
+    async getCpuPct() {
+      if (!this.client || this.state !== 'connected') {
+        return Promise.reject(new Error('SSH 未连接'));
+      }
+      if (this._cpuPctPending) return this._cpuPctPending;
+      this._cpuPctPending = this._collectCpuPct().finally(() => { this._cpuPctPending = null; });
+      return this._cpuPctPending;
+    }
+
+    _collectCpuPct() {
+      const cmd = "awk '/^cpu /{print $2,$3,$4,$5,$6,$7,$8,$9,$10,$11; exit}' /proc/stat 2>/dev/null";
+      return new Promise((resolve, reject) => {
+        this.client.exec(cmd, (err, stream) => {
+          if (err) return reject(err);
+          let buf = '';
+          let done = false;
+          const finish = (e, data) => {
+            if (done) return; done = true;
+            if (e) return reject(e);
+            resolve(data);
+          };
+          const timer = setTimeout(() => {
+            try { stream.destroy(); } catch {}
+            finish(new Error('采集 CPU 超时'));
+          }, 4000);
+          stream.on('data', (d) => { buf += d.toString('utf8'); });
+          stream.stderr.on('data', () => {});
+          stream.on('close', () => {
+            clearTimeout(timer);
+            const cur = parseCpuTicks(`CPUSTAT ${buf.trim()}`);
+            const cpuPct = cpuPctBetween(this._prevCpuStat, cur);
+            if (cur) this._prevCpuStat = cur;
+            finish(null, { cpuPct });
+          });
+        });
+      });
+    }
+
+    // ---------- 远端主机状态采集 (RAM / 磁盘挂载 / 负载 / 主机名) ----------
     // 通过 exec 通道执行只读命令, 解析 free/df/loadavg/hostname; 不污染 shell 通道
-    // 返回: { memUsed, memTotal, memPct, load1..15, cores, hostname, disk:[{mp,pct,used,total}] }
+    // 返回: { memUsed, memTotal, memPct, load1..15, cores, hostname, uptimeSec, disk:[{mp,pct,used,total}] }
     async getHostStats() {
       if (!this.client || this.state !== 'connected') {
         return Promise.reject(new Error('SSH 未连接'));
@@ -835,6 +894,7 @@ class SSHConnection extends BaseConnection {
         'echo LOAD $(cat /proc/loadavg 2>/dev/null | awk \'{print $1" "$2" "$3}\') $(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 0)',
         // 主机名
         'echo HOST $(hostname 2>/dev/null)',
+        'echo UPTIME $(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)',
         // 磁盘/挂载: df -Pk (1K 块), 排除伪文件系统, 输出 挂载点 用量% 可用字节 总量字节
         'echo DISK_START',
         'df -Pk 2>/dev/null | awk \'NR>1 && $1 !~ /tmpfs|devtmpfs|squashfs/ && $6 !~ /\\/dev\\/loop/ { gsub(/%/,"",$5); printf "DISK %s %s %d %d\\n", $6, $5, $4*1024, $3*1024 }\'',
@@ -867,6 +927,7 @@ class SSHConnection extends BaseConnection {
             const { memUsed, memTotal } = parseRemoteMem(body);
             const load = body.match(/LOAD\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+(\d+)/);
             const host = body.match(/HOST\s+(.+)/);
+            const up = body.match(/UPTIME\s+(\d+)/);
             // 磁盘: 每个 DISK 行 -> 挂载点 用量% 可用 总量
             const disk = [];
             const dStart = body.indexOf('DISK_START');
@@ -890,6 +951,7 @@ class SSHConnection extends BaseConnection {
               load15: load ? Number(load[3]) : 0,
               cores: load ? Number(load[4]) || 0 : 0,
               hostname: host ? host[1].trim() : '',
+              uptimeSec: up ? Number(up[1]) : 0,
               disk,
             });
           });
@@ -898,5 +960,5 @@ class SSHConnection extends BaseConnection {
     }
 }
 
-SSHConnection._test = { readyTimeoutFor, connectionErrorMessage, forceDestroyClient, parseRemoteMem };
+SSHConnection._test = { readyTimeoutFor, connectionErrorMessage, forceDestroyClient, parseRemoteMem, parseCpuTicks, cpuPctBetween };
 module.exports = SSHConnection;

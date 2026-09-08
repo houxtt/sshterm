@@ -471,7 +471,7 @@ button.mini { padding: 2px 8px; font-size: 11px; }
   flex-wrap: nowrap;         /* 单行; 内容多则横向滚动, 不挤占终端高度 */
   align-items: center;
   gap: 4px 18px;
-  padding: 6px 14px;
+  padding: 4px 14px;
   background: #181926;
   border-top: 1px solid #2a2b3a;
   font-size: 12px;
@@ -489,3 +489,13 @@ button.mini { padding: 2px 8px; font-size: 11px; }
 .hostinfo-bar .hi-ok { color: #9ece6a; font-weight: 600; }
 .hostinfo-bar .hi-caution { color: #e0af68; font-weight: 600; }
 .hostinfo-bar .hi-warn { color: #f7768e; font-weight: 700; }
+.hostinfo-bar .hi-spark-wrap { display: inline-flex; align-items: center; gap: 5px; }
+.hostinfo-bar .hi-spark {
+  display: block;
+  width: 96px;
+  height: 16px;
+  background: #05060a;
+  border: 1px solid #2a2b3a;
+  box-sizing: content-box;
+  overflow: hidden;
+}

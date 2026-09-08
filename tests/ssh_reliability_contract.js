@@ -120,6 +120,11 @@ function mockPipeable() {
     assert.strictEqual(mem.memUsed, (67108864 - 33554432) * 1024);
     const fallback = parseRemoteMem('MEM 2048 4096\n');
     assert.deepStrictEqual(fallback, { memUsed: 2048, memTotal: 4096 });
+    const { parseCpuTicks, cpuPctBetween } = SSHConnection._test;
+    const a = parseCpuTicks('CPUSTAT 100 0 50 850 0 0 0 0 0 0');
+    const b = parseCpuTicks('CPUSTAT 200 0 100 1700 0 0 0 0 0 0');
+    assert.deepStrictEqual(a, { idle: 850, total: 1000 });
+    assert.strictEqual(cpuPctBetween(a, b), 15);
   }
 
   // ---------- 7) 交互式 shell pwd 查询 (过滤终端输出) ----------

@@ -1275,11 +1275,20 @@ async function handle(ws, m) {
       if (!conn || conn.state !== 'connected') break;
       if (typeof conn.getHostStats !== 'function') break; // 仅 SSH 支持
       conn.getHostStats().then(stats => {
-        send(ws, { type: 'hostinfo', id: m.id, localUptimeSec: Math.floor(os.uptime()), ...stats });
+        send(ws, { type: 'hostinfo', id: m.id, ...stats });
       }).catch(e => {
         // 采集失败不打断终端, 仅回空 (前端显示 —)
-        send(ws, { type: 'hostinfo', id: m.id, error: String(e.message || e), localUptimeSec: Math.floor(os.uptime()) });
+        send(ws, { type: 'hostinfo', id: m.id, error: String(e.message || e) });
       });
+      break;
+    }
+    case 'hostcpu': {
+      const conn = getConnection(ws, m.id);
+      if (!conn || conn.state !== 'connected') break;
+      if (typeof conn.getCpuPct !== 'function') break;
+      conn.getCpuPct().then(stats => {
+        send(ws, { type: 'hostcpu', id: m.id, ...stats });
+      }).catch(() => {});
       break;
     }
     case 'vnc-credential': {
