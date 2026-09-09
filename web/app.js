@@ -694,7 +694,7 @@ function handleMsg(m) {
         if (!pane && m.state === 'closed' && tab.everConnected) scheduleReconnect(tab, m.msg);
         if (!pane && m.state === 'connected') {
           cancelReconnect(tab);
-          tab.reconnectAttempts = 0;
+          resetReconnectState(tab);
         }
         if (m.state === 'connected') {
           // The first fit can happen before the SSH PTY exists.  Always send
@@ -747,6 +747,7 @@ function handleMsg(m) {
       }
       const term = pane ? pane.term : (tab ? tab.term : null);
       if (term) {
+        if (!pane && shouldQuietReconnectError(tab, m)) break;
         term.writeln(`\r\n\x1b[31m[错误] ${m.msg}\x1b[0m`);
         if (!pane && tab && !m.action && tab.state !== 'connecting') setTabState(tab.id, 'closed', '出错');
       } else setStatus(`错误: ${m.msg}`);
@@ -1432,6 +1433,13 @@ function bindClipboard(tab) {
     if (e.type !== 'keydown') return true;
     const mod = e.ctrlKey || e.metaKey;
     const k = e.key.toLowerCase();
+    if (mod && !e.shiftKey && k === 'r') {
+      const session = owningSessionTab(tab);
+      if (session && handleReconnectHotkey(session)) {
+        e.preventDefault();
+        return false;
+      }
+    }
     if (mod && !e.shiftKey && k === 'c') {
       if (term.getSelection()) { copySelection(term); return false; }
       return true;
@@ -1531,7 +1539,56 @@ function setTabState(id, state, msg) {
 }
 
 // 统一断线重连策略: 仅对非用户主动关闭的主标签生效。
-// 退避 1/2/5/10/20 秒, 最多 5 次; reconnect=false 可关闭。
+// 退避 1/2/5/10/20 秒, 最多 5 次; 用尽后 Ctrl+R 主动重连。reconnect=false 可关闭自动重连。
+const AUTO_RECONNECT_DELAYS = [1000, 2000, 5000, 10000, 20000];
+const AUTO_RECONNECT_MAX = AUTO_RECONNECT_DELAYS.length;
+const MANUAL_RECONNECT_HINT = '自动重连已停止，按 Ctrl+R 重连';
+
+function owningSessionTab(tabOrPane) {
+  if (!tabOrPane) return null;
+  if (tabs.includes(tabOrPane)) return tabOrPane;
+  return tabs.find(t => (t.extraPanes || []).some(p => p === tabOrPane)) || null;
+}
+
+function resetReconnectState(tab) {
+  if (!tab) return;
+  tab.reconnectAttempts = 0;
+  tab.autoReconnectExhausted = false;
+  tab.manualReconnectArmed = false;
+}
+
+function shouldQuietReconnectError(tab, m) {
+  if (!tab || !m || m.action || tab.intentionalClose || !tab.everConnected) return false;
+  return tab.cfg.reconnect !== false || !!tab.manualReconnectArmed || !!tab.autoReconnectExhausted;
+}
+
+function shouldCaptureReconnectHotkey(tab) {
+  if (!tab || !tabs.includes(tab) || tab.intentionalClose || !tab.everConnected) return false;
+  if (tab.state === 'connected') return false;
+  return tab.cfg.reconnect !== false || !!tab.manualReconnectArmed || !!tab.autoReconnectExhausted;
+}
+
+function startSessionConnect(tab) {
+  if (tab.cfg.type === 'vnc') connectVncTab(tab);
+  else send({ type: 'connect', session: tab.cfg, id: tab.id });
+}
+
+function armManualReconnect(tab) {
+  tab.autoReconnectExhausted = true;
+  tab.manualReconnectArmed = true;
+  setTabState(tab.id, 'closed', MANUAL_RECONNECT_HINT);
+}
+
+function handleReconnectHotkey(tab) {
+  if (!shouldCaptureReconnectHotkey(tab)) return false;
+  if (tab.state === 'connecting') return true;
+  cancelReconnect(tab);
+  tab.manualReconnectArmed = false;
+  setTabState(tab.id, 'connecting', '正在重连…');
+  startSessionConnect(tab);
+  return true;
+}
+
 function cancelReconnect(tab) {
   if (tab && tab.reconnectTimer) {
     clearTimeout(tab.reconnectTimer);
@@ -1541,20 +1598,20 @@ function cancelReconnect(tab) {
 function scheduleReconnect(tab, reason) {
   if (!tab || tab.intentionalClose || tab.cfg.reconnect === false || tab.reconnectTimer) return;
   if (tab.cfg.type === 'serial' && _occTab === tab) return;
-  tab.reconnectAttempts = (tab.reconnectAttempts || 0) + 1;
-  if (tab.reconnectAttempts > 5) {
-    setTabState(tab.id, 'closed', '连接失败, 已停止自动重连');
+  if (tab.autoReconnectExhausted) {
+    armManualReconnect(tab);
     return;
   }
-  const delays = [1000, 2000, 5000, 10000, 20000];
-  const delay = delays[tab.reconnectAttempts - 1];
+  tab.reconnectAttempts = (tab.reconnectAttempts || 0) + 1;
+  if (tab.reconnectAttempts > AUTO_RECONNECT_MAX) {
+    armManualReconnect(tab);
+    return;
+  }
+  const delay = AUTO_RECONNECT_DELAYS[tab.reconnectAttempts - 1];
   setTabState(tab.id, 'connecting', `断线, ${delay / 1000} 秒后第 ${tab.reconnectAttempts} 次重连…`);
   tab.reconnectTimer = setTimeout(() => {
     tab.reconnectTimer = null;
-    if (!tab.intentionalClose && tabs.includes(tab)) {
-      if (tab.cfg.type === 'vnc') connectVncTab(tab);
-      else send({ type: 'connect', session: tab.cfg, id: tab.id });
-    }
+    if (!tab.intentionalClose && tabs.includes(tab)) startSessionConnect(tab);
   }, delay);
 }
 
@@ -3462,7 +3519,7 @@ async function connectVncTab(tab) {
     instance.addEventListener('connect', () => {
       if (tab.rfb !== instance) return;
       tab.everConnected = true;
-      tab.reconnectAttempts = 0;
+      resetReconnectState(tab);
       setVncTabControls(tab, true);
       setTabState(tab.id, 'connected', `已连接 ${host}:${port}`);
       setVncTabStatus(tab, `已连接：${host}:${port}`, 'ok');
@@ -4247,6 +4304,20 @@ document.addEventListener('keydown', (e) => {
     const idx = tabs.findIndex(t => t.id === activeTabId);
     activateTab(tabs[(idx - 1 + tabs.length) % tabs.length].id);
     return;
+  }
+  if (mod && !e.shiftKey && k === 'r') {
+    const typing = (() => {
+      const el = e.target;
+      const tag = (el && el.tagName || '').toLowerCase();
+      return tag === 'input' || tag === 'textarea' || tag === 'select' || !!(el && el.isContentEditable);
+    })();
+    if (!typing) {
+      const tab = tabs.find(t => t.id === activeTabId);
+      if (tab && handleReconnectHotkey(tab)) {
+        e.preventDefault();
+        return;
+      }
+    }
   }
   if (e.altKey && !mod && /^[1-9]$/.test(k) && tabs.length) {
     e.preventDefault();
