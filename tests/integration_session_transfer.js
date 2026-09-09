@@ -18,7 +18,9 @@ function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 async function getToken(deadline = Date.now() + 10000) {
   while (Date.now() < deadline) {
     try {
-      const script = await new Promise((resolve, reject) => http.get(`${BASE}/bootstrap.js`, res => {
+      const script = await new Promise((resolve, reject) => http.get(`${BASE}/bootstrap.js`, {
+        headers: { Origin: `http://127.0.0.1:${PORT}`, Referer: `http://127.0.0.1:${PORT}/` },
+      }, res => {
         let body = ''; res.setEncoding('utf8');
         res.on('data', chunk => { body += chunk; });
         res.on('end', () => res.statusCode === 200 ? resolve(body) : reject(new Error(`HTTP ${res.statusCode}`)));
@@ -63,7 +65,9 @@ function onceError(ws) {
   let ws;
   try {
     const token = await getToken();
-    ws = new WebSocket(`ws://127.0.0.1:${PORT}/?token=${encodeURIComponent(token)}`);
+    ws = new WebSocket(`ws://127.0.0.1:${PORT}/?token=${encodeURIComponent(token)}`, {
+      headers: { Origin: `http://127.0.0.1:${PORT}` },
+    });
     await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
 
     const source = [{ name: 'production', type: 'ssh', host: 'prod.example', port: 22,

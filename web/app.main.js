@@ -5,7 +5,7 @@
 /* global Terminal, WebSocket, Zmodem */
 
 // ---------- 工具 ----------
-const $ = (id) => document.getElementById(id);
+// $ is defined in web/js/dom.js (loaded first)
 const hexOf = (u8) => Array.from(u8).map(b => b.toString(16).padStart(2, '0')).join(' ').toUpperCase();
 const Enc = () => window.SshtermEncoding || {
   encodeText: (s) => new TextEncoder().encode(s),

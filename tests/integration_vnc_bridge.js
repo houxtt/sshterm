@@ -16,8 +16,8 @@ const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'sshterm-vnc-'));
 const profile = path.join(temp, 'profile');
 
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
-function httpGet(url) {
-  return new Promise((resolve, reject) => http.get(url, response => {
+function httpGet(url, headers = {}) {
+  return new Promise((resolve, reject) => http.get(url, { headers }, response => {
     const chunks = [];
     response.on('data', chunk => chunks.push(chunk));
     response.on('end', () => resolve({ status: response.statusCode, headers: response.headers, body: Buffer.concat(chunks) }));
@@ -65,7 +65,7 @@ function wsClose(ws, timeout = 8000) {
   let ws;
   try {
     await waitForServer();
-    const bootstrap = await httpGet(`${BASE}/bootstrap.js`);
+    const bootstrap = await httpGet(`${BASE}/bootstrap.js`, { Origin: `http://127.0.0.1:${PORT}`, Referer: `http://127.0.0.1:${PORT}/` });
     const token = bootstrap.body.toString().match(/__SSHTERM_TOKEN\s*=\s*"([^"]+)"/)[1];
 
     const moduleResponse = await httpGet(`${BASE}/vendor/@novnc/novnc/core/rfb.js`);
@@ -73,7 +73,7 @@ function wsClose(ws, timeout = 8000) {
     assert.match(moduleResponse.headers['content-type'] || '', /javascript/, 'noVNC module MIME type');
 
     const endpoint = `ws://127.0.0.1:${PORT}/vnc?token=${encodeURIComponent(token)}&host=127.0.0.1&port=${vncPort}`;
-    ws = new WebSocket(endpoint);
+    ws = new WebSocket(endpoint, { headers: { Origin: `http://127.0.0.1:${PORT}` } });
     await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
     assert.strictEqual((await wsMessage(ws)).toString(), 'RFB 003.008\n', 'VNC server banner forwarding');
     const reply = wsMessage(ws);
@@ -81,7 +81,7 @@ function wsClose(ws, timeout = 8000) {
     assert.strictEqual((await reply).toString(), 'ECHO:RFB 003.008\n', 'bidirectional VNC byte forwarding');
     ws.close();
 
-    const invalid = new WebSocket(`ws://127.0.0.1:${PORT}/vnc?token=${encodeURIComponent(token)}&host=bad%20host&port=5901`);
+    const invalid = new WebSocket(`ws://127.0.0.1:${PORT}/vnc?token=${encodeURIComponent(token)}&host=bad%20host&port=5901`, { headers: { Origin: `http://127.0.0.1:${PORT}` } });
     const closed = wsClose(invalid);
     assert.strictEqual((await closed).code, 1008, 'VNC bridge must reject malformed direct targets');
     console.log('✅ standalone VNC direct WebSocket bridge integration passed');

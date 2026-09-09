@@ -13,9 +13,9 @@ const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'sshterm-refresh-'));
 fs.writeFileSync(path.join(fixture, 'alive.txt'), 'same connection');
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-function get(url) {
+function get(url, headers = {}) {
   return new Promise((resolve, reject) => {
-    http.get(url, response => {
+    http.get(url, { headers }, response => {
       const chunks = [];
       response.on('data', chunk => chunks.push(chunk));
       response.on('end', () => resolve({ status: response.statusCode, body: Buffer.concat(chunks) }));
@@ -25,7 +25,7 @@ function get(url) {
 async function getToken(deadline = Date.now() + 10000) {
   while (Date.now() < deadline) {
     try {
-      const response = await get(`${BASE}/bootstrap.js`);
+      const response = await get(`${BASE}/bootstrap.js`, { Origin: `http://127.0.0.1:${PORT}`, Referer: `http://127.0.0.1:${PORT}/` });
       const match = response.body.toString().match(/"([A-Za-z0-9_-]+)"/);
       if (match) return match[1];
     } catch {}
@@ -35,7 +35,9 @@ async function getToken(deadline = Date.now() + 10000) {
 }
 function open(token, windowId) {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${PORT}/?token=${token}&window=${windowId}`);
+    const ws = new WebSocket(`ws://127.0.0.1:${PORT}/?token=${token}&window=${windowId}`, {
+      headers: { Origin: `http://127.0.0.1:${PORT}` },
+    });
     const handler = (raw, isBinary) => {
       if (isBinary) return;
       const message = JSON.parse(raw.toString());
@@ -104,7 +106,7 @@ function close(ws) {
     const liveOutput = waitBinary(firstWs, 42, marker);
     firstWs.send(JSON.stringify({ type: 'test-connection-output', id: 42, data: marker }));
     await liveOutput;
-    const before = await get(`${BASE}/api/sftp/download?token=${token}&window=${stableWindowId}&conn=42&path=alive.txt`);
+    const before = await get(`${BASE}/api/sftp/download?token=${token}&window=${stableWindowId}&conn=42&path=alive.txt`, { Origin: `http://127.0.0.1:${PORT}`, Referer: `http://127.0.0.1:${PORT}/` });
     assert.strictEqual(before.status, 200);
     assert.strictEqual(before.body.toString(), 'same connection');
 
@@ -118,9 +120,9 @@ function close(ws) {
     const resumed = await open(token, stableWindowId);
     resumedWs = resumed.ws;
     assert.strictEqual(resumed.windowId, stableWindowId);
-    const detached = await get(`${BASE}/api/sftp/download?token=${token}&window=${stableWindowId}&conn=42&path=alive.txt`);
+    const detached = await get(`${BASE}/api/sftp/download?token=${token}&window=${stableWindowId}&conn=42&path=alive.txt`, { Origin: `http://127.0.0.1:${PORT}`, Referer: `http://127.0.0.1:${PORT}/` });
     assert.strictEqual(detached.status, 200, 'remote connection must survive more than the former 10s cleanup window');
-    const after = await get(`${BASE}/api/sftp/download?token=${token}&window=${stableWindowId}&conn=42&path=alive.txt`);
+    const after = await get(`${BASE}/api/sftp/download?token=${token}&window=${stableWindowId}&conn=42&path=alive.txt`, { Origin: `http://127.0.0.1:${PORT}`, Referer: `http://127.0.0.1:${PORT}/` });
     assert.strictEqual(after.status, 200, 'detached connection must survive the refresh grace period');
 
     const resumedStatus = waitMessage(resumedWs, message => message.type === 'status' && message.id === 42);
@@ -135,7 +137,7 @@ function close(ws) {
     const otherWindowId = 'other_window_' + 'b'.repeat(50);
     const other = await open(token, otherWindowId);
     otherWs = other.ws;
-    const cross = await get(`${BASE}/api/sftp/download?token=${token}&window=${otherWindowId}&conn=42&path=alive.txt`);
+    const cross = await get(`${BASE}/api/sftp/download?token=${token}&window=${otherWindowId}&conn=42&path=alive.txt`, { Origin: `http://127.0.0.1:${PORT}`, Referer: `http://127.0.0.1:${PORT}/` });
     assert.strictEqual(cross.status, 400, 'another browser window must not claim the refreshed connection');
     console.log('✅ refresh connection reattach integration passed');
   } finally {

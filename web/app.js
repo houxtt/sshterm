@@ -1,5 +1,9 @@
 // AUTO-GENERATED — edit web/js/* and web/app.main.js, then run: node scripts/sync-web-app.js
-// Concat order: theme-settings.js + i18n.js + host-cpu.js + clipboard.js + reconnect.js + tunnel-ui.js + sftp-panel.js + sftp-xfer.js + vnc-ui.js + hotkeys.js + split-panes.js + app.main.js
+// Concat order: dom.js + theme-settings.js + i18n.js + host-cpu.js + clipboard.js + reconnect.js + tunnel-ui.js + sftp-panel.js + sftp-xfer.js + vnc-ui.js + hotkeys.js + split-panes.js + app.main.js
+
+// ========== web/js/dom.js ==========
+﻿// sshterm web module: shared DOM helpers (must load before modules that bind at top level).
+const $ = (id) => document.getElementById(id);
 
 // ========== web/js/theme-settings.js ==========
 // sshterm web module: theme-settings — 终端字体/主题/滚动回退设置
@@ -2845,7 +2849,7 @@ function installSplitDragger(tab) {
 /* global Terminal, WebSocket, Zmodem */
 
 // ---------- 工具 ----------
-const $ = (id) => document.getElementById(id);
+// $ is defined in web/js/dom.js (loaded first)
 const hexOf = (u8) => Array.from(u8).map(b => b.toString(16).padStart(2, '0')).join(' ').toUpperCase();
 const Enc = () => window.SshtermEncoding || {
   encodeText: (s) => new TextEncoder().encode(s),

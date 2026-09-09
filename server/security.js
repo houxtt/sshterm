@@ -1,6 +1,8 @@
 // Token / origin / CSP helpers for the loopback HTTP+WS service.
 'use strict';
 
+const path = require('path');
+
 function buildStaticCsp(port) {
   return [
     "default-src 'self'",

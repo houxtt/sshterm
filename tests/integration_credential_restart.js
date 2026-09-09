@@ -29,7 +29,9 @@ function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 async function getToken(deadline = Date.now() + 10000) {
   while (Date.now() < deadline) {
     try {
-      const body = await new Promise((resolve, reject) => http.get(`${BASE}/bootstrap.js`, res => {
+      const body = await new Promise((resolve, reject) => http.get(`${BASE}/bootstrap.js`, {
+        headers: { Origin: `http://127.0.0.1:${APP_PORT}`, Referer: `http://127.0.0.1:${APP_PORT}/` },
+      }, res => {
         let text = '';
         res.setEncoding('utf8');
         res.on('data', chunk => { text += chunk; });
@@ -67,7 +69,9 @@ async function startApp() {
     stdio: 'ignore',
   });
   const token = await getToken();
-  const ws = new WebSocket(`ws://127.0.0.1:${APP_PORT}/?token=${encodeURIComponent(token)}`);
+  const ws = new WebSocket(`ws://127.0.0.1:${APP_PORT}/?token=${encodeURIComponent(token)}`, {
+    headers: { Origin: `http://127.0.0.1:${APP_PORT}` },
+  });
   await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
   return { child, ws };
 }

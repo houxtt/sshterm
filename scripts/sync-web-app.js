@@ -3,6 +3,7 @@ const path = require('path');
 
 // Canonical load order for web/js modules (must match index.html).
 const WEB_JS_ORDER = [
+  'dom.js',
   'theme-settings.js',
   'i18n.js',
   'host-cpu.js',

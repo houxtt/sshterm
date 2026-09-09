@@ -92,7 +92,7 @@ async function waitForServer(deadline = Date.now() + 10000) {
 
     assert.deepStrictEqual(result.calls, [null, 'bytes=4-'], 'retry must continue from the written offset');
     assert.deepStrictEqual(result.output, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9], 'disk stream byte order');
-    assert.deepStrictEqual(result.download, { saved: true, size: 10 }, 'direct-to-disk result');
+    assert.deepStrictEqual(result.download, { saved: true, size: 10, remoteIdentity: '' }, 'direct-to-disk result');
     assert.strictEqual(result.closed, true, 'successful file must be committed');
     assert.strictEqual(result.aborted, false, 'successful file must not be aborted');
     console.log('✅ large download direct-to-disk browser contract passed');
