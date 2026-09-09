@@ -54,6 +54,7 @@
           <button id="btn-sshcfg" title="解析 SSH config" class="mini">🔑 SSH 配置</button>
         </span>
       </div>
+      <input id="session-filter" type="search" placeholder="过滤会话…" autocomplete="off" spellcheck="false">
       <ul id="session-list"></ul>
       <div id="batch-bar" class="hidden">
         <label><input type="checkbox" id="batch-all"> 全选</label>
@@ -467,6 +468,9 @@
     <label style="display:flex;align-items:center;gap:8px">
       <input id="set-cursor-blink" type="checkbox"> 光标闪烁
     </label>
+    <h4 style="margin:12px 0 6px">快捷键</h4>
+    <p class="muted" style="font-size:12px;margin:0 0 8px">自定义常用快捷键 (保存在本机 localStorage)。点击输入框后按下新组合键。</p>
+    <div id="hotkey-editor" class="hotkey-editor"></div>
     <div class="dlg-actions">
       <button id="btn-settings-apply" class="primary">应用</button>
       <button id="btn-settings-reset">恢复默认</button>
@@ -488,6 +492,11 @@
 <script src="/js/clipboard.js"></script>
 <script src="/js/reconnect.js"></script>
 <script src="/js/tunnel-ui.js"></script>
+<script src="/js/sftp-panel.js"></script>
+<script src="/js/sftp-xfer.js"></script>
+<script src="/js/vnc-ui.js"></script>
+<script src="/js/hotkeys.js"></script>
+<script src="/js/split-panes.js"></script>
 <script src="/app.main.js"></script>
 </body>
 </html>

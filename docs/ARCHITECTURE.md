@@ -42,6 +42,11 @@ Public CLI flags (`--port`, `--no-open`, `--auto-exit`) and listen behavior are 
 | `js/clipboard.js` | Copy/paste + multiline `safeSendInput` |
 | `js/reconnect.js` | Auto-reconnect policy + Ctrl+R |
 | `js/tunnel-ui.js` | Tunnel list panel |
+| `js/sftp-panel.js` | SFTP panel listing / toolbar / column width |
+| `js/sftp-xfer.js` | SFTP transfer helpers + file/folder drag-drop upload |
+| `js/vnc-ui.js` | VNC tab connect / RFB UI |
+| `js/hotkeys.js` | Configurable hotkey map (localStorage sshterm.hotkeys) |
+| `js/split-panes.js` | Split panes + divider drag |
 | `app.main.js` | Remaining glue (tabs, SFTP UI, VNC tab, events) |
 | `app.js` | **Generated concat** of `js/*` + `app.main.js` for contract tests |
 
@@ -60,3 +65,7 @@ Contract tests that assert substrings / `vm`-extract functions continue to read 
 - HTTP/WS bind to `127.0.0.1` only.
 - Bootstrap token + Origin/Referer (or CLI `X-SSHTERM-Token`) gate privileged APIs.
 - Session secrets use Windows DPAPI when “remember password” is enabled; browser storage never keeps credentials.
+
+## Recent UX additions (2026-09-09)
+
+- Sidebar session-filter; hotkeys.js; SFTP directory drag-drop; sync:web.

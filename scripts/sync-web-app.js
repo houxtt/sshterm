@@ -9,6 +9,11 @@ const WEB_JS_ORDER = [
   'clipboard.js',
   'reconnect.js',
   'tunnel-ui.js',
+  'sftp-panel.js',
+  'sftp-xfer.js',
+  'vnc-ui.js',
+  'hotkeys.js',
+  'split-panes.js',
 ];
 
 function syncWebApp() {

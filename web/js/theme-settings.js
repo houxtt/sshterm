@@ -219,6 +219,7 @@ function collectSettingsForm() {
 }
 
 function openSettingsDialog() {
+  if (typeof fillHotkeyEditor === 'function') fillHotkeyEditor();
   fillSettingsForm();
   const mask = document.getElementById('dlg-settings-mask');
   if (mask) mask.classList.remove('hidden');

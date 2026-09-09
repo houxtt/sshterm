@@ -20,6 +20,7 @@ var I18N = {
     sftp_multi: '☑ 多选', sftp_multi_exit: '✕ 退出多选', sftp_select_all: '全选',
     sftp_download_sel: '⬇ 下载选中',
     side_title: '已保存会话', side_batch: '批量', side_foot: '双击连接 · 悬停可编辑/删除',
+    session_filter: '过滤会话…', hotkeys_title: '快捷键',
     batch_all: '全选', batch_del: '删除选中', batch_cancel: '取消',
     close_title: '关闭会话?', close_ok: '确认关闭', welcome_p: 'SSH · Telnet · VNC · 串口 一体化连接工具',
     ws_ok: '服务器已连接', ws_off: '服务器已断开', ws_init: '未连接服务器',
@@ -39,6 +40,7 @@ var I18N = {
     sftp_multi: '☑ Multi', sftp_multi_exit: '✕ Exit multi', sftp_select_all: 'All',
     sftp_download_sel: '⬇ Download selected',
     side_title: 'Saved Sessions', side_batch: 'Batch', side_foot: 'Double-click to connect · hover to edit/delete',
+    session_filter: 'Filter sessions…', hotkeys_title: 'Hotkeys',
     batch_all: 'All', batch_del: 'Delete', batch_cancel: 'Cancel',
     close_title: 'Close session?', close_ok: 'Close', welcome_p: 'SSH · Telnet · VNC · Serial all-in-one',
     ws_ok: 'Server connected', ws_off: 'Server disconnected', ws_init: 'Not connected',
@@ -49,6 +51,9 @@ var I18N = {
 // hidden. WeakMaps retain the original Chinese key so language switching is
 // reversible, while the observer also covers controls rendered later.
 const DOM_TEXT_EN = {
+  '快捷键': 'Hotkeys',
+  '自定义常用快捷键 (保存在本机 localStorage)。点击输入框后按下新组合键。': 'Customize common shortcuts (saved in localStorage). Click a field and press a new combo.',
+  '点击后按下新快捷键': 'Click then press a new shortcut',
   'sshterm — SSH / Telnet / VNC / 串口': 'sshterm — SSH / Telnet / VNC / Serial',
   '＋ 新建连接': '＋ New Connection', '💾 保存会话': '💾 Save Session', '📁 文件': '📁 Files',
   '🔗 隧道': '🔗 Tunnels', '⏹ 全部关闭': '⏹ Close All', '☰ 工具': '☰ Tools',
@@ -147,6 +152,7 @@ const DOM_TEXT_EN = {
 };
 
 const DOM_ATTR_EN = {
+  '过滤会话…': 'Filter sessions…',
   '终端外观设置 (字体/主题/滚动)': 'Terminal appearance (font / theme / scrollback)',
   '新建连接 (Ctrl+N)': 'New Connection (Ctrl+N)', '保存当前会话配置': 'Save Current Session',
   'SSH 文件浏览/下载 (SFTP)': 'Browse/Download Files (SFTP)', 'SSH 隧道管理': 'SSH Tunnel Management',
@@ -250,6 +256,8 @@ function applyI18n() {
     'btn-sftp': 'btn_sftp', 'btn-killall': 'btn_killall', 'btn-split': 'btn_split',
     'side-title': 'side_title', 'btn-batch': 'side_batch', 'side-foot': 'side_foot',
   };
+  const filterEl = document.getElementById('session-filter');
+  if (filterEl) filterEl.placeholder = t('session_filter');
   for (const [id, key] of Object.entries(map)) {
     const el = document.getElementById(id);
     if (el) el.textContent = t(key);
