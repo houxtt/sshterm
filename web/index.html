@@ -31,6 +31,7 @@
     </div>
     <button id="btn-split" title="分屏(当前标签左右分屏)">⊞ 分屏</button>
     <button id="btn-workspace" title="保存或恢复当前标签与分屏布局">▣ 工作区</button>
+    <button id="btn-settings" title="终端外观设置 (字体/主题/滚动)">⚙ 设置</button>
     <button id="btn-cmds" title="快捷命令(保存/执行/脚本)">⚡ 命令</button>
     <span class="sep"></span>
     <input id="quick-connect" placeholder="IP[:端口] 回车快速连接" style="width:180px; background:#1a1b2e; color:#c0caf5; border:1px solid #3a3b4d; border-radius:4px; padding:2px 8px; font-size:12px" autocomplete="off">
@@ -446,6 +447,34 @@
   </div>
 </div>
 
+
+<div id="dlg-settings-mask" class="hidden">
+  <div id="dlg-settings" class="dlg" style="min-width:420px">
+    <h3>终端外观设置</h3>
+    <p class="muted" style="font-size:12px;margin-top:0">字体、主题与滚动回退保存在本机浏览器 (localStorage)，对新旧终端立即生效。</p>
+    <label>配色主题
+      <select id="set-theme"></select>
+    </label>
+    <label>字体家族
+      <input id="set-font-family" type="text" placeholder='Consolas, "Courier New", monospace' style="width:100%">
+    </label>
+    <label>字号 (px)
+      <input id="set-font-size" type="number" min="10" max="32" step="1" style="width:100px">
+    </label>
+    <label>滚动回退行数
+      <input id="set-scrollback" type="number" min="500" max="100000" step="500" style="width:120px">
+    </label>
+    <label style="display:flex;align-items:center;gap:8px">
+      <input id="set-cursor-blink" type="checkbox"> 光标闪烁
+    </label>
+    <div class="dlg-actions">
+      <button id="btn-settings-apply" class="primary">应用</button>
+      <button id="btn-settings-reset">恢复默认</button>
+      <button id="settings-close">取消</button>
+    </div>
+  </div>
+</div>
+
 <script src="/bootstrap.js"></script>
 <script src="/encoding-client.js"></script>
 <script src="/vendor/@xterm/xterm/lib/xterm.js"></script>
@@ -453,6 +482,12 @@
 <script src="/vendor/@xterm/addon-search/lib/addon-search.js"></script>
 <script src="/vendor/@xterm/addon-image/lib/addon-image.js"></script>
 <script src="/vendor/zmodem.js/dist/zmodem.js"></script>
-<script src="/app.js"></script>
+<script src="/js/theme-settings.js"></script>
+<script src="/js/i18n.js"></script>
+<script src="/js/host-cpu.js"></script>
+<script src="/js/clipboard.js"></script>
+<script src="/js/reconnect.js"></script>
+<script src="/js/tunnel-ui.js"></script>
+<script src="/app.main.js"></script>
 </body>
 </html>

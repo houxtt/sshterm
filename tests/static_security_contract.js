@@ -1,3 +1,6 @@
+// Keep web/app.js concat artifact in sync for substring contracts.
+require('../scripts/sync-web-app').syncWebApp();
+
 // Fast, fixture-free checks for security properties that must not regress.
 const assert = require('assert');
 const fs = require('fs');
@@ -6,7 +9,23 @@ const path = require('path');
 const root = path.join(__dirname, '..');
 const app = fs.readFileSync(path.join(root, 'web', 'app.js'), 'utf8');
 const html = fs.readFileSync(path.join(root, 'web', 'index.html'), 'utf8');
-const server = fs.readFileSync(path.join(root, 'server', 'index.js'), 'utf8');
+
+function readServerSources() {
+  const dir = path.join(root, 'server');
+  const files = fs.readdirSync(dir)
+    .filter((name) => name.endsWith('.js') && !name.endsWith('.bak') && name !== 'free-serial.ps1')
+    .sort();
+  const nested = [];
+  const connDir = path.join(dir, 'connections');
+  if (fs.existsSync(connDir)) {
+    for (const name of fs.readdirSync(connDir).filter((n) => n.endsWith('.js')).sort()) {
+      nested.push(path.join('connections', name));
+    }
+  }
+  return [...files, ...nested].map((rel) => fs.readFileSync(path.join(dir, rel), 'utf8')).join('\n');
+}
+
+const server = readServerSources();
 const dpapi = fs.readFileSync(path.join(root, 'server', 'dpapi.js'), 'utf8');
 
 assert(app.includes('function configForBrowserStorage'), 'workspace config sanitizer is missing');
@@ -22,7 +41,7 @@ assert(app.includes("$('f-remember').checked = existing ? !!existing.rememberPas
   'new saved sessions must default to Windows-encrypted credential persistence');
 assert(!app.includes('Promise.all(pool)'), 'browser-side parallel SFTP chunks must not bypass upload limits');
 assert(server.includes('const activeUploadKeys = new Set()'), 'server-side per-file upload lock is missing');
-assert(server.includes('activeUploads >= MAX_CONCURRENT_UPLOADS'), 'server-side upload concurrency limit is missing');
+assert(server.includes('uploadState.n >= MAX_CONCURRENT_UPLOADS') || server.includes('activeUploads >= MAX_CONCURRENT_UPLOADS'), 'server-side upload concurrency limit is missing');
 assert(server.includes("'Accept-Ranges': 'bytes'"), 'SFTP download range support is missing');
 assert(app.includes('function resumableDownload'), 'resumable browser download is missing');
 assert(app.includes('const LARGE_DOWNLOAD_STREAM_THRESHOLD = 256 * 1024 * 1024'),

@@ -1,21 +1,27 @@
 // sshterm 服务端: HTTP 静态 + WebSocket 路由 + 连接管理 + 会话持久化
 // 启动: node server/index.js [--port 8787] [--no-open]
+// Modules: security / logging / sessions-store / ssh-config-loader / sftp-http /
+//          vnc-bridge / net-scan / ws-handlers (behavior preserved).
 const http = require('http');
-const net = require('net');
-const dns = require('dns');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { randomUUID, randomBytes, createHash } = require('crypto');
 const { WebSocketServer } = require('ws');
-const { createBackup, readBackup, parseOpenSSHConfig } = require('./session-backup');
-const { createParallelReadStream, receiveParallelUpload } = require('./sftp-transfer');
-const { connectionConfigForRequest } = require('./connection-config');
-const { writeSecrets, readSecrets } = require('./dpapi');
 const { decodeBuffer, StreamingDecoder } = require('./encoding');
-const { sanitizeSession } = require('./session-schema');
 const { sendBinary, WS_HIGH_WATER, attachWsBackpressure, queueDepth, isBackedUp } = require('./ws-backpressure');
 const sshConnectScheduler = require('./ssh-connect-scheduler');
+const { createSecurity } = require('./security');
+const { createLogging } = require('./logging');
+const { createSessionsStore } = require('./sessions-store');
+const { loadSSHConfig } = require('./ssh-config-loader');
+const { handleSftpHttp, statMtimeHeader, remoteFileIdentity } = require('./sftp-http');
+const {
+  attachVncBridge,
+  resumePausedConnections: resumePausedConnectionsImpl,
+  validVncHost,
+} = require('./vnc-bridge');
+const { createWsMessageHandler } = require('./ws-handlers');
 
 const ROOT = path.join(__dirname, '..');
 const WEB = path.join(ROOT, 'web');
@@ -28,9 +34,6 @@ function newestSourceMtimeMs(dir) {
   }
   return latest;
 }
-// Captured once at process startup.  The desktop launcher compares this value
-// with the source tree so an already-running process cannot silently keep using
-// stale transfer code after an update.
 const SERVER_BUILD_ID = String(Math.trunc(Math.max(
   newestSourceMtimeMs(__dirname),
   fs.statSync(path.join(ROOT, 'package.json')).mtimeMs,
@@ -41,13 +44,10 @@ const CONN_FILE = path.join(CONN_DIR, 'sessions.json');
 const CONN_BACKUP_FILE = `${CONN_FILE}.bak`;
 const MAX_SFTP_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
 
-const connections = new Map();   // connId -> BaseConnection
-const windows = new Map();       // opaque window capability -> WebSocket
+const connections = new Map();
+const windows = new Map();
 const windowCleanupTimers = new Map();
 const AUTO_EXIT_GRACE_MS = 12 * 1000;
-// Losing the browser WebSocket must not tear down a healthy remote shell.
-// Detached connections live until an explicit disconnect or server shutdown.
-// Managed deployments may opt into bounded orphan cleanup with this variable.
 const DETACHED_CONNECTION_GRACE_MS = (() => {
   const value = Number(process.env.SSHTERM_DETACHED_GRACE_MS || 0);
   return Number.isFinite(value) && value > 0
@@ -60,7 +60,6 @@ function getConnection(ws, id) { return connections.get(connectionKey(ws, id)); 
 function getHttpConnection(qs) {
   const ws = windows.get(String(qs.get('window') || ''));
   if (ws) return getConnection(ws, parseInt(qs.get('conn'), 10));
-  // Isolated fixture has no browser window; never enabled in normal startup.
   return process.env.SSHTERM_TEST_SFTP_ROOT ? connections.get(parseInt(qs.get('conn'), 10)) : null;
 }
 
@@ -96,18 +95,14 @@ function scheduleWindowCleanup(windowId) {
   timer.unref();
   windowCleanupTimers.set(windowId, timer);
 }
-const liveByConfig = new Map();  // 配置指纹 -> connId (去重: 同一配置只开一个)
-// Enables an isolated local SFTP fixture for transport integration tests only.
-// The variable is intentionally undocumented for end users and is never set by
-// normal launchers or release workflows.
+const liveByConfig = new Map();
 if (process.env.SSHTERM_TEST_SFTP_ROOT) {
   const { installLocalSftpFixture } = require('./test-sftp-fixture');
   installLocalSftpFixture(connections, process.env.SSHTERM_TEST_SFTP_ROOT);
 }
-// P2 FIX: SFTP 上传并发控制
-const MAX_CONCURRENT_UPLOADS = 3;  // 最大并发上传数
-let activeUploads = 0;
-const activeUploadKeys = new Set(); // connId:remotePath; prevents overlapping r+/w writes
+const MAX_CONCURRENT_UPLOADS = 3;
+const uploadState = { n: 0 };
+const activeUploadKeys = new Set();
 const directoryDownloads = new Map();
 const directoryDownloadCleanup = setInterval(() => {
   const cutoff = Date.now() - 5 * 60 * 1000;
@@ -116,332 +111,44 @@ const directoryDownloadCleanup = setInterval(() => {
   }
 }, 60 * 1000);
 directoryDownloadCleanup.unref();
-// A random per-process capability prevents arbitrary web pages from controlling
-// the loopback service.  Loopback is not an authentication boundary by itself.
+
 const CLIENT_TOKEN = randomBytes(32).toString('base64url');
-const PORT = parseInt(process.argv[process.argv.indexOf('--port') + 1], 10) || 8787; // P0 FIX: 移到此处供 isTrustedOrigin 使用
+const PORT = parseInt(process.argv[process.argv.indexOf('--port') + 1], 10) || 8787;
 const TOKEN_FILE = path.join(CONN_DIR, 'token');
 
-// 'wasm-unsafe-eval' is required by @xterm/addon-image: its Sixel decoder is an
-// inline WebAssembly module, and Chrome blocks WebAssembly.instantiate() under
-// a bare "script-src 'self'" policy.  'blob:' feeds the addon's Image-based
-// fallback path for iTerm2 inline images.
-// connect-src is restricted to this service's loopback WebSocket endpoints only;
-// a bare "ws:" would let injected scripts connect to arbitrary WebSocket servers.
-const STATIC_CSP = [
-  "default-src 'self'",
-  "connect-src 'self' ws://127.0.0.1:" + PORT + " ws://localhost:" + PORT + " ws://[::1]:" + PORT,
-  "style-src 'self' 'unsafe-inline'",
-  "script-src 'self' 'wasm-unsafe-eval'",
-  "img-src 'self' data: blob:",
-  "object-src 'none'",
-  "base-uri 'none'",
-  "frame-ancestors 'none'",
-].join('; ');
+const {
+  STATIC_CSP,
+  hasClientToken,
+  hasCliCapability,
+  isTrustedOrigin,
+  isTrustedRequest,
+  isInside,
+} = createSecurity({ port: PORT, clientToken: CLIENT_TOKEN });
 
-function hasClientToken(req) {
-  try {
-    const u = new URL(req.url, 'http://127.0.0.1');
-    return u.searchParams.get('token') === CLIENT_TOKEN;
-  } catch { return false; }
-}
+const logging = createLogging(CONN_DIR);
+const { logs, LOG_DIR, SESSION_LOG_DIR, log, redactLog, cleanupLogDirectory, cleanupOldLogs } = logging;
+// Prefer the logging module's LOG_FILE; expose a live getter for handlers/banner.
+const LOG_FILE_REF = logging;
+function getLogFile() { return LOG_FILE_REF.LOG_FILE; }
 
-// Non-browser clients (CLI, tests) authenticate with the persisted capability
-// token via the X-SSHTERM-Token header instead of a browser Origin.
-function hasCliCapability(req) {
-  return req.headers['x-sshterm-token'] === CLIENT_TOKEN;
-}
+const sessionStore = createSessionsStore({ CONN_DIR, CONN_FILE, CONN_BACKUP_FILE, log });
+const {
+  writeSessionFile,
+  loadSessions,
+  saveSessions,
+  storedSessionForConfig,
+  mergeStoredCredentials,
+  sanitize,
+  sessionSortOrder,
+  sessionsList,
+  nextSessionSortOrder,
+  importSessionEntries,
+} = sessionStore;
+function getSessions() { return sessionStore.sessions; }
+function setSessions(v) { sessionStore.sessions = v; }
 
-// 新增：双重来源校验 - 防止恶意网页通过 <script src="..."> 抓取 token
-// 由端口函数获取，确保与 server.listen 的端口一致
-function isTrustedOrigin(req) {
-  const source = req.headers.origin || req.headers.referer;
-  if (!source) return false; // 无来源一律拒绝；CLI 走 X-SSHTERM-Token 头
-  try {
-    const u = new URL(source);
-    const validHost = u.hostname === '127.0.0.1' || u.hostname === 'localhost'
-      || u.hostname === '[::1]' || u.hostname === '::1';
-    // Origin/Referer port 应该匹配实际监听端口；若未指定则默认 80/443
-    const origPort = u.port || (u.protocol === 'https:' ? '443' : '80');
-    return validHost && origPort === String(PORT);
-  } catch { return false; }
-}
+let sshConfig = loadSSHConfig();
 
-// A request is trusted when it comes from a verified loopback browser origin
-// OR presents the CLI capability token.  Neither condition alone is sufficient
-// to bypass the other: origin must match loopback, and the token must match.
-function isTrustedRequest(req) {
-  return isTrustedOrigin(req) || hasCliCapability(req);
-}
-
-function isInside(root, candidate) {
-  const rel = path.relative(root, candidate);
-  return rel && !rel.startsWith('..' + path.sep) && rel !== '..' && !path.isAbsolute(rel);
-}
-
-// ---------- 操作日志 (内存环形 + 每次启动新日志文件落盘) ----------
-const MAX_LOGS = 1000;
-const logs = [];
-// 每次启动生成新的日志文件: ~/.sshterm/logs/sshterm-YYYYMMDD-HHMMSS.log (关闭后保留)
-const LOG_DIR = path.join(CONN_DIR, 'logs');
-const SESSION_LOG_DIR = path.join(CONN_DIR, 'session-logs');
-function newLogFile() {
-  const d = new Date();
-  const ts = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}-${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}${String(d.getSeconds()).padStart(2, '0')}`;
-  return path.join(LOG_DIR, `sshterm-${ts}.log`);
-}
-let LOG_FILE = newLogFile();
-function redactLog(value) {
-  return String(value)
-    .replace(/(password|passphrase|token|secret|authorization)\s*[:=]\s*[^\s,;]+/gi, '$1=[REDACTED]')
-    .replace(/(-----BEGIN [A-Z ]*PRIVATE KEY-----)[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----)/g, '$1\n[REDACTED]\n$2')
-    .replace(/Bearer\s+[A-Za-z0-9._~+\/-]+=*/gi, 'Bearer [REDACTED]');
-}
-function log(level, msg) {
-  const d = new Date();
-  const pad = (n) => String(n).padStart(2, '0');
-  const entry = {
-    t: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`,
-    level, msg: redactLog(msg),
-  };
-  logs.push(entry);
-  if (logs.length > MAX_LOGS) logs.shift();
-  try {
-    fs.mkdirSync(LOG_DIR, { recursive: true });
-    fs.appendFileSync(LOG_FILE, `[${entry.t}] [${level}] ${entry.msg}\n`);
-  } catch (e) { /* 日志写入失败不影响功能 */ }
-  return entry;
-}
-
-// ---------- 会话持久化 ----------
-let sessions = loadSessions();
-log('info', `已加载 ${Object.keys(sessions).length} 个保存会话`);
-
-// Retain both operation logs and terminal transcripts.  Session transcripts
-// used to grow without bound because only LOG_DIR was cleaned.
-const MAX_LOG_FILES = 100;
-const MAX_LOG_AGE_DAYS = 30;
-function cleanupLogDirectory(dir, matcher) {
-  try {
-    const files = fs.readdirSync(dir, { withFileTypes: true })
-      .filter(f => f.isFile() && matcher.test(f.name))
-      .map(f => ({ name: f.name, path: path.join(dir, f.name), mtime: fs.statSync(path.join(dir, f.name)).mtime }))
-      .sort((a, b) => b.mtime - a.mtime);
-    const cutoff = Date.now() - MAX_LOG_AGE_DAYS * 24 * 3600 * 1000;
-    for (let i = MAX_LOG_FILES; i < files.length; i++) {
-      try { fs.unlinkSync(files[i].path); } catch {}
-    }
-    for (const f of files.slice(0, MAX_LOG_FILES)) {
-      if (f.mtime.getTime() < cutoff) {
-        fs.unlinkSync(f.path);
-        console.log(`[log-cleanup] 删除过期日志: ${f.name} (${f.mtime.toISOString().split('T')[0]})`);
-      }
-    }
-  } catch (e) { /* 静默处理 */ }
-}
-function cleanupOldLogs() {
-  cleanupLogDirectory(LOG_DIR, /^sshterm-\d{8}-\d{6}\.log$/);
-  cleanupLogDirectory(SESSION_LOG_DIR, /\.log$/i);
-}
-// 启动时清理旧日志
-setTimeout(cleanupOldLogs, 1000);
-
-function writeSessionFile(data, backupExisting = true) {
-  fs.mkdirSync(CONN_DIR, { recursive: true });
-  const tempFile = `${CONN_FILE}.${process.pid}.tmp`;
-  fs.writeFileSync(tempFile, JSON.stringify(data, null, 2));
-  try {
-    if (backupExisting && fs.existsSync(CONN_FILE)) fs.copyFileSync(CONN_FILE, CONN_BACKUP_FILE);
-    fs.renameSync(tempFile, CONN_FILE);
-    // A legacy file may contain plaintext credentials.  Its migration must
-    // never preserve that unsafe source as the backup.
-    if (!backupExisting) fs.copyFileSync(CONN_FILE, CONN_BACKUP_FILE);
-  } catch (error) {
-    try { fs.unlinkSync(tempFile); } catch {}
-    throw error;
-  }
-}
-
-function loadSessions() {
-  if (!fs.existsSync(CONN_FILE) && !fs.existsSync(CONN_BACKUP_FILE)) return {};
-  try {
-    let raw;
-    try {
-      raw = JSON.parse(fs.readFileSync(CONN_FILE, 'utf8'));
-    } catch (primaryError) {
-      if (!fs.existsSync(CONN_BACKUP_FILE)) throw primaryError;
-      raw = JSON.parse(fs.readFileSync(CONN_BACKUP_FILE, 'utf8'));
-      console.error(`[会话] 主文件读取失败，已从备份恢复: ${primaryError.message}`);
-      log('error', `会话主文件读取失败，已从备份恢复: ${primaryError.message}`);
-    }
-    // Migrate older versions that persisted credentials. Credentials are
-    // intentionally process-memory-only and must not survive a restart unless
-    // the session opts in to DPAPI-backed "remember password".
-    let migrated = false;
-    const clean = Object.fromEntries(Object.entries(raw).map(([id, s]) => {
-      const { password, passphrase, loginPass, privateKey, proxy, jumpAuth, ...safe } = s || {};
-      const { password: proxyPassword, ...safeProxy } = proxy || {};
-      const { password: jumpPassword, privateKey: jumpPrivateKey, passphrase: jumpPassphrase, ...safeJumpAuth } = jumpAuth || {};
-      if ([password, passphrase, loginPass, privateKey, proxyPassword, jumpPassword, jumpPrivateKey, jumpPassphrase].some(v => v !== undefined)) migrated = true;
-      if (proxy) safe.proxy = safeProxy;
-      if (jumpAuth) safe.jumpAuth = safeJumpAuth;
-      return [id, safe];
-    }));
-    if (migrated) {
-      writeSessionFile(clean, false);
-    }
-    // Load DPAPI-backed secrets for sessions that opted into "remember password"
-    const secrets = readSecrets();
-    for (const [id, s] of Object.entries(clean)) {
-      if (s.rememberPassword && secrets[id]) {
-        const saved = secrets[id];
-        clean[id] = {
-          ...s,
-          password: saved.password,
-          passphrase: saved.passphrase,
-          loginPass: saved.loginPass,
-          privateKey: saved.privateKey,
-          proxy: s.proxy ? { ...s.proxy, ...(saved.proxyPassword ? { password: saved.proxyPassword } : {}) } : s.proxy,
-          jumpAuth: s.jumpAuth ? {
-            ...s.jumpAuth,
-            ...(saved.jumpPassword ? { password: saved.jumpPassword } : {}),
-            ...(saved.jumpPrivateKey ? { privateKey: saved.jumpPrivateKey } : {}),
-            ...(saved.jumpPassphrase ? { passphrase: saved.jumpPassphrase } : {}),
-          } : s.jumpAuth,
-        };
-      }
-    }
-    return clean;
-  }
-  catch (error) {
-    console.error(`[会话] 启动读取失败: ${error.message}`);
-    log('error', `会话启动读取失败: ${error.message}`);
-    return {};
-  }
-}
-function saveSessions(data) {
-  try {
-    fs.mkdirSync(CONN_DIR, { recursive: true });
-    // Write DPAPI-backed secrets only for opted-in sessions
-    const secrets = {};
-    for (const [id, s] of Object.entries(data)) {
-      if (s.rememberPassword && (s.password || s.passphrase || s.loginPass || s.privateKey || s.proxy?.password ||
-          s.jumpAuth?.password || s.jumpAuth?.privateKey || s.jumpAuth?.passphrase)) {
-        secrets[id] = {
-          password: s.password,
-          passphrase: s.passphrase,
-          loginPass: s.loginPass,
-          privateKey: s.privateKey,
-          proxyPassword: s.proxy?.password,
-          jumpPassword: s.jumpAuth?.password,
-          jumpPrivateKey: s.jumpAuth?.privateKey,
-          jumpPassphrase: s.jumpAuth?.passphrase,
-        };
-      }
-    }
-    writeSecrets(secrets);
-    // Never write reusable credentials to disk in plain JSON.
-    const diskData = Object.fromEntries(Object.entries(data).map(([id, s]) => {
-      const { password, passphrase, loginPass, privateKey, proxy, jumpAuth, ...safe } = s;
-      if (proxy) {
-        const { password: proxyPassword, ...safeProxy } = proxy;
-        safe.proxy = safeProxy;
-      }
-      if (jumpAuth) {
-        const { password: jumpPassword, privateKey: jumpPrivateKey, passphrase: jumpPassphrase, ...safeJumpAuth } = jumpAuth;
-        safe.jumpAuth = safeJumpAuth;
-      }
-      return [id, safe];
-    }));
-    writeSessionFile(diskData);
-  } catch (e) {
-    console.error('[会话] 保存失败:', e.message);
-    log('error', `会话或加密凭据保存失败: ${e.message}`);
-    throw e;
-  }
-}
-
-function storedSessionForConfig(config) {
-  if (!config || !config.type) return null;
-  if (config.id && sessions[config.id]) return sessions[config.id];
-  if (!['ssh', 'telnet', 'vnc'].includes(config.type)) return null;
-  const defaultPort = config.type === 'telnet' ? 23 : (config.type === 'vnc' ? 5901 : 22);
-  const host = String(config.host || '').trim().toLowerCase();
-  const port = Number(config.port || defaultPort);
-  const username = String(config.username || config.user || '').trim();
-  if (!host) return null;
-  const matches = Object.values(sessions).filter(saved =>
-    saved?.type === config.type &&
-    String(saved.host || '').trim().toLowerCase() === host &&
-    Number(saved.port || defaultPort) === port &&
-    (config.type === 'vnc' || String(saved.username || saved.user || '').trim() === username));
-  // Never guess between duplicate endpoints that may intentionally use
-  // different credentials. The stable session id remains authoritative.
-  return matches.length === 1 ? matches[0] : null;
-}
-
-function mergeStoredCredentials(config, stored) {
-  if (!stored) return config;
-  if (!config.id && stored.id) config.id = stored.id;
-  // A restored browser workspace may still contain an older, sanitized Telnet
-  // config after the saved session was edited.  Reconnects for the same stable
-  // session id must use the durable login policy; otherwise an already-open tab
-  // can keep reconnecting with autoLogin=false and be kicked by telnetd every
-  // 60 seconds even though the saved session has been fixed.
-  if (config.type === 'telnet' && config.id && stored.id === config.id) {
-    if (typeof stored.autoLogin === 'boolean') config.autoLogin = stored.autoLogin;
-    if (typeof stored.loginUser === 'string') config.loginUser = stored.loginUser;
-    if (typeof stored.reconnect === 'boolean') config.reconnect = stored.reconnect;
-  }
-  for (const key of ['password', 'privateKey', 'passphrase', 'loginPass']) {
-    if (!config[key]) config[key] = stored[key];
-  }
-  if (config.proxy && !config.proxy.password && stored.proxy?.password) {
-    config.proxy = { ...config.proxy, password: stored.proxy.password };
-  }
-  if (config.jumpAuth && stored.jumpAuth) {
-    for (const key of ['password', 'privateKey', 'passphrase']) {
-      if (!config.jumpAuth[key] && stored.jumpAuth[key]) config.jumpAuth[key] = stored.jumpAuth[key];
-    }
-  }
-  return config;
-}
-
-// ---------- SSH config 解析 ----------
-// 支持: Host 别名 → Hostname IP/Port/User/IdentityFile
-const SSH_CONFIG_PATH = path.join(os.homedir(), '.ssh', 'config');
-let sshConfig = null;
-function loadSSHConfig() {
-  try {
-    const raw = fs.readFileSync(SSH_CONFIG_PATH, 'utf8');
-    const hosts = {};
-    let current = null;
-    for (const line of raw.split('\n')) {
-      const m = line.match(/^\s*(Host|Hostname|Port|User|IdentityFile|ProxyJump)\s+(.+)$/i);
-      if (!m) continue;
-      const [, key, val] = m;
-      const k = key.toLowerCase();
-      if (k === 'host') {
-        current = val.replace(/['"]/g, '').trim();
-        hosts[current] = { hostname: '', port: 22, user: 'root', identity: '', proxyJump: '' };
-      } else if (current) {
-        if (k === 'hostname') hosts[current].hostname = val.replace(/['"]/g, '').trim();
-        else if (k === 'port') hosts[current].port = parseInt(val, 10);
-        else if (k === 'user') hosts[current].user = val.replace(/['"]/g, '').trim();
-        else if (k === 'identityfile') hosts[current].identity = val.replace(/['"]/g, '').trim();
-        else if (k === 'proxyjump') hosts[current].proxyJump = val.replace(/['"]/g, '').trim();
-      }
-    }
-    sshConfig = hosts;
-    console.log('[ssh-config] 加载', Object.keys(hosts).length, '个 Host 条目');
-  } catch (e) {
-    if (e.code !== 'ENOENT') console.log('[ssh-config] 加载失败:', e.message);
-    sshConfig = {};
-  }
-}
-loadSSHConfig();
-
-// ---------- HTTP 静态服务 ----------
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css',
                '.json': 'application/json', '.png': 'image/png', '.woff2': 'font/woff2' };
 const server = http.createServer((req, res) => {
@@ -453,8 +160,6 @@ const server = http.createServer((req, res) => {
     return res.end('bad request: invalid percent-encoding');
   }
 
-  // Public, read-only loopback identity used only by the desktop launcher.
-  // It intentionally contains no session data or control capability.
   if (req.method === 'GET' && url === '/launcher-info') {
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
     return res.end(JSON.stringify({
@@ -465,448 +170,36 @@ const server = http.createServer((req, res) => {
     }));
   }
 
-  // The UI obtains this only from the loopback bootstrap script.  State-changing
-    // and file-transfer endpoints require it; static assets remain public but
-    // cannot perform privileged actions.
-    // P0 FIX: bootstrap.js 也要 Origin 校验，防止 <script src="..."> 抓取 token
-    if (url === '/bootstrap.js') {
-      if (!isTrustedRequest(req)) {
-        res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
-        return res.end('forbidden: untrusted origin');
-      }
-      res.writeHead(200, { 'Content-Type': 'text/javascript', 'Cache-Control': 'no-store' });
-      return res.end(`window.__SSHTERM_TOKEN=${JSON.stringify(CLIENT_TOKEN)};`);
+  if (url === '/bootstrap.js') {
+    if (!isTrustedRequest(req)) {
+      res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+      return res.end('forbidden: untrusted origin');
     }
-    if (url.startsWith('/api/') && (!hasClientToken(req) || !isTrustedRequest(req))) {
-        res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
-        return res.end('forbidden');
-      }
-
-  // Zmodem 文件下载: /api/zmodem/download?file=<文件名>
-  if (url.startsWith('/api/zmodem/download')) {
-    const qs = new URLSearchParams(req.url.split('?')[1] || '');
-    const name = qs.get('file') || '';
-    const safe = path.basename(name).replace(/[\\/]/g, '_');
-    const fp = path.join(os.homedir(), '.sshterm', 'zmodem', safe);
-    // 使用流式传输避免大文件占用过多内存
-    if (!fs.existsSync(fp)) { res.writeHead(404); return res.end('文件不存在'); }
-    res.writeHead(200, {
-      'Content-Type': 'application/octet-stream',
-      'Content-Disposition': `attachment; filename="${encodeURIComponent(safe)}"`,
-    });
-    const stream = fs.createReadStream(fp);
-    stream.on('error', () => { try { res.end(); } catch {} });
-    stream.pipe(res);
-    return;
+    res.writeHead(200, { 'Content-Type': 'text/javascript', 'Cache-Control': 'no-store' });
+    return res.end(`window.__SSHTERM_TOKEN=${JSON.stringify(CLIENT_TOKEN)};`);
+  }
+  if (url.startsWith('/api/') && (!hasClientToken(req) || !isTrustedRequest(req))) {
+    res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+    return res.end('forbidden');
   }
 
-  // SFTP 上传: HEAD 查询远端文件已存在大小 (断点续传判断)
-  // PUT /api/sftp/upload?conn=<id>&path=<dir>&name=<file>&offset=N → 从 N 偏移续写
-  if (req.method === 'HEAD' && url.startsWith('/api/sftp/upload')) {
-    const qs = new URLSearchParams(req.url.split('?')[1] || '');
-    const conn = getHttpConnection(qs);
-    const dir = qs.get('path') || '.';
-    const name = qs.get('name') || '';
-    if (!conn || !conn.getSftpInst() || !name) { res.writeHead(400); return res.end(); }
-    const remotePath = dir.endsWith('/') ? dir + name : `${dir}/${name}`;
-    const sftp = conn.getSftpInst();
-    sftp.stat(remotePath, (err, st) => {
-      if (err) { res.writeHead(404); return res.end(); }
-      res.writeHead(200, {
-        'Content-Type': 'application/json',
-        'X-Remote-Size': String(st.size),
-        'X-Remote-Mtime': statMtimeHeader(st),
-      });
-      res.end(JSON.stringify({ size: st.size }));
-    });
-    return;
-  }
-  if (req.method === 'PUT' && url.startsWith('/api/sftp/upload')) {
-    const qs = new URLSearchParams(req.url.split('?')[1] || '');
-    const conn = getHttpConnection(qs);
-    const dir = qs.get('path') || '.';
-    const name = qs.get('name') || '';
-    const rawOffset = qs.get('offset');
-    const offset = rawOffset === null ? 0 : Number(rawOffset);
-    const segments = String(name).replace(/\\/g, '/').split('/');
-    const contentLength = Number(req.headers['content-length'] || 0);
-    if (!conn || !conn.getSftpInst() || !name || !Number.isSafeInteger(offset) || offset < 0 ||
-        segments.some(p => !p || p === '.' || p === '..' || p.includes('\0')) ||
-        (contentLength && (!Number.isSafeInteger(contentLength) || offset + contentLength > MAX_SFTP_UPLOAD_BYTES))) {
-      res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
-      return res.end('上传参数错误(连接或文件名无效)');
-    }
-    const remotePath = dir.endsWith('/') ? dir + name : `${dir}/${name}`;
-    const uploadKey = `${conn.id}:${remotePath}`;
-    if (activeUploads >= MAX_CONCURRENT_UPLOADS) {
-      res.writeHead(429, { 'Content-Type': 'text/plain; charset=utf-8', 'Retry-After': '2' });
-      return res.end('上传队列繁忙，请稍后重试');
-    }
-    if (activeUploadKeys.has(uploadKey)) {
-      res.writeHead(409, { 'Content-Type': 'text/plain; charset=utf-8' });
-      return res.end('同一远端文件正在上传');
-    }
-    activeUploads++;
-    activeUploadKeys.add(uploadKey);
-    let finished = false;
-    const finish = (status, message, payload) => {
-      if (finished) return;
-      finished = true;
-      activeUploads--;
-      activeUploadKeys.delete(uploadKey);
-      if (res.writableEnded) return;
-      if (payload) {
-        res.writeHead(status, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(payload));
-      } else {
-        res.writeHead(status, { 'Content-Type': 'text/plain; charset=utf-8' });
-        res.end(message);
-      }
-    };
-    const sftp = conn.getSftpInst();
-    console.log(`[sftp-upload] ${remotePath} offset=${offset}`);
-    // 递归创建父目录 (文件夹上传的子目录可能不存在)
-    const parent = remotePath.slice(0, remotePath.lastIndexOf('/'));
-    const mkdirs = (p) => new Promise((resolve) => {
-      const parts = p.split('/').filter(Boolean);
-      let cur = '';
-      const next = (i) => {
-        if (i >= parts.length) return resolve();
-        cur += '/' + parts[i];
-        sftp.mkdir(cur, () => next(i + 1));   // 已存在则忽略错误
-      };
-      next(0);
-    });
-    mkdirs(parent).then(() => {
-      // createWriteStream 每次只保持一个约 32 KiB 的 WRITE 在途，高延迟
-      // 网络会被 RTT 严重限速。这里使用有界并发随机写，同时保持偏移
-      // 有序且仍然只允许一个请求写同一远端文件。
-      const hash = offset === 0 ? createHash('sha256') : null;
-      const transfer = receiveParallelUpload(req, sftp, remotePath, {
-        start: offset,
-        flags: offset > 0 ? 'r+' : 'w',
-        maxBytes: MAX_SFTP_UPLOAD_BYTES - offset,
-        onData: hash ? chunk => hash.update(chunk) : undefined,
-      });
-      req.setTimeout(30 * 60 * 1000, () => {
-        const error = new Error('上传超时');
-        transfer.abort(error);
-        req.destroy(error);
-      });
-      transfer.promise.then(({ received }) => {
-        req.setTimeout(0);
-        const fileHash = hash ? hash.digest('hex') : null;
-        console.log(`[sftp-upload] ${remotePath} 完成, size=${received}${fileHash ? `, hash=${fileHash.substring(0, 16)}...` : ''}`);
-        finish(200, '', {
-          ok: true, size: received, hash: fileHash,
-          message: offset > 0 ? '续写完成' : '上传完成',
-        });
-      }).catch((e) => {
-        console.log('[sftp-upload] 错误:', e.message);
-        finish(req.aborted ? 499 : 500, e.message);
-      });
-    }).catch((e) => finish(500, `创建远端目录失败: ${e.message}`));
-    return;
-  }
-
-  // SHA-256 is calculated server-side from the remote SFTP stream so uploads
-  // can be verified without running shell commands on the remote machine.
-  if (url.startsWith('/api/sftp/checksum')) {
-    const qs = new URLSearchParams(req.url.split('?')[1] || '');
-    const conn = getHttpConnection(qs);
-    const rpath = qs.get('path') || '';
-    if (!conn || !conn.getSftpInst() || !rpath) { res.writeHead(400); return res.end('SFTP 通道未就绪'); }
-    const hash = require('crypto').createHash('sha256');
-    const rs = conn.getSftpInst().createReadStream(rpath);
-    rs.on('data', d => hash.update(d));
-    rs.on('error', e => { res.writeHead(500); res.end(e.message); });
-    rs.on('end', () => {
-      if (!res.writableEnded) { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ algorithm: 'sha256', hash: hash.digest('hex') })); }
-    });
-    return;
-  }
-
-  // 目录 ZIP 的 HTTP 字节数与压缩前文件字节数不是同一口径。前端通过
-  // 此轻量接口读取服务端实际已读取的远端字节数，扫描和压缩阶段均可
-  // 显示真实进度。
-  if (url.startsWith('/api/sftp/download-progress')) {
-    const qs = new URLSearchParams(req.url.split('?')[1] || '');
-    const conn = getHttpConnection(qs);
-    const jobId = qs.get('job') || '';
-    const job = directoryDownloads.get(jobId);
-    if (!conn || !job || job.conn !== conn) {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: '下载任务不存在' }));
-    }
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-    return res.end(JSON.stringify({
-      phase: job.phase, loaded: job.loaded, total: job.total,
-      filesDone: job.filesDone, filesTotal: job.filesTotal,
-      skipped: job.skipped || 0, warning: job.warning || '', error: job.error || '',
-    }));
-  }
-
-  // SFTP 目录下载 (递归打包 zip, 流式): /api/sftp/download-dir?conn=<id>&path=<远端目录>
-  if (url.startsWith('/api/sftp/download-dir')) {
-    const qs = new URLSearchParams(req.url.split('?')[1] || '');
-    const conn = getHttpConnection(qs);
-    const rdir = qs.get('path') || '';
-    const jobId = qs.get('job') || '';
-    if (!conn || !conn.getSftpInst()) {
-      res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
-      return res.end('SFTP 通道未就绪(连接可能已断开)');
-    }
-    if (jobId && !/^[a-zA-Z0-9_-]{8,80}$/.test(jobId)) {
-      res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
-      return res.end('下载任务标识无效');
-    }
-    const job = {
-      conn, phase: 'scanning', loaded: 0, total: 0,
-      filesDone: 0, filesTotal: 0, skipped: 0,
-      warning: '', error: '', updatedAt: Date.now(),
-    };
-    if (jobId) directoryDownloads.set(jobId, job);
-    const dirName = path.basename(rdir) || 'download';
-    conn.sftpCollectFiles(rdir).then(async (collected) => {
-      try {
-        const files = collected.files || collected;
-        const scanSkipped = collected.skipped || [];
-        const collectedCount = files.length;
-        const skippedLinks = files.filter(file => file.isSymlink);
-        const usable = files.filter(file => !file.isSymlink);
-        const totalBytes = usable.reduce((s, f) => s + f.size, 0);
-        job.phase = 'transferring';
-        job.total = totalBytes;
-        job.filesTotal = collectedCount;
-        job.filesDone = skippedLinks.length + scanSkipped.length;
-        job.skipped = skippedLinks.length + scanSkipped.length;
-        const warnings = [];
-        if (skippedLinks.length) warnings.push(`已跳过 ${skippedLinks.length} 个符号链接`);
-        if (scanSkipped.length) warnings.push(`已跳过 ${scanSkipped.length} 个不可读目录`);
-        if (warnings.length) job.warning = warnings.join('；');
-        job.updatedAt = Date.now();
-        res.writeHead(200, {
-          'Content-Type': 'application/zip',
-          'Content-Disposition': `attachment; filename="${encodeURIComponent(dirName)}.zip"`,
-          'Cache-Control': 'no-cache',
-          'X-Total-Size': String(totalBytes),
-          'X-File-Count': String(collectedCount),
-          'X-Skipped-Count': String(skippedLinks.length),
-        });
-        const { ZipArchive } = require('archiver');
-        const archive = new ZipArchive({ zlib: { level: 1 } });   // 低压缩快打包
-        const activeStreams = new Set();
-        const entryWaiters = new Map();
-        let archiveFailed = false;
-        const rejectEntryWaiters = (error) => {
-          for (const waiter of entryWaiters.values()) waiter.reject(error);
-          entryWaiters.clear();
-        };
-        const failArchive = (e) => {
-          if (archiveFailed) return;
-          archiveFailed = true;
-          console.log('[sftp-zip]', e.message);
-          job.phase = 'failed'; job.error = e.message; job.updatedAt = Date.now();
-          rejectEntryWaiters(e);
-          for (const stream of activeStreams) stream.destroy();
-          if (!res.destroyed) res.destroy(e);
-        };
-        archive.on('error', failArchive);
-        archive.on('entry', entry => {
-          const waiter = entryWaiters.get(entry.name);
-          if (!waiter) return;
-          entryWaiters.delete(entry.name);
-          waiter.resolve();
-        });
-        archive.on('end', () => {
-          job.phase = 'done'; job.loaded = job.total;
-          job.filesDone = job.filesTotal; job.updatedAt = Date.now();
-        });
-        archive.pipe(res);
-        req.on('aborted', () => {
-          job.phase = 'cancelled'; job.error = '下载已取消'; job.updatedAt = Date.now();
-          rejectEntryWaiters(new Error('下载已取消'));
-          for (const stream of activeStreams) stream.destroy();
-          archive.abort();
-        });
-        // 小文件先由多个 worker 并发预取，隐藏每个文件的
-        // open/read/close 往返延迟；每个大文件内部则保持 32 个 READ
-        // 请求在途。仅预取固定数量的小文件，内存有明确上限。
-        const MAX_STREAMS = 8;
-        const SMALL_FILE_BUFFER = 512 * 1024;
-        let idx = 0;
-        const appendBuffer = (buffer, name) => new Promise((resolve, reject) => {
-          entryWaiters.set(name, { resolve, reject });
-          archive.append(buffer, { name });
-        });
-        const skipUnreadableFile = (file, error, loadedForFile) => {
-          activeStreams.delete(file.stream);
-          job.loaded = Math.max(0, job.loaded - loadedForFile);
-          job.total = Math.max(0, job.total - file.size);
-          job.filesDone++;
-          job.skipped++;
-          job.warning = `${file.name}: ${error.message}`;
-          job.updatedAt = Date.now();
-          console.log(`[sftp-zip] 跳过无法读取的文件 ${file.path}: ${error.message}`);
-        };
-        const worker = async () => {
-          while (idx < usable.length) {
-            const f = usable[idx++];
-            const rs = createParallelReadStream(conn.getSftpInst(), f.path, {
-              start: 0, end: Math.max(-1, f.size - 1),
-              concurrency: f.size <= SMALL_FILE_BUFFER ? 4 : 32,
-            });
-            f.stream = rs;
-            activeStreams.add(rs);
-            let fileLoaded = 0;
-            if (f.size <= SMALL_FILE_BUFFER) {
-              const chunks = [];
-              try {
-                await new Promise((resolve, reject) => {
-                  rs.on('data', chunk => {
-                    chunks.push(chunk);
-                    fileLoaded += chunk.length;
-                    job.loaded += chunk.length;
-                    job.updatedAt = Date.now();
-                  });
-                  rs.on('error', reject);
-                  rs.on('end', resolve);
-                });
-              } catch (error) {
-                skipUnreadableFile(f, error, fileLoaded);
-                continue;
-              }
-              activeStreams.delete(rs);
-              job.filesDone++;
-              job.updatedAt = Date.now();
-              await appendBuffer(Buffer.concat(chunks, f.size), f.name);
-            } else {
-              let opened = false;
-              try {
-                await new Promise((resolve, reject) => {
-                  rs.once('open', () => {
-                    opened = true;
-                    archive.append(rs, { name: f.name });
-                  });
-                  rs.on('data', chunk => {
-                    fileLoaded += chunk.length;
-                    job.loaded += chunk.length;
-                    job.updatedAt = Date.now();
-                  });
-                  rs.on('error', reject);
-                  rs.on('end', resolve);
-                });
-              } catch (error) {
-                if (opened) {
-                  failArchive(error);
-                  throw error;
-                }
-                skipUnreadableFile(f, error, fileLoaded);
-                continue;
-              }
-              activeStreams.delete(rs);
-              job.filesDone++;
-              job.updatedAt = Date.now();
-            }
-          }
-        };
-        await Promise.all(Array.from({ length: Math.min(MAX_STREAMS, files.length) }, worker));
-        job.phase = 'packing'; job.updatedAt = Date.now();
-        await archive.finalize();
-        console.log(`[sftp-zip] ${rdir} → ${usable.length - skippedLinks.length} 文件打包完成, 跳过 ${job.skipped}`);
-      } catch (e) {
-        console.log('[sftp-zip] 异常:', e.message);
-        job.phase = 'failed'; job.error = e.message; job.updatedAt = Date.now();
-        if (!res.headersSent) {
-          res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
-          res.end(`目录打包失败: ${e.message}`);
-        } else if (!res.destroyed) res.destroy(e);
-      }
-    }).catch((e) => {
-      console.log('[sftp-zip] 收集失败:', e.message);
-      job.phase = 'failed'; job.error = e.message; job.updatedAt = Date.now();
-      if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
-      res.end(`目录扫描失败: ${e.message}`);
-    });
-    return;
-  }
-
-  // SFTP file download with single-range support.  Range lets an interrupted
-  // browser download continue without asking the remote server to resend the
-  // bytes already received.
-  if (url.startsWith('/api/sftp/download')) {
-    const qs = new URLSearchParams(req.url.split('?')[1] || '');
-    const conn = getHttpConnection(qs);
-    const rpath = qs.get('path') || '';
-    if (!conn || !conn.getSftpInst()) {
-      res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
-      return res.end('SFTP 通道未就绪(连接可能已断开)');
-    }
-    const sftp = conn.getSftpInst();
-    sftp.stat(rpath, (statErr, st) => {
-      if (statErr || !st || !Number.isSafeInteger(st.size)) {
-        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
-        return res.end('远端文件不存在或无法读取');
-      }
-      const size = st.size;
-      const name = path.basename(rpath);
-      let start = 0;
-      let end = Math.max(0, size - 1);
-      let partial = false;
-      const identity = remoteFileIdentity(st);
-      const range = req.headers.range;
-      const clientIdentity = req.headers['x-remote-identity'];
-      if (range) {
-        if (clientIdentity && clientIdentity !== identity) {
-          res.writeHead(412, { 'Content-Type': 'text/plain; charset=utf-8', 'X-Remote-Identity': identity });
-          return res.end('远端文件身份已变化，请重新下载');
-        }
-        const m = /^bytes=(\d+)-(\d*)$/.exec(range);
-        if (!m) {
-          res.writeHead(416, { 'Content-Range': `bytes */${size}` });
-          return res.end();
-        }
-        start = Number(m[1]);
-        end = m[2] ? Number(m[2]) : end;
-        if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start >= size || end < start) {
-          res.writeHead(416, { 'Content-Range': `bytes */${size}` });
-          return res.end();
-        }
-        end = Math.min(end, size - 1);
-        partial = true;
-      }
-      const length = size === 0 ? 0 : end - start + 1;
-      const headers = {
-        'Content-Type': 'application/octet-stream',
-        'Content-Disposition': `attachment; filename="${encodeURIComponent(name)}"`,
-        'Cache-Control': 'no-cache',
-        'Accept-Ranges': 'bytes',
-        'Content-Length': String(length),
-        'X-Remote-Size': String(size),
-        'X-Remote-Mtime': statMtimeHeader(st),
-        'X-Remote-Identity': identity,
-      };
-      if (partial) headers['Content-Range'] = `bytes ${start}-${end}/${size}`;
-      res.writeHead(partial ? 206 : 200, headers);
-      if (size === 0) return res.end();
-      const rs = createParallelReadStream(sftp, rpath, { start, end });
-      rs.on('error', (e) => { if (!res.writableEnded) res.destroy(e); });
-      req.on('aborted', () => { try { rs.destroy(); } catch {} });
-      rs.pipe(res);
-    });
-    return;
-  }
+  if (handleSftpHttp(req, res, {
+    url,
+    getHttpConnection,
+    activeUploadKeys,
+    directoryDownloads,
+    MAX_SFTP_UPLOAD_BYTES,
+    MAX_CONCURRENT_UPLOADS,
+    uploadState,
+  })) return;
 
   if (url === '/') url = '/index.html';
-  // node_modules 资源映射 (xterm.js)
   let file;
   if (url.startsWith('/vendor/')) {
     file = path.join(ROOT, 'node_modules', url.slice('/vendor/'.length));
   } else {
     file = path.join(WEB, url);
   }
-  // Do not use a prefix check here: paths such as ../sshterm-private pass a
-  // textual prefix check.  Assets must be in exactly their intended root.
   const allowedRoot = url.startsWith('/vendor/')
     ? path.join(ROOT, 'node_modules')
     : WEB;
@@ -921,7 +214,6 @@ const server = http.createServer((req, res) => {
   });
 });
 
-// ---------- 空闲自动退出 (桌面启动器 --auto-exit 模式) ----------
 const AUTO_EXIT = process.argv.includes('--auto-exit');
 let wsCount = 0;
 let idleExitTimer = null;
@@ -937,9 +229,6 @@ function scheduleIdleExit() {
   }
 }
 
-// ---------- WebSocket 协议 ----------
-// The HTTP server is loopback-only; additionally cap a single WebSocket frame
-// so a malformed local client cannot allocate unbounded memory.
 const wss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 * 1024 });
 const vncWss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 * 1024 });
 
@@ -956,260 +245,12 @@ server.on('upgrade', (req, socket, head) => {
   target.handleUpgrade(req, socket, head, upgraded => target.emit('connection', upgraded, req));
 });
 
-wss.on('connection', (ws, req) => {
-  ws.windowId = requestedWindowId(req) || randomBytes(24).toString('base64url');
-  const previous = windows.get(ws.windowId);
-  if (previous && previous !== ws && previous.readyState < 2) {
-    // sessionStorage can be cloned with a duplicated browser tab. Only one
-    // live page may own a window capability; a refresh transfers ownership.
-    previous.replacedByRefresh = true;
-    previous.close(4001, '页面已刷新');
-  }
-  cancelWindowCleanup(ws.windowId);
-  windows.set(ws.windowId, ws);
-  attachWsBackpressure(ws, () => resumePausedConnections(ws));
-  send(ws, { type: 'window-id', windowId: ws.windowId });
-  wsCount++;
-  clearTimeout(idleExitTimer);
-  const pingTimer = setInterval(() => {
-    if (ws.readyState === 1) {
-      try { ws.ping(); } catch {}
-    }
-  }, 25000);
-  pingTimer.unref();
-  ws.on('close', () => {
-    clearInterval(pingTimer);
-    wsCount--;
-    scheduleIdleExit();
-    if (windows.get(ws.windowId) === ws) {
-      windows.delete(ws.windowId);
-      // Remove only the stale socket owner. A replacement WebSocket may have
-      // already claimed the same connection during a normal page refresh.
-      for (const [key, conn] of connections) {
-        if (key.startsWith(`${ws.windowId}:`) && conn.ownerWs === ws) conn.ownerWs = null;
-      }
-      scheduleWindowCleanup(ws.windowId);
-    }
-  });
-  ws.on('error', (err) => log('error', `WebSocket 错误: ${err && err.message}`));
-  ws.on('message', (msg, isBinary) => {
-    if (isBinary) {
-      if (msg.length < 2 || msg.length > 8 * 1024 * 1024) return;
-      const id = msg.readUInt16LE(0);
-      const conn = getConnection(ws, id);
-      if (conn && conn.state === 'connected') conn.write(msg.subarray(2));
-      return;
-    }
-    let m;
-    try { m = JSON.parse(msg.toString()); } catch { return; }
-    if (!m || typeof m !== 'object' || typeof m.type !== 'string') return;
-    handle(ws, m).catch((e) => send(ws, {
-      type: 'error',
-      id: Number.isInteger(m.id) ? m.id : undefined,
-      action: m.type,
-      msg: String(e.message || e),
-      occupied: !!e.sshtermOccupied,
-    }));
-  });
-});
-
-function validVncHost(value) {
-  return value.length > 0 && value.length <= 253 && /^[A-Za-z0-9._:-]+$/.test(value);
-}
-
 function resumePausedConnections(ws) {
-  for (const [key, conn] of connections) {
-    if (!key.startsWith(`${ws.windowId}:`) || conn.ownerWs !== ws || !conn._outputPaused) continue;
-    conn._outputPaused = false;
-    try { conn.stream?.resume(); } catch {}
-  }
-}
-
-function vncTargetForRequest(req) {
-  const query = new URL(req.url, 'http://127.0.0.1').searchParams;
-  const remoteHost = String(query.get('host') || '127.0.0.1').trim().toLowerCase();
-  const remotePort = Number(query.get('port') || 5901);
-  if (!validVncHost(remoteHost)) throw new Error('VNC 主机地址无效');
-  if (!Number.isInteger(remotePort) || remotePort < 1 || remotePort > 65535) throw new Error('VNC 端口无效');
-  return { remoteHost, remotePort };
-}
-
-async function resolveVncConnectTarget(remoteHost) {
-  if (net.isIP(remoteHost) === 4) {
-    if (!isPrivateIPv4(remoteHost)) throw new Error('VNC 目标必须是私网/环回地址');
-    return remoteHost;
-  }
-  if (net.isIP(remoteHost) === 6) {
-    if (!isPrivateIPv6(remoteHost)) throw new Error('VNC 目标必须是私网/环回地址');
-    return remoteHost;
-  }
-  const results = await dns.promises.lookup(remoteHost, { all: true, verbatim: true });
-  if (!results.length) throw new Error('VNC 主机解析失败');
-  for (const entry of results) {
-    if (entry.family === 4 && !isPrivateIPv4(entry.address)) {
-      throw new Error(`VNC 目标解析到非公网允许地址: ${entry.address}`);
-    }
-    if (entry.family === 6 && !isPrivateIPv6(entry.address)) {
-      throw new Error(`VNC 目标解析到非公网允许地址: ${entry.address}`);
-    }
-  }
-  const prefer = results.find(r => r.family === 4) || results[0];
-  return prefer.address;
-}
-
-function openDirectVnc(remoteHost, remotePort) {
-  return new Promise((resolve, reject) => {
-    const socket = net.connect({ host: remoteHost, port: remotePort });
-    const timer = setTimeout(() => socket.destroy(new Error('VNC 连接超时')), 15000);
-    timer.unref();
-    const onError = error => { clearTimeout(timer); reject(error); };
-    socket.once('error', onError);
-    socket.once('connect', () => {
-      clearTimeout(timer);
-      socket.off('error', onError);
-      resolve(socket);
-    });
-  });
-}
-
-vncWss.on('connection', async (ws, req) => {
-  let stream = null;
-  let cancelled = false;
-  const pending = [];
-  let pendingBytes = 0;
-  const closeStream = () => {
-    cancelled = true;
-    if (!stream) return;
-    try { stream.destroy(); } catch { try { stream.end(); } catch {} }
-    stream = null;
-  };
-  const flushVncOutbound = () => {
-    if (!stream || cancelled || ws.readyState !== 1) return;
-    while (pending.length && ws.readyState === 1 && ws.bufferedAmount <= WS_HIGH_WATER) {
-      const chunk = pending.shift();
-      pendingBytes -= chunk.length;
-      ws.send(chunk, { binary: true });
-    }
-  };
-  ws.on('close', closeStream);
-  ws.on('error', closeStream);
-  ws.on('message', (data) => {
-    const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data);
-    if (stream) {
-      if (!stream.write(chunk) && !stream._vncPaused) {
-        stream._vncPaused = true;
-        stream.once('drain', () => { stream._vncPaused = false; });
-      }
-      return;
-    }
-    pendingBytes += chunk.length;
-    if (pendingBytes > 256 * 1024) return ws.close(1009, 'VNC 握手缓存过大');
-    pending.push(chunk);
-  });
-  try {
-    const { remoteHost, remotePort } = vncTargetForRequest(req);
-    const connectHost = await resolveVncConnectTarget(remoteHost);
-    if (cancelled || ws.readyState !== 1) return;
-    stream = await openDirectVnc(connectHost, remotePort);
-    if (cancelled || ws.readyState !== 1) {
-      closeStream();
-      return;
-    }
-    for (const chunk of pending) {
-      if (!stream.write(chunk) && !stream._vncPaused) {
-        stream._vncPaused = true;
-        stream.once('drain', () => { stream._vncPaused = false; });
-      }
-    }
-    pending.length = 0;
-    pendingBytes = 0;
-    stream.on('data', chunk => {
-      if (cancelled || ws.readyState !== 1) return;
-      pending.push(Buffer.from(chunk));
-      pendingBytes += chunk.length;
-      flushVncOutbound();
-    });
-    stream.once('error', error => {
-      log('error', `[VNC ${remoteHost}:${remotePort}] 连接失败: ${error.message}`);
-      if (ws.readyState < 2) ws.close(1011, 'VNC 连接失败');
-    });
-    stream.once('close', () => { if (ws.readyState < 2) ws.close(1000, 'VNC 已关闭'); });
-    log('audit', `VNC 直接连接 ${remoteHost}:${remotePort} → ${connectHost}:${remotePort}`);
-  } catch (error) {
-    log('error', `VNC 连接失败: ${error.message}`);
-    if (ws.readyState < 2) ws.close(1008, error.message.slice(0, 120));
-  }
-});
-
-function statMtimeHeader(st) {
-  const value = st && st.mtime;
-  if (value instanceof Date) return String(Math.floor(value.getTime() / 1000));
-  if (Number.isFinite(value)) return String(Math.floor(value));
-  return '0';
-}
-
-function remoteFileIdentity(st) {
-  const size = st && Number.isSafeInteger(st.size) ? st.size : 0;
-  return `${size}:${statMtimeHeader(st)}`;
+  resumePausedConnectionsImpl(ws, connections);
 }
 
 function send(ws, obj) {
   if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
-}
-function sanitize(s) {
-  // 返回给前端时剥除敏感字段 (密码/私钥/口令)
-  const { password, privateKey, passphrase, loginPass, proxy, jumpAuth, ...rest } = s;
-  if (proxy) {
-    const { password: proxyPassword, ...safeProxy } = proxy;
-    rest.proxy = safeProxy;
-  }
-  if (jumpAuth) {
-    const { password: jumpPassword, privateKey: jumpPrivateKey, passphrase: jumpPassphrase, ...safeJumpAuth } = jumpAuth;
-    rest.jumpAuth = safeJumpAuth;
-  }
-  return rest;
-}
-function sessionSortOrder(session, fallback) {
-  const value = Number(session && session.sortOrder);
-  return Number.isSafeInteger(value) && value >= 0 ? value : fallback;
-}
-function sessionsList() {
-  return Object.values(sessions)
-    .map((session, index) => ({ session, index }))
-    .sort((a, b) => sessionSortOrder(a.session, a.index) - sessionSortOrder(b.session, b.index))
-    .map(({ session }) => sanitize(session));
-}
-function nextSessionSortOrder() {
-  return Object.values(sessions).reduce(
-    (max, session, index) => Math.max(max, sessionSortOrder(session, index)), -1) + 1;
-}
-function importSessionEntries(entries, source) {
-  if (!Array.isArray(entries) || entries.length > 500) throw new Error('导入会话数量无效（最多 500 个）');
-  const names = new Set(Object.values(sessions).map(s => s.name));
-  const acceptedTypes = new Set(['ssh', 'telnet', 'vnc', 'serial']);
-  let count = 0;
-  for (const item of entries) {
-    if (!item || typeof item !== 'object' || !acceptedTypes.has(item.type)) continue;
-    const session = JSON.parse(JSON.stringify(item)); // drops hostile prototypes
-    let name = String(session.name || '').trim().slice(0, 120);
-    if (!name) continue;
-    const original = name;
-    let suffix = 2;
-    while (names.has(name)) name = `${original} (${suffix++})`;
-    names.add(name);
-    session.id = randomUUID();
-    session.name = name;
-    // Imported OpenSSH IdentityFile paths use the existing DPAPI-backed key
-    // path field; a portable backup retains its own rememberPassword choice.
-    if (source === 'openssh' && session.privateKey) session.rememberPassword = true;
-    session.sortOrder = nextSessionSortOrder();
-    sessions[session.id] = session;
-    count++;
-  }
-  if (!count) throw new Error('没有可导入的有效会话');
-  saveSessions(sessions);
-  log('audit', `导入 ${count} 个会话（${source}）`);
-  return count;
 }
 function broadcast(obj) {
   for (const c of wss.clients) send(c, obj);
@@ -1243,437 +284,6 @@ function attachExistingConnection(ws, conn, id) {
   send(ws, { type: 'status', id, state, msg, resumed: true, historyReplay, cfg: sanitize(conn.config || {}) });
   if (historyReplay) {
     for (const chunk of conn._replayBuffer) sendBinary(ws, id, chunk);
-  }
-}
-
-async function handle(ws, m) {
-  switch (m.type) {
-    case 'test-connection-output': {
-      if (!process.env.SSHTERM_TEST_SFTP_ROOT || !Number.isInteger(m.id)) return;
-      const conn = getConnection(ws, m.id);
-      if (conn) sendConnectionData(conn, m.id, Buffer.from(String(m.data || '')));
-      break;
-    }
-    case 'test-sftp-claim': {
-      if (!process.env.SSHTERM_TEST_SFTP_ROOT || !Number.isInteger(m.id)) return;
-      const fixture = connections.get(9900);
-      if (!fixture) return;
-      connections.set(connectionKey(ws, m.id), {
-        ...fixture, id: m.id, state: 'connected', config: { type: 'ssh', name: 'fixture' },
-        ownerWs: ws, _replayBuffer: [], _replayBufferBytes: 0,
-      });
-      send(ws, { type: 'test-sftp-claimed', id: m.id });
-      break;
-    }
-    case 'list': {
-      send(ws, { type: 'sessions', list: sessionsList() });
-      break;
-    }
-    // 前端每隔几秒请求一次远端主机状态 (内存/负载/主机名); 断开即停, 无需服务端定时器
-    case 'hostinfo': {
-      const conn = getConnection(ws, m.id);
-      if (!conn || conn.state !== 'connected') break;
-      if (typeof conn.getHostStats !== 'function') break; // 仅 SSH 支持
-      conn.getHostStats().then(stats => {
-        send(ws, { type: 'hostinfo', id: m.id, ...stats });
-      }).catch(e => {
-        // 采集失败不打断终端, 仅回空 (前端显示 —)
-        send(ws, { type: 'hostinfo', id: m.id, error: String(e.message || e) });
-      });
-      break;
-    }
-    case 'hostcpu': {
-      const conn = getConnection(ws, m.id);
-      if (!conn || conn.state !== 'connected') break;
-      if (typeof conn.getCpuPct !== 'function') break;
-      conn.getCpuPct().then(stats => {
-        send(ws, { type: 'hostcpu', id: m.id, ...stats });
-      }).catch(() => {});
-      break;
-    }
-    case 'vnc-credential': {
-      const requestId = typeof m.requestId === 'string' ? m.requestId.slice(0, 120) : '';
-      const stored = storedSessionForConfig({ ...(m.session || {}), type: 'vnc' });
-      const password = stored?.type === 'vnc' && stored.rememberPassword && typeof stored.password === 'string' ? stored.password : '';
-      send(ws, { type: 'vnc-credential', requestId, password });
-      break;
-    }
-    case 'save': {
-      const s = sanitizeSession(m.session);
-      if (!s) return send(ws, { type: 'error', msg: '会话数据无效' });
-      if (!s.name) return send(ws, { type: 'error', msg: '会话名不能为空' });
-      if (s.id && sessions[s.id]) {
-        // 编辑保存: 前端表单密码框留空 = 不修改, 保留存储中的敏感字段
-        for (const k of ['password', 'privateKey', 'passphrase', 'loginPass']) {
-          if (s[k] === undefined || s[k] === '') s[k] = sessions[s.id][k];
-        }
-        if (s.proxy && !s.proxy.password && sessions[s.id].proxy?.password) {
-          s.proxy = { ...s.proxy, password: sessions[s.id].proxy.password };
-        }
-        if (s.jumpAuth && sessions[s.id].jumpAuth) {
-          for (const k of ['password', 'privateKey', 'passphrase']) {
-            if (!s.jumpAuth[k] && sessions[s.id].jumpAuth[k]) s.jumpAuth[k] = sessions[s.id].jumpAuth[k];
-          }
-        }
-        // The dialog does not expose order, so an edit must retain the
-        // position established by drag-and-drop.
-        s.sortOrder = sessionSortOrder(sessions[s.id], nextSessionSortOrder());
-        sessions[s.id] = s;
-        log('info', `更新会话「${s.name}」`);
-      } else {
-        s.id = randomUUID();
-        s.sortOrder = nextSessionSortOrder();
-        sessions[s.id] = s;
-        log('info', `新建会话「${s.name}」(${s.type})`);
-      }
-      saveSessions(sessions);
-      send(ws, { type: 'sessions', list: sessionsList() });
-      if (m.requestId) send(ws, { type: 'session-saved', requestId: m.requestId, id: s.id });
-      break;
-    }
-    case 'reorder-sessions': {
-      const order = Array.isArray(m.order) ? m.order : [];
-      const ids = Object.keys(sessions);
-      const expected = new Set(ids);
-      if (order.length !== ids.length || new Set(order).size !== ids.length || order.some(id => !expected.has(id))) {
-        return send(ws, { type: 'error', msg: '会话排序数据无效，请刷新后重试' });
-      }
-      const groups = m.groups && typeof m.groups === 'object' && !Array.isArray(m.groups) ? m.groups : null;
-      const reordered = {};
-      for (let index = 0; index < order.length; index++) {
-        const id = order[index];
-        const session = { ...sessions[id], sortOrder: index };
-        if (groups && Object.prototype.hasOwnProperty.call(groups, id)) {
-          const group = typeof groups[id] === 'string' ? groups[id].trim().slice(0, 120) : '';
-          if (group) session.group = group;
-          else delete session.group;
-        }
-        reordered[id] = session;
-      }
-      sessions = reordered;
-      saveSessions(sessions);
-      log('info', `调整会话排序（${order.length} 个）`);
-      send(ws, { type: 'sessions', list: sessionsList() });
-      break;
-    }
-    case 'delete': {
-      const name = sessions[m.id]?.name || m.id;
-      delete sessions[m.id];
-      saveSessions(sessions);
-      log('info', `删除会话「${name}」`);
-      send(ws, { type: 'sessions', list: sessionsList() });
-      break;
-    }
-    case 'deleteMany': {
-      const ids = Array.isArray(m.ids) ? m.ids : [];
-      if (ids.length) {
-        for (const id of ids) delete sessions[id];
-        saveSessions(sessions);
-        log('info', `批量删除会话 ${ids.length} 个`);
-      }
-      send(ws, { type: 'sessions', list: sessionsList() });
-      break;
-    }
-    case 'log': {
-      if (typeof m.msg === 'string') log('info', `[ui] ${m.msg}`);
-      break;
-    }
-    case 'logs': {
-      send(ws, { type: 'logs', list: logs.slice(-300), file: LOG_FILE });
-      break;
-    }
-    case 'export-sessions': {
-      const data = createBackup(Object.values(sessions), m.passphrase);
-      const stamp = new Date().toISOString().slice(0, 10);
-      log('audit', `导出 ${Object.keys(sessions).length} 个会话（加密备份）`);
-      send(ws, { type: 'session-export', filename: `sshterm-backup-${stamp}.json`, data });
-      break;
-    }
-    case 'import-sessions-backup': {
-      const count = importSessionEntries(readBackup(m.data, m.passphrase), 'backup');
-      send(ws, { type: 'sessions', list: sessionsList() });
-      send(ws, { type: 'session-import', source: 'backup', count });
-      break;
-    }
-    case 'import-openssh-config': {
-      const count = importSessionEntries(parseOpenSSHConfig(m.data), 'openssh');
-      send(ws, { type: 'sessions', list: sessionsList() });
-      send(ws, { type: 'session-import', source: 'openssh', count });
-      break;
-    }
-    case 'serial-force-free': {
-      // 强制释放被占串口: 提权重启设备 (弹 UAC, 用户确认后 Disable/Enable)
-      const { path: comPort } = m;
-      if (!/^COM\d+$/i.test(String(comPort || ''))) {
-        return send(ws, { type: 'error', msg: '串口号无效' });
-      }
-      log('audit', `请求提权释放串口 ${String(comPort).toUpperCase()}`);
-      const ps1 = path.join(__dirname, 'free-serial.ps1');
-      // Use an encoded, fixed PowerShell script and a validated COM value.
-      // Never interpolate client-controlled text into a shell command line.
-      const escPs = ps1.replace(/'/g, "''");
-      const elevated = `Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','${escPs}','-ComPort','${String(comPort).toUpperCase()}')`;
-      const encoded = Buffer.from(elevated, 'utf16le').toString('base64');
-      const cp = require('child_process');
-      cp.execFile('powershell.exe', ['-NoProfile', '-EncodedCommand', encoded],
-        { timeout: 120000 }, (err, stdout, stderr) => {
-          const ok = !err;
-          send(ws, {
-            type: 'serial-free', path: comPort, ok,
-            msg: ok ? `设备 ${comPort} 已强制重启, 占用已释放` : `强制释放失败(需管理员确认 UAC): ${err ? err.message : ''}`,
-          });
-          if (!ok) console.log('[serial-force-free] 失败:', err && err.message, stderr);
-        });
-      break;
-    }
-    case 'scan-net': {
-      // 网络扫描: 输入 IP/网段 → 发现存活主机 + 开放端口
-      // 支持: 192.168.1.216 | 192.168.1.0/24 | 192.168.1.1-192.168.1.254 | 192.168.1.100-200
-      const { target } = m;
-      if (!target) return send(ws, { type: 'error', msg: '缺少扫描目标' });
-      const trimmed = String(target).trim();
-      if (!isScanAllowed(trimmed)) {
-        return send(ws, { type: 'error', msg: '扫描目标必须是私网/网段地址' });
-      }
-      const ips = expandTarget(trimmed);
-      if (ips.error) return send(ws, { type: 'error', msg: ips.error });
-      if (!ips.length) return send(ws, { type: 'error', msg: '目标格式无法解析: ' + target });
-      const probePorts = [22, 23, 21, 80, 443, 3389, 5555, 8080];
-      const net = require('net');
-      const hosts = [];
-      const ipOpen = new Map();
-      let idx = 0;
-      const test = (ip, port) => new Promise((resolve) => {
-        const s = net.connect({ host: ip, port, timeout: 450 });
-        s.on('connect', () => {
-          const list = ipOpen.get(ip) || (ipOpen.set(ip, []), ipOpen.get(ip));
-          list.push(port);
-          s.destroy();
-          resolve(true);
-        });
-        s.on('error', () => resolve(false));
-        s.on('timeout', () => { s.destroy(); resolve(false); });
-      });
-      const worker = async () => {
-        while (idx < ips.length * probePorts.length) {
-          const i = idx++;
-          const ip = ips[Math.floor(i / probePorts.length)];
-          const port = probePorts[i % probePorts.length];
-          await test(ip, port);
-        }
-      };
-      console.log(`[scan-net] 目标 ${target} → ${ips.length} 个 IP 探测中...`);
-      await Promise.all(Array.from({ length: 60 }, worker));   // 60 并发
-      for (const ip of ips) {
-        const open = (ipOpen.get(ip) || []).sort((a, b) => a - b);
-        if (open.length) hosts.push({ ip, open });
-      }
-      console.log(`[scan-net] 完成: 发现 ${hosts.length} 台设备`);
-      send(ws, { type: 'scan-net', target, hosts });
-      break;
-    }
-    case 'scan': {
-      // 端口扫描: TCP 探测 (并发 20, 单端口 800ms 超时)
-      const { host, ports } = m;
-      if (!host || !Array.isArray(ports) || !ports.length) {
-        return send(ws, { type: 'error', msg: '扫描参数错误' });
-      }
-      // 仅允许扫描私网/环回地址
-      const targetHost = String(host).trim();
-      const targetIp = parseIPv4(targetHost);
-      if (targetIp !== null && !isPrivateIPv4(targetHost)) {
-        return send(ws, { type: 'error', msg: '扫描目标必须是私网/环回地址' });
-      }
-      // 端口去重 + 范围校验 + 数量上限
-      const uniquePorts = [...new Set(ports.map(Number))].filter(p => Number.isInteger(p) && p >= 1 && p <= 65535);
-      if (uniquePorts.length > 1024) {
-        return send(ws, { type: 'error', msg: '端口数量超过上限(1024)' });
-      }
-      const net = require('net');
-      const open = [];
-      let idx = 0;
-      const test = (port) => new Promise((resolve) => {
-        const s = net.connect({ host: targetHost, port, timeout: 800 });
-        s.on('connect', () => { open.push(port); s.destroy(); resolve(); });
-        s.on('error', () => resolve());
-        s.on('timeout', () => { s.destroy(); resolve(); });
-      });
-      const workers = Array.from({ length: 20 }, async () => {
-        while (idx < uniquePorts.length) { const p = uniquePorts[idx++]; await test(p); }
-      });
-      await Promise.all(workers);
-      send(ws, { type: 'scan', host: targetHost, open: open.sort((a, b) => a - b) });
-      break;
-    }
-    case 'cleanup': {
-      // Legacy clients sent this on every page load. It is intentionally a
-      // no-op now because refresh reattaches the existing connections.
-      break;
-    }
-    case 'ssh-hosts': {
-      // 返回本机 SSH config 中的 Host 列表供前端解析
-      const hosts = sshConfig || {};
-      const list = Object.entries(hosts).map(([name, cfg]) => ({
-        name,
-        host: cfg.hostname || '',
-        port: cfg.port || 22,
-        user: cfg.user || 'root',
-        key: cfg.identity || '',
-        proxyJump: cfg.proxyJump || ''
-      }));
-      send(ws, { type: 'ssh-hosts', list });
-      break;
-    }
-    case 'connect': {
-      const existing = getConnection(ws, m.id);
-      if (existing && existing.state !== 'closed' && existing.state !== 'closing') {
-        attachExistingConnection(ws, existing, m.id);
-        break;
-      }
-      const source = Number.isInteger(m.sourceId) ? getConnection(ws, m.sourceId) : null;
-      // Split panes are independent shells/connections, but their browser-side
-      // config is intentionally redacted. Clone the full in-memory config from
-      // the already-authenticated main connection without exposing credentials
-      // back to the browser.
-      const sess = connectionConfigForRequest(source, m.session);
-      // Browser/workspace copies are deliberately redacted. Prefer the stable
-      // saved-session id, but recover legacy workspace tabs by a unique endpoint
-      // match so they also receive the Windows-encrypted credentials.
-      mergeStoredCredentials(sess, storedSessionForConfig(sess));
-      await doConnect(ws, sess, m.id);
-      break;
-    }
-    case 'host-key-decision': {
-      const conn = getConnection(ws, m.id);
-      if (!conn || conn.config.type !== 'ssh' || !conn.resolveHostKey) {
-        return send(ws, { type: 'error', id: m.id, msg: '没有等待确认的 SSH 主机密钥' });
-      }
-      if (!conn.resolveHostKey(m.accept === true)) {
-        return send(ws, { type: 'error', id: m.id, msg: '主机密钥确认已过期' });
-      }
-      log('audit', `SSH 主机密钥 ${m.accept === true ? '已信任' : '已拒绝'} (会话 ${m.id})`);
-      break;
-    }
-    case 'interactive-auth-response': {
-      const conn = getConnection(ws, m.id);
-      if (!conn || conn.config.type !== 'ssh' || !conn.submitInteractiveAuth) {
-        return send(ws, { type: 'error', id: m.id, msg: '没有等待中的 MFA 挑战' });
-      }
-      if (m.cancel === true) {
-        if (!conn.cancelInteractiveAuth()) {
-          return send(ws, { type: 'error', id: m.id, msg: 'MFA 挑战已过期' });
-        }
-        return send(ws, { type: 'interactive-auth-cancelled', id: m.id });
-      }
-      if (!conn.submitInteractiveAuth(m.responses)) {
-        return send(ws, { type: 'error', id: m.id, msg: 'MFA 挑战已过期' });
-      }
-      break;
-    }
-    case 'serialports': {
-      const { SerialPort } = require('serialport');
-      const list = await SerialPort.list();
-      send(ws, { type: 'serialports', list: list.map(p => ({ path: p.path, manufacturer: p.manufacturer })) });
-      break;
-    }
-    case 'disconnect': {
-      const conn = getConnection(ws, m.id);
-      if (conn) { conn.close(); }
-      break;
-    }
-    case 'resize': {
-      const conn = getConnection(ws, m.id);
-      if (conn && conn.resize) conn.resize(m.cols, m.rows);
-      break;
-    }
-    case 'serial-control': {
-      const conn = getConnection(ws, m.id);
-      if (!conn || conn.config.type !== 'serial') {
-        return send(ws, { type: 'error', id: m.id, msg: '不是串口连接' });
-      }
-      try {
-        if (m.action === 'signals') {
-          await conn.setSignals({ dtr: !!m.dtr, rts: !!m.rts });
-        } else if (m.action === 'break') {
-          await conn.sendBreak(Math.min(Math.max(Number(m.duration) || 250, 20), 2000));
-        } else {
-          throw new Error('未知串口控制操作');
-        }
-        send(ws, { type: 'serial-control', id: m.id, ok: true, action: m.action });
-      } catch (e) {
-        send(ws, { type: 'error', id: m.id, msg: `串口控制失败: ${e.message}` });
-      }
-      break;
-    }
-    case 'sftp': {
-      const conn = getConnection(ws, m.id);
-      if (!conn || conn.config.type !== 'ssh') {
-        return send(ws, { type: 'error', id: m.id, msg: 'SFTP 需要活跃的 SSH 连接' });
-      }
-      if (m.action === 'list') {
-        try {
-          const r = await conn.sftpList(m.path || '.');
-          send(ws, { type: 'sftp', id: m.id, action: 'list', path: r.path, entries: r.entries });
-        } catch (e) {
-          send(ws, { type: 'error', id: m.id, msg: `SFTP: ${e.message}` });
-        }
-      } else if (m.action === 'cwd') {
-        // 获取 shell 当前目录 (定位文件面板; fresh 走交互式 shell pwd)
-        const cwd = await conn.getShellCwd({ fresh: !!m.fresh });
-        send(ws, { type: 'sftp', id: m.id, action: 'cwd', path: cwd });
-      } else if (m.action === 'scan') {
-        try {
-          const listed = await conn.sftpList(m.path || '.');
-          const collected = await conn.sftpCollectFiles(listed.path);
-          const symlinks = (collected.files || []).filter((f) => f.isSymlink).length;
-          const skippedDirs = Array.isArray(collected.skipped) ? collected.skipped.length : 0;
-          send(ws, {
-            type: 'sftp', id: m.id, action: 'scan', path: listed.path,
-            files: (collected.files || []).filter((f) => !f.isSymlink).map((f) => ({
-              path: f.path, name: f.name, size: f.size,
-            })),
-            skipped: symlinks + skippedDirs,
-          });
-        } catch (e) {
-          send(ws, { type: 'error', id: m.id, msg: `SFTP: ${e.message}` });
-        }
-      }
-      break;
-    }
-    case 'tunnel': {
-      const conn = getConnection(ws, m.id);
-      if (!conn || conn.config.type !== 'ssh') {
-        return send(ws, { type: 'error', id: m.id, msg: '隧道需要活跃的 SSH 连接' });
-      }
-      try {
-        if (m.action === 'list') {
-          const list = conn.listTunnels ? conn.listTunnels() : [];
-          send(ws, { type: 'tunnel', id: m.id, action: 'list', tunnels: list });
-        } else if (m.action === 'add') {
-          const item = await conn.addTunnel({
-            type: m.tunnelType,
-            localPort: m.localPort,
-            remoteHost: m.remoteHost,
-            remotePort: m.remotePort,
-          });
-          if (conn.config.id && sessions[conn.config.id]) {
-            const saved = sessions[conn.config.id];
-            saved.tunnels = [...(saved.tunnels || []), { type: item.type, localPort: item.localPort, remoteHost: item.remoteHost, remotePort: item.remotePort }];
-            saveSessions(sessions);
-          }
-          send(ws, { type: 'tunnel', id: m.id, action: 'add', tunnel: item, tunnels: conn.listTunnels() });
-          log('audit', `创建 ${item.type} 隧道: ${item.localPort} → ${item.remoteHost}:${item.remotePort}`);
-        } else if (m.action === 'remove') {
-          const ok = conn.removeTunnel ? conn.removeTunnel(m.tunnelId) : false;
-          send(ws, { type: 'tunnel', id: m.id, action: 'remove', ok, tunnelId: m.tunnelId, tunnels: conn.listTunnels() });
-          if (ok) log('audit', `删除 SSH 隧道 ${m.tunnelId}`);
-          if (ok && conn.config.id && sessions[conn.config.id]) { sessions[conn.config.id].tunnels = conn.listTunnels().map(t => ({ type: t.type, localPort: t.localPort, remoteHost: t.remoteHost, remotePort: t.remotePort })); saveSessions(sessions); }
-        }
-      } catch (e) {
-        send(ws, { type: 'error', id: m.id, msg: `隧道操作失败: ${e.message}` });
-      }
-      break;
-    }
   }
 }
 
@@ -1804,86 +414,85 @@ async function doConnect(ws, cfg, tabId) {
   }
 }
 
-// ---------- 启动 ----------
-// 网段解析: correct IPv4 integer expansion with a safe workload limit.
-const MAX_SCAN_HOSTS = 4096;
+const handle = createWsMessageHandler({
+  getSessions,
+  setSessions,
+  saveSessions: (data) => saveSessions(data),
+  sessionsList,
+  nextSessionSortOrder,
+  sessionSortOrder,
+  importSessionEntries,
+  storedSessionForConfig,
+  mergeStoredCredentials,
+  get sshConfig() { return sshConfig; },
+  doConnect,
+  attachExistingConnection,
+  sendConnectionData,
+  getConnection,
+  connections,
+  connectionKey,
+  send,
+  log,
+  logs,
+  getLogFile,
+});
 
-// Scan targets are restricted to private/loopback/link-local networks and valid
-// hostnames.  A token holder must not be able to port-scan the public internet.
-function isPrivateIPv6(ip) {
-  const lower = String(ip).toLowerCase();
-  if (lower === '::1') return true;
-  if (lower.startsWith('fc') || lower.startsWith('fd')) return true;
-  if (lower.startsWith('fe80')) return true;
-  return false;
-}
-
-function isPrivateIPv4(ip) {
-  const n = parseIPv4(ip);
-  if (n === null) return false;
-  const a = n >>> 24, b = (n >>> 16) & 255;
-  if (a === 127) return true;            // loopback
-  if (a === 10) return true;             // 10/8
-  if (a === 172 && b >= 16 && b <= 31) return true;  // 172.16/12
-  if (a === 192 && b === 168) return true;           // 192.168/16
-  if (a === 169 && b === 254) return true;           // link-local
-  if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT 100.64/10
-  return false;
-}
-
-function isScanAllowed(target) {
-  // Single IP
-  const single = parseIPv4(target);
-  if (single !== null) return isPrivateIPv4(target);
-  // CIDR or range: expand and verify every address
-  const expanded = expandTarget(target);
-  if (expanded.error) return false;
-  if (!expanded.length) return false;
-  return expanded.every(isPrivateIPv4);
-}
-
-function parseIPv4(s) {
-  const p = String(s).split('.').map(Number);
-  if (p.length !== 4 || p.some(n => !Number.isInteger(n) || n < 0 || n > 255)) return null;
-  return (((p[0] * 256 + p[1]) * 256 + p[2]) * 256 + p[3]) >>> 0;
-}
-function formatIPv4(n) {
-  return [n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join('.');
-}
-function expandTarget(t) {
-  t = t.trim();
-  const single = parseIPv4(t);
-  if (single !== null) return [formatIPv4(single)];
-
-  const cidr = t.match(/^([^/]+)\/(\d{1,2})$/);
-  if (cidr) {
-    const ip = parseIPv4(cidr[1]);
-    const bits = Number(cidr[2]);
-    if (ip === null || bits < 0 || bits > 32) return [];
-    const size = 2 ** (32 - bits);
-    if (size > MAX_SCAN_HOSTS) return { error: `网段过大: ${size} 台, 请缩小到不超过 ${MAX_SCAN_HOSTS} 台` };
-    const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
-    const network = ip & mask;
-    return Array.from({ length: size }, (_, i) => formatIPv4((network + i) >>> 0));
+wss.on('connection', (ws, req) => {
+  ws.windowId = requestedWindowId(req) || randomBytes(24).toString('base64url');
+  const previous = windows.get(ws.windowId);
+  if (previous && previous !== ws && previous.readyState < 2) {
+    previous.replacedByRefresh = true;
+    previous.close(4001, '页面已刷新');
   }
+  cancelWindowCleanup(ws.windowId);
+  windows.set(ws.windowId, ws);
+  attachWsBackpressure(ws, () => resumePausedConnections(ws));
+  send(ws, { type: 'window-id', windowId: ws.windowId });
+  wsCount++;
+  clearTimeout(idleExitTimer);
+  const pingTimer = setInterval(() => {
+    if (ws.readyState === 1) {
+      try { ws.ping(); } catch {}
+    }
+  }, 25000);
+  pingTimer.unref();
+  ws.on('close', () => {
+    clearInterval(pingTimer);
+    wsCount--;
+    scheduleIdleExit();
+    if (windows.get(ws.windowId) === ws) {
+      windows.delete(ws.windowId);
+      for (const [key, conn] of connections) {
+        if (key.startsWith(`${ws.windowId}:`) && conn.ownerWs === ws) conn.ownerWs = null;
+      }
+      scheduleWindowCleanup(ws.windowId);
+    }
+  });
+  ws.on('error', (err) => log('error', `WebSocket 错误: ${err && err.message}`));
+  ws.on('message', (msg, isBinary) => {
+    if (isBinary) {
+      if (msg.length < 2 || msg.length > 8 * 1024 * 1024) return;
+      const id = msg.readUInt16LE(0);
+      const conn = getConnection(ws, id);
+      if (conn && conn.state === 'connected') conn.write(msg.subarray(2));
+      return;
+    }
+    let m;
+    try { m = JSON.parse(msg.toString()); } catch { return; }
+    if (!m || typeof m !== 'object' || typeof m.type !== 'string') return;
+    handle(ws, m).catch((e) => send(ws, {
+      type: 'error',
+      id: Number.isInteger(m.id) ? m.id : undefined,
+      action: m.type,
+      msg: String(e.message || e),
+      occupied: !!e.sshtermOccupied,
+    }));
+  });
+});
 
-  const range = t.match(/^([^\-]+)\s*-\s*(.+)$/);
-  if (range) {
-    const start = parseIPv4(range[1]);
-    const end = parseIPv4(range[2]) ?? (() => {
-      const prefix = range[1].trim().split('.').slice(0, 3).join('.');
-      const last = Number(range[2].trim());
-      return parseIPv4(`${prefix}.${last}`);
-    })();
-    if (start === null || end === null || end < start) return [];
-    const size = end - start + 1;
-    if (size > MAX_SCAN_HOSTS) return { error: `扫描范围过大: ${size} 台, 请缩小到不超过 ${MAX_SCAN_HOSTS} 台` };
-    return Array.from({ length: size }, (_, i) => formatIPv4((start + i) >>> 0));
-  }
-  return [];
-  }
+attachVncBridge(vncWss, { log });
 
-  server.listen(PORT, '127.0.0.1', () => {
+server.listen(PORT, '127.0.0.1', () => {
   try {
     fs.mkdirSync(CONN_DIR, { recursive: true });
     fs.writeFileSync(TOKEN_FILE, CLIENT_TOKEN, { mode: 0o600 });
@@ -1895,9 +504,9 @@ function expandTarget(t) {
   console.log('└──────────────────────────────────────────────┘');
   console.log(`  地址: http://127.0.0.1:${PORT}`);
   console.log(`  会话: ${CONN_FILE}`);
-  console.log(`  日志: ${LOG_FILE}`);
-  log('info', `sshterm 服务启动 (端口 ${PORT})`);   // 每次启动新建日志文件并写首行
-  scheduleIdleExit();   // auto-exit 模式: 浏览器未连上则 10 秒后退出
+  console.log(`  日志: ${getLogFile()}`);
+  log('info', `sshterm 服务启动 (端口 ${PORT})`);
+  scheduleIdleExit();
   const open = !process.argv.includes('--no-open');
   if (open) {
     require('child_process').exec(`start http://127.0.0.1:${PORT}`);
@@ -1911,7 +520,6 @@ server.on('error', (e) => {
   throw e;
 });
 process.on('SIGINT', () => { for (const c of connections.values()) c.close(); process.exit(0); });
-// 崩溃保护: 单个请求异常不杀死整个服务端
 process.on('uncaughtException', (e) => {
   console.error('[uncaughtException]', e && (e.stack || e.message));
   log('error', `服务端异常: ${e && (e.stack || e.message)}`);

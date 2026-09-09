@@ -5,7 +5,23 @@ const fs = require('fs');
 const path = require('path');
 
 const root = path.join(__dirname, '..');
-const server = fs.readFileSync(path.join(root, 'server', 'index.js'), 'utf8');
+
+function readServerSources() {
+  const dir = path.join(root, 'server');
+  const files = fs.readdirSync(dir)
+    .filter((name) => name.endsWith('.js') && !name.endsWith('.bak') && name !== 'free-serial.ps1')
+    .sort();
+  const nested = [];
+  const connDir = path.join(dir, 'connections');
+  if (fs.existsSync(connDir)) {
+    for (const name of fs.readdirSync(connDir).filter((n) => n.endsWith('.js')).sort()) {
+      nested.push(path.join('connections', name));
+    }
+  }
+  return [...files, ...nested].map((rel) => fs.readFileSync(path.join(dir, rel), 'utf8')).join('\n');
+}
+
+const server = readServerSources();
 const app = fs.readFileSync(path.join(root, 'web', 'app.js'), 'utf8');
 const html = fs.readFileSync(path.join(root, 'web', 'index.html'), 'utf8');
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));

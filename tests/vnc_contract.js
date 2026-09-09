@@ -9,7 +9,23 @@ const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 
 const html = read('web/index.html');
 const app = read('web/app.js');
-const server = read('server/index.js');
+
+function readServerSources() {
+  const dir = path.join(root, 'server');
+  const files = fs.readdirSync(dir)
+    .filter((name) => name.endsWith('.js') && !name.endsWith('.bak') && name !== 'free-serial.ps1')
+    .sort();
+  const nested = [];
+  const connDir = path.join(dir, 'connections');
+  if (fs.existsSync(connDir)) {
+    for (const name of fs.readdirSync(connDir).filter((n) => n.endsWith('.js')).sort()) {
+      nested.push(path.join('connections', name));
+    }
+  }
+  return [...files, ...nested].map((rel) => fs.readFileSync(path.join(dir, rel), 'utf8')).join('\n');
+}
+
+const server = readServerSources();
 const ssh = read('server/connections/ssh.js');
 
 assert.match(html, /<option value="vnc">VNC<\/option>/, 'VNC must be offered by the +New connection type selector');
