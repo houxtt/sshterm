@@ -42,8 +42,6 @@ const SERVER_STARTED_AT = new Date().toISOString();
 const CONN_DIR = path.join(os.homedir(), '.sshterm');
 const CONN_FILE = path.join(CONN_DIR, 'sessions.json');
 const CONN_BACKUP_FILE = `${CONN_FILE}.bak`;
-const MAX_SFTP_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
-
 const connections = new Map();
 const windows = new Map();
 const windowCleanupTimers = new Map();
@@ -188,7 +186,6 @@ const server = http.createServer((req, res) => {
     getHttpConnection,
     activeUploadKeys,
     directoryDownloads,
-    MAX_SFTP_UPLOAD_BYTES,
     MAX_CONCURRENT_UPLOADS,
     uploadState,
   })) return;

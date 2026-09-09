@@ -1670,6 +1670,7 @@ var Sshterm = window.Sshterm;
 let _progLast = 0;
 const transferTasks = [];
 let uploadQueuePaused = false;
+const UPLOAD_CHUNK_BYTES = 64 * 1024 * 1024;
 async function waitForUploadQueue() {
   while (uploadQueuePaused) await new Promise(resolve => setTimeout(resolve, 200));
 }
@@ -1755,10 +1756,13 @@ function doneProgress(text) {
   }, 2500);
 }
 // XHR 上传 (带进度) → resolve(status)
-function xhrUpload(url, file, onProg) {
+function xhrUpload(url, file, onProg, headers) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('PUT', url);
+    if (headers) {
+      for (const [k, v] of Object.entries(headers)) xhr.setRequestHeader(k, String(v));
+    }
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && onProg) onProg(e.loaded, e.total);
     };
@@ -1954,11 +1958,30 @@ async function uploadFileSmart(tabId, dirPath, name, file, onProg) {
     offset = 0;
   }
 
-  const blob = file.slice(offset);
-  const result = await xhrUpload(`${base}&offset=${offset}`, blob, (loaded, t) => {
-    onProg((offset + loaded) / file.size);
-  });
-  result.resumed = offset > 0;
+  // Chunk large uploads: Chrome rejects XHR bodies >= 2GiB
+  // (Message size exceeds maximal allowed size).
+  const headers = { 'X-Upload-Total-Size': String(file.size) };
+  const startOffset = offset;
+  let result = { status: 200, payload: null };
+  if (file.size === 0) {
+    result = await xhrUpload(`${base}&offset=0`, file.slice(0, 0), () => {}, headers);
+  } else {
+    while (offset < file.size) {
+      const end = Math.min(offset + UPLOAD_CHUNK_BYTES, file.size);
+      const chunk = file.slice(offset, end);
+      const chunkOffset = offset;
+      result = await xhrUpload(`${base}&offset=${chunkOffset}`, chunk, (loaded) => {
+        onProg((chunkOffset + loaded) / file.size);
+      }, headers);
+      if (result.status !== 200) {
+        result.resumed = startOffset > 0;
+        return result;
+      }
+      offset = end;
+    }
+  }
+  if (file.size > 0) onProg(1);
+  result.resumed = startOffset > 0;
   return result;
 }
 // Non-Chromium fallback: hand the response to the browser download manager,

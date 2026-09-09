@@ -23,7 +23,6 @@ function handleSftpHttp(req, res, ctx) {
   const getHttpConnection = ctx.getHttpConnection;
   const activeUploadKeys = ctx.activeUploadKeys;
   const directoryDownloads = ctx.directoryDownloads;
-  const MAX_SFTP_UPLOAD_BYTES = ctx.MAX_SFTP_UPLOAD_BYTES;
   const MAX_CONCURRENT_UPLOADS = ctx.MAX_CONCURRENT_UPLOADS;
   // uploadState.n is a mutable box: { n: number }
   const uploadState = ctx.uploadState;
@@ -79,9 +78,15 @@ function handleSftpHttp(req, res, ctx) {
     const offset = rawOffset === null ? 0 : Number(rawOffset);
     const segments = String(name).replace(/\\/g, '/').split('/');
     const contentLength = Number(req.headers['content-length'] || 0);
+    const totalSizeHeader = req.headers['x-upload-total-size'];
+    const totalSize = totalSizeHeader == null || totalSizeHeader === ''
+      ? null
+      : Number(totalSizeHeader);
     if (!conn || !conn.getSftpInst() || !name || !Number.isSafeInteger(offset) || offset < 0 ||
         segments.some(p => !p || p === '.' || p === '..' || p.includes('\0')) ||
-        (contentLength && (!Number.isSafeInteger(contentLength) || offset + contentLength > MAX_SFTP_UPLOAD_BYTES))) {
+        (contentLength && (!Number.isSafeInteger(contentLength) || contentLength < 0)) ||
+        (totalSize != null && (!Number.isSafeInteger(totalSize) || totalSize < 0)) ||
+        (contentLength && !Number.isSafeInteger(offset + contentLength))) {
       res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
       return res.end('上传参数错误(连接或文件名无效)');
     }
@@ -130,11 +135,21 @@ function handleSftpHttp(req, res, ctx) {
       // createWriteStream 每次只保持一个约 32 KiB 的 WRITE 在途，高延迟
       // 网络会被 RTT 严重限速。这里使用有界并发随机写，同时保持偏移
       // 有序且仍然只允许一个请求写同一远端文件。
-      const hash = offset === 0 ? createHash('sha256') : null;
+      // Only hash when this request body is the entire file — never treat a
+      // partial chunk hash as the full-file digest.
+      let shouldHash = false;
+      if (totalSize != null) {
+        shouldHash = offset === 0 && contentLength > 0 && offset + contentLength === totalSize;
+        if (totalSize === 0 && offset === 0 && contentLength === 0) shouldHash = true;
+      } else if (offset === 0) {
+        shouldHash = true; // legacy single-shot: hash this body
+      }
+      const hash = shouldHash ? createHash('sha256') : null;
       const transfer = receiveParallelUpload(req, sftp, remotePath, {
         start: offset,
         flags: offset > 0 ? 'r+' : 'w',
-        maxBytes: MAX_SFTP_UPLOAD_BYTES - offset,
+        // Cap only this request body (chunk size), not a product file-size limit.
+        maxBytes: contentLength > 0 ? contentLength : Infinity,
         onData: hash ? chunk => hash.update(chunk) : undefined,
       });
       req.setTimeout(30 * 60 * 1000, () => {
