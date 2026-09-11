@@ -82,8 +82,8 @@ function createWsMessageHandler(ctx) {
     }
     case 'save': {
       const s = sanitizeSession(m.session);
-      if (!s) return send(ws, { type: 'error', msg: '会话数据无效' });
-      if (!s.name) return send(ws, { type: 'error', msg: '会话名不能为空' });
+      if (!s) return send(ws, { type: 'error', action: 'save', msg: '会话数据无效' });
+      if (!s.name) return send(ws, { type: 'error', action: 'save', msg: '会话名不能为空' });
       if (s.id && sessions[s.id]) {
         // 编辑保存: 前端表单密码框留空 = 不修改, 保留存储中的敏感字段
         for (const k of ['password', 'privateKey', 'passphrase', 'loginPass']) {
@@ -118,7 +118,7 @@ function createWsMessageHandler(ctx) {
       const ids = Object.keys(sessions);
       const expected = new Set(ids);
       if (order.length !== ids.length || new Set(order).size !== ids.length || order.some(id => !expected.has(id))) {
-        return send(ws, { type: 'error', msg: '会话排序数据无效，请刷新后重试' });
+        return send(ws, { type: 'error', action: 'reorder-sessions', msg: '会话排序数据无效，请刷新后重试' });
       }
       const groups = m.groups && typeof m.groups === 'object' && !Array.isArray(m.groups) ? m.groups : null;
       const reordered = {};
@@ -187,7 +187,7 @@ function createWsMessageHandler(ctx) {
       // 强制释放被占串口: 提权重启设备 (弹 UAC, 用户确认后 Disable/Enable)
       const { path: comPort } = m;
       if (!/^COM\d+$/i.test(String(comPort || ''))) {
-        return send(ws, { type: 'error', msg: '串口号无效' });
+        return send(ws, { type: 'error', action: 'serial-force-free', msg: '串口号无效' });
       }
       log('audit', `请求提权释放串口 ${String(comPort).toUpperCase()}`);
       const ps1 = path.join(__dirname, 'free-serial.ps1');
@@ -212,14 +212,14 @@ function createWsMessageHandler(ctx) {
       // 网络扫描: 输入 IP/网段 → 发现存活主机 + 开放端口
       // 支持: 192.168.1.216 | 192.168.1.0/24 | 192.168.1.1-192.168.1.254 | 192.168.1.100-200
       const { target } = m;
-      if (!target) return send(ws, { type: 'error', msg: '缺少扫描目标' });
+      if (!target) return send(ws, { type: 'error', action: 'scan-net', msg: '缺少扫描目标' });
       const trimmed = String(target).trim();
       if (!isScanAllowed(trimmed)) {
-        return send(ws, { type: 'error', msg: '扫描目标必须是私网/网段地址' });
+        return send(ws, { type: 'error', action: 'scan-net', msg: '扫描目标必须是私网/网段地址' });
       }
       const ips = expandTarget(trimmed);
-      if (ips.error) return send(ws, { type: 'error', msg: ips.error });
-      if (!ips.length) return send(ws, { type: 'error', msg: '目标格式无法解析: ' + target });
+      if (ips.error) return send(ws, { type: 'error', action: 'scan-net', msg: ips.error });
+      if (!ips.length) return send(ws, { type: 'error', action: 'scan-net', msg: '目标格式无法解析: ' + target });
       const probePorts = [22, 23, 21, 80, 443, 3389, 5555, 8080];
       const net = require('net');
       const hosts = [];
@@ -258,18 +258,18 @@ function createWsMessageHandler(ctx) {
       // 端口扫描: TCP 探测 (并发 20, 单端口 800ms 超时)
       const { host, ports } = m;
       if (!host || !Array.isArray(ports) || !ports.length) {
-        return send(ws, { type: 'error', msg: '扫描参数错误' });
+        return send(ws, { type: 'error', action: 'scan', msg: '扫描参数错误' });
       }
       // 仅允许扫描私网/环回地址
       const targetHost = String(host).trim();
       const targetIp = parseIPv4(targetHost);
       if (targetIp !== null && !isPrivateIPv4(targetHost)) {
-        return send(ws, { type: 'error', msg: '扫描目标必须是私网/环回地址' });
+        return send(ws, { type: 'error', action: 'scan', msg: '扫描目标必须是私网/环回地址' });
       }
       // 端口去重 + 范围校验 + 数量上限
       const uniquePorts = [...new Set(ports.map(Number))].filter(p => Number.isInteger(p) && p >= 1 && p <= 65535);
       if (uniquePorts.length > 1024) {
-        return send(ws, { type: 'error', msg: '端口数量超过上限(1024)' });
+        return send(ws, { type: 'error', action: 'scan', msg: '端口数量超过上限(1024)' });
       }
       const net = require('net');
       const open = [];
@@ -328,10 +328,10 @@ function createWsMessageHandler(ctx) {
     case 'host-key-decision': {
       const conn = getConnection(ws, m.id);
       if (!conn || conn.config.type !== 'ssh' || !conn.resolveHostKey) {
-        return send(ws, { type: 'error', id: m.id, msg: '没有等待确认的 SSH 主机密钥' });
+        return send(ws, { type: 'error', id: m.id, action: 'host-key-decision', msg: '没有等待确认的 SSH 主机密钥' });
       }
       if (!conn.resolveHostKey(m.accept === true)) {
-        return send(ws, { type: 'error', id: m.id, msg: '主机密钥确认已过期' });
+        return send(ws, { type: 'error', id: m.id, action: 'host-key-decision', msg: '主机密钥确认已过期' });
       }
       log('audit', `SSH 主机密钥 ${m.accept === true ? '已信任' : '已拒绝'} (会话 ${m.id})`);
       break;
@@ -339,16 +339,16 @@ function createWsMessageHandler(ctx) {
     case 'interactive-auth-response': {
       const conn = getConnection(ws, m.id);
       if (!conn || conn.config.type !== 'ssh' || !conn.submitInteractiveAuth) {
-        return send(ws, { type: 'error', id: m.id, msg: '没有等待中的 MFA 挑战' });
+        return send(ws, { type: 'error', id: m.id, action: 'interactive-auth-response', msg: '没有等待中的 MFA 挑战' });
       }
       if (m.cancel === true) {
         if (!conn.cancelInteractiveAuth()) {
-          return send(ws, { type: 'error', id: m.id, msg: 'MFA 挑战已过期' });
+          return send(ws, { type: 'error', id: m.id, action: 'interactive-auth-response', msg: 'MFA 挑战已过期' });
         }
         return send(ws, { type: 'interactive-auth-cancelled', id: m.id });
       }
       if (!conn.submitInteractiveAuth(m.responses)) {
-        return send(ws, { type: 'error', id: m.id, msg: 'MFA 挑战已过期' });
+        return send(ws, { type: 'error', id: m.id, action: 'interactive-auth-response', msg: 'MFA 挑战已过期' });
       }
       break;
     }
@@ -371,7 +371,7 @@ function createWsMessageHandler(ctx) {
     case 'serial-control': {
       const conn = getConnection(ws, m.id);
       if (!conn || conn.config.type !== 'serial') {
-        return send(ws, { type: 'error', id: m.id, msg: '不是串口连接' });
+        return send(ws, { type: 'error', id: m.id, action: 'serial-control', msg: '不是串口连接' });
       }
       try {
         if (m.action === 'signals') {
@@ -383,21 +383,21 @@ function createWsMessageHandler(ctx) {
         }
         send(ws, { type: 'serial-control', id: m.id, ok: true, action: m.action });
       } catch (e) {
-        send(ws, { type: 'error', id: m.id, msg: `串口控制失败: ${e.message}` });
+        send(ws, { type: 'error', id: m.id, action: 'serial-control', msg: `串口控制失败: ${e.message}` });
       }
       break;
     }
     case 'sftp': {
       const conn = getConnection(ws, m.id);
       if (!conn || conn.config.type !== 'ssh') {
-        return send(ws, { type: 'error', id: m.id, msg: 'SFTP 需要活跃的 SSH 连接' });
+        return send(ws, { type: 'error', id: m.id, action: 'sftp', msg: 'SFTP 需要活跃的 SSH 连接' });
       }
       if (m.action === 'list') {
         try {
           const r = await conn.sftpList(m.path || '.');
           send(ws, { type: 'sftp', id: m.id, action: 'list', path: r.path, entries: r.entries });
         } catch (e) {
-          send(ws, { type: 'error', id: m.id, msg: `SFTP: ${e.message}` });
+          send(ws, { type: 'error', id: m.id, action: 'sftp', msg: `SFTP: ${e.message}` });
         }
       } else if (m.action === 'cwd') {
         // 获取 shell 当前目录 (定位文件面板; fresh 走交互式 shell pwd)
@@ -417,7 +417,7 @@ function createWsMessageHandler(ctx) {
             skipped: symlinks + skippedDirs,
           });
         } catch (e) {
-          send(ws, { type: 'error', id: m.id, msg: `SFTP: ${e.message}` });
+          send(ws, { type: 'error', id: m.id, action: 'sftp', msg: `SFTP: ${e.message}` });
         }
       }
       break;
@@ -425,7 +425,7 @@ function createWsMessageHandler(ctx) {
     case 'tunnel': {
       const conn = getConnection(ws, m.id);
       if (!conn || conn.config.type !== 'ssh') {
-        return send(ws, { type: 'error', id: m.id, msg: '隧道需要活跃的 SSH 连接' });
+        return send(ws, { type: 'error', id: m.id, action: 'tunnel', msg: '隧道需要活跃的 SSH 连接' });
       }
       try {
         if (m.action === 'list') {
@@ -452,7 +452,7 @@ function createWsMessageHandler(ctx) {
           if (ok && conn.config.id && sessions[conn.config.id]) { sessions[conn.config.id].tunnels = conn.listTunnels().map(t => ({ type: t.type, localPort: t.localPort, remoteHost: t.remoteHost, remotePort: t.remotePort })); saveSessions(sessions); }
         }
       } catch (e) {
-        send(ws, { type: 'error', id: m.id, msg: `隧道操作失败: ${e.message}` });
+        send(ws, { type: 'error', id: m.id, action: 'tunnel', msg: `隧道操作失败: ${e.message}` });
       }
       break;
     }

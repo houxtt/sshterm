@@ -157,7 +157,7 @@ const DOM_ATTR_EN = {
   '新建连接 (Ctrl+N)': 'New Connection (Ctrl+N)', '保存当前会话配置': 'Save Current Session',
   'SSH 文件浏览/下载 (SFTP)': 'Browse/Download Files (SFTP)', 'SSH 隧道管理': 'SSH Tunnel Management',
   '断开并关闭全部会话标签': 'Disconnect and Close All Tabs', '更多工具': 'More Tools',
-  '分屏(当前标签左右分屏)': 'Split Current Tab', '保存或恢复当前标签与分屏布局': 'Save or Restore Tabs and Split Layout',
+  '分屏(每次增加一格，最多 2×2 / 4 格；单格用 ✕ 关闭)': 'Split (add pane up to 2×2 / 4; close with ✕)', '保存或恢复当前标签与分屏布局': 'Save or Restore Tabs and Split Layout',
   '快捷命令(保存/执行/脚本)': 'Quick Commands', 'IP[:端口] 回车快速连接': 'IP[:port] — Enter to connect',
   '服务器连接状态': 'Server Connection Status', '批量管理': 'Batch Management', '解析 SSH config': 'Parse SSH Config',
   '拖动调整已保存会话宽度': 'Drag to Resize Saved Sessions',

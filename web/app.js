@@ -418,7 +418,7 @@ const DOM_ATTR_EN = {
   '新建连接 (Ctrl+N)': 'New Connection (Ctrl+N)', '保存当前会话配置': 'Save Current Session',
   'SSH 文件浏览/下载 (SFTP)': 'Browse/Download Files (SFTP)', 'SSH 隧道管理': 'SSH Tunnel Management',
   '断开并关闭全部会话标签': 'Disconnect and Close All Tabs', '更多工具': 'More Tools',
-  '分屏(当前标签左右分屏)': 'Split Current Tab', '保存或恢复当前标签与分屏布局': 'Save or Restore Tabs and Split Layout',
+  '分屏(每次增加一格，最多 2×2 / 4 格；单格用 ✕ 关闭)': 'Split (add pane up to 2×2 / 4; close with ✕)', '保存或恢复当前标签与分屏布局': 'Save or Restore Tabs and Split Layout',
   '快捷命令(保存/执行/脚本)': 'Quick Commands', 'IP[:端口] 回车快速连接': 'IP[:port] — Enter to connect',
   '服务器连接状态': 'Server Connection Status', '批量管理': 'Batch Management', '解析 SSH config': 'Parse SSH Config',
   '拖动调整已保存会话宽度': 'Drag to Resize Saved Sessions',
@@ -2762,12 +2762,12 @@ function applySplitLayout(tab, dir, ratio) {
 function toggleSplit(tab) {
   if (!tab) return;
   const n = countPanes(tab);
-  if (n === 1 && tab.extraPanes.length === 0) {
-    addPane(tab, 'row', 0.5);
-  } else {
-    // close all panes one by one
-    while (tab.extraPanes.length) removePane(tab, tab.extraPanes[0]);
+  if (n >= SPLIT_MAX) {
+    setStatus(`已达分屏上限（${SPLIT_MAX} / 2×2）；请用各分屏 ✕ 关闭后再添加`);
+    return;
   }
+  // Each click adds one pane up to SPLIT_MAX; individual ✕ closes. Keep 2-pane drag working.
+  addPane(tab, splitDirection(tab) || 'row', splitRatio(tab));
 }
 
 // replace old split logic with PaneManager
@@ -2804,7 +2804,12 @@ function installSplitDragger(tab) {
     e.preventDefault();
   };
   const move = (e) => {
-    if (!dragging || tab.extraPanes.length !== 1) return;
+    if (!dragging) return;
+    if (tab.extraPanes.length !== 1) {
+      if (tab.extraPanes.length > 1) setStatus('多分屏模式下暂不支持拖拽分隔条（仅双格可调）');
+      dragging = false;
+      return;
+    }
     const p = container.getBoundingClientRect();
     const pos = dragDir === 'col' ? e.clientY - p.top : e.clientX - p.left;
     const size = dragDir === 'col' ? p.height : p.width;
@@ -2846,7 +2851,7 @@ function installSplitDragger(tab) {
 // AUTO note: web/app.js is the concat artifact used by tests and (optionally) a single-bundle load.
 
 // sshterm 前端: 多标签终端 + 会话管理
-/* global Terminal, WebSocket, Zmodem */
+/* global Terminal, WebSocket */
 
 // ---------- 工具 ----------
 // $ is defined in web/js/dom.js (loaded first)
@@ -3170,9 +3175,6 @@ function onWsMessage(ev) {
   }
   if (!tab) return;
   const payload = buf.subarray(2);
-  if (!pane && tab.zmodemSentry) {
-    try { tab.zmodemSentry.consume(payload); return; } catch { /* fallback below */ }
-  }
   processTerminalOutput(tab, pane, payload);
 }
 connectWebSocket();
@@ -3421,7 +3423,9 @@ function handleMsg(m) {
       if (term) {
         if (!pane && shouldQuietReconnectError(tab, m)) break;
         term.writeln(`\r\n\x1b[31m[错误] ${m.msg}\x1b[0m`);
-        if (!pane && tab && !m.action && tab.state !== 'connecting') setTabState(tab.id, 'closed', '出错');
+        // Operational errors (SFTP/tunnel/scan/…) carry action — surface status, do NOT close the tab.
+        if (m.action) setStatus(`错误: ${m.msg}`);
+        else if (!pane && tab && tab.state !== 'connecting') setTabState(tab.id, 'closed', '出错');
       } else setStatus(`错误: ${m.msg}`);
       break;
     }
@@ -3687,19 +3691,6 @@ function newTab(cfg, opts = {}) {
   }
 
   const tab = { id, cfg, term, host: container, state: 'idle', hex: !!(opts.hex ?? cfg.hexMode), fitAddon, searchAddon, imageAddon, recParts: [], recLen: 0, extraPanes: [], hostinfoBar, hostinfoTimer: null, connectedAt: 0 };
-  if (window.Zmodem) {
-    tab.zmodemSentry = new Zmodem.Sentry({
-      to_terminal: octets => processTerminalOutput(tab, null, new Uint8Array(octets)),
-      sender: octets => sendInput(id, new Uint8Array(octets), cfg.encoding),
-      on_detect: detection => {
-        // Do not start a transfer implicitly. Future send/receive UI confirms
-        // this session before file access is granted.
-        detection.deny();
-        setStatus('检测到 Zmodem 会话；请选择文件发送/接收操作');
-      },
-      on_retract: () => setStatus('Zmodem 协商已取消'),
-    });
-  }
   tabs.push(tab);
   renderTabbar();
   activateTab(id);

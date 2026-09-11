@@ -2,7 +2,7 @@
 // AUTO note: web/app.js is the concat artifact used by tests and (optionally) a single-bundle load.
 
 // sshterm 前端: 多标签终端 + 会话管理
-/* global Terminal, WebSocket, Zmodem */
+/* global Terminal, WebSocket */
 
 // ---------- 工具 ----------
 // $ is defined in web/js/dom.js (loaded first)
@@ -326,9 +326,6 @@ function onWsMessage(ev) {
   }
   if (!tab) return;
   const payload = buf.subarray(2);
-  if (!pane && tab.zmodemSentry) {
-    try { tab.zmodemSentry.consume(payload); return; } catch { /* fallback below */ }
-  }
   processTerminalOutput(tab, pane, payload);
 }
 connectWebSocket();
@@ -577,7 +574,9 @@ function handleMsg(m) {
       if (term) {
         if (!pane && shouldQuietReconnectError(tab, m)) break;
         term.writeln(`\r\n\x1b[31m[错误] ${m.msg}\x1b[0m`);
-        if (!pane && tab && !m.action && tab.state !== 'connecting') setTabState(tab.id, 'closed', '出错');
+        // Operational errors (SFTP/tunnel/scan/…) carry action — surface status, do NOT close the tab.
+        if (m.action) setStatus(`错误: ${m.msg}`);
+        else if (!pane && tab && tab.state !== 'connecting') setTabState(tab.id, 'closed', '出错');
       } else setStatus(`错误: ${m.msg}`);
       break;
     }
@@ -843,19 +842,6 @@ function newTab(cfg, opts = {}) {
   }
 
   const tab = { id, cfg, term, host: container, state: 'idle', hex: !!(opts.hex ?? cfg.hexMode), fitAddon, searchAddon, imageAddon, recParts: [], recLen: 0, extraPanes: [], hostinfoBar, hostinfoTimer: null, connectedAt: 0 };
-  if (window.Zmodem) {
-    tab.zmodemSentry = new Zmodem.Sentry({
-      to_terminal: octets => processTerminalOutput(tab, null, new Uint8Array(octets)),
-      sender: octets => sendInput(id, new Uint8Array(octets), cfg.encoding),
-      on_detect: detection => {
-        // Do not start a transfer implicitly. Future send/receive UI confirms
-        // this session before file access is granted.
-        detection.deny();
-        setStatus('检测到 Zmodem 会话；请选择文件发送/接收操作');
-      },
-      on_retract: () => setStatus('Zmodem 协商已取消'),
-    });
-  }
   tabs.push(tab);
   renderTabbar();
   activateTab(id);

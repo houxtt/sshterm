@@ -895,9 +895,9 @@ class SSHConnection extends BaseConnection {
         // 主机名
         'echo HOST $(hostname 2>/dev/null)',
         'echo UPTIME $(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)',
-        // 磁盘/挂载: df -Pk (1K 块), 排除伪文件系统, 输出 挂载点 用量% 可用字节 总量字节
+        // 磁盘/挂载: df -Pk (1K 块), 排除伪文件系统, 输出 挂载点 用量% 可用字节($4) 总量字节($2)
         'echo DISK_START',
-        'df -Pk 2>/dev/null | awk \'NR>1 && $1 !~ /tmpfs|devtmpfs|squashfs/ && $6 !~ /\\/dev\\/loop/ { gsub(/%/,"",$5); printf "DISK %s %s %d %d\\n", $6, $5, $4*1024, $3*1024 }\'',
+        'df -Pk 2>/dev/null | awk \'NR>1 && $1 !~ /tmpfs|devtmpfs|squashfs/ && $6 !~ /\\/dev\\/loop/ { gsub(/%/,"",$5); printf "DISK %s %s %d %d\\n", $6, $5, $4*1024, $2*1024 }\'',
         'echo DISK_END',
         'echo __SSHTERM_STATS_END__',
       ].join('\n');
@@ -928,7 +928,7 @@ class SSHConnection extends BaseConnection {
             const load = body.match(/LOAD\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+(\d+)/);
             const host = body.match(/HOST\s+(.+)/);
             const up = body.match(/UPTIME\s+(\d+)/);
-            // 磁盘: 每个 DISK 行 -> 挂载点 用量% 可用 总量
+            // 磁盘: 每个 DISK 行 -> 挂载点 用量% 可用($4*1024) 总量($2*1024)
             const disk = [];
             const dStart = body.indexOf('DISK_START');
             const dEnd = body.indexOf('DISK_END');

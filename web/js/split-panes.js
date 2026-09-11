@@ -170,12 +170,12 @@ function applySplitLayout(tab, dir, ratio) {
 function toggleSplit(tab) {
   if (!tab) return;
   const n = countPanes(tab);
-  if (n === 1 && tab.extraPanes.length === 0) {
-    addPane(tab, 'row', 0.5);
-  } else {
-    // close all panes one by one
-    while (tab.extraPanes.length) removePane(tab, tab.extraPanes[0]);
+  if (n >= SPLIT_MAX) {
+    setStatus(`已达分屏上限（${SPLIT_MAX} / 2×2）；请用各分屏 ✕ 关闭后再添加`);
+    return;
   }
+  // Each click adds one pane up to SPLIT_MAX; individual ✕ closes. Keep 2-pane drag working.
+  addPane(tab, splitDirection(tab) || 'row', splitRatio(tab));
 }
 
 // replace old split logic with PaneManager
@@ -212,7 +212,12 @@ function installSplitDragger(tab) {
     e.preventDefault();
   };
   const move = (e) => {
-    if (!dragging || tab.extraPanes.length !== 1) return;
+    if (!dragging) return;
+    if (tab.extraPanes.length !== 1) {
+      if (tab.extraPanes.length > 1) setStatus('多分屏模式下暂不支持拖拽分隔条（仅双格可调）');
+      dragging = false;
+      return;
+    }
     const p = container.getBoundingClientRect();
     const pos = dragDir === 'col' ? e.clientY - p.top : e.clientX - p.left;
     const size = dragDir === 'col' ? p.height : p.width;

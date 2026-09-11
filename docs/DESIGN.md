@@ -1,3 +1,5 @@
+> **归档说明（2026-09-11）**：本文是 2026-08-04 架构评审时的设计快照，**不再作为现行功能清单**。请以 [`STATUS.md`](STATUS.md)、[`ARCHITECTURE.md`](ARCHITECTURE.md)、[`FEATURE-PLAN.md`](FEATURE-PLAN.md) 与仓库根 `README.md` 为准。下文「密码明文 JSON」「仅 Tauri 套壳」等表述已过时。
+
 # sshterm — SSH / Telnet / 串口 多标签连接工具
 
 > 最终设计文档 v2.0 | 2026-08-04 | 架构评审通过 ✅
@@ -85,6 +87,12 @@ sshterm/
 
 ## 8. 已知边界与后续
 
-- 串口收发回环验证需真机或 com0com 虚拟串口对(README 有说明)
-- 独立 exe: 后续 Tauri / WebView2 套壳, 核心零改动
-- 密码明文存本地 JSON(个人工具, 前端不返显)
+> 以下为 **2026-09-11** 对齐后的摘要（覆盖原稿过时条目）。
+
+- 串口收发回环验证需真机或 com0com 虚拟串口对（README 有说明）
+- 凭据：勾选「记住密码」时使用 Windows DPAPI 写入 `secrets.enc`，**不再**把密码明文写入 `sessions.json`；浏览器存储不保存密码/私钥
+- 独立 EXE：`npm run build:exe`（caxa）；外发须签名发布流程（`RELEASE.md`）
+- Zmodem：**明确未支持**（无用户确认收发 UI）
+- 分屏：最多 4 格（2×2）；双格可拖分隔条
+- 仍开放项见 [`STATUS.md`](STATUS.md)「仍开放」与审计叠加层
+

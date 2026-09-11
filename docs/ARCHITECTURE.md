@@ -1,6 +1,8 @@
 ﻿# sshterm Architecture
 
-> Updated: 2026-09-09
+> Updated: 2026-09-11
+>
+> Current-state index: [`STATUS.md`](STATUS.md).
 
 ## Overview
 
