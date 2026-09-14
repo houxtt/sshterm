@@ -3,7 +3,7 @@
 const path = require('path');
 const { randomUUID } = require('crypto');
 const { createBackup, readBackup, parseOpenSSHConfig } = require('./session-backup');
-const { connectionConfigForRequest } = require('./connection-config');
+const { connectionConfigForRequest, connectionTargetsMatch } = require('./connection-config');
 const { sanitizeSession } = require('./session-schema');
 const { isScanAllowed, expandTarget, parseIPv4 } = require('./net-scan');
 
@@ -307,11 +307,6 @@ function createWsMessageHandler(ctx) {
       break;
     }
     case 'connect': {
-      const existing = getConnection(ws, m.id);
-      if (existing && existing.state !== 'closed' && existing.state !== 'closing') {
-        attachExistingConnection(ws, existing, m.id);
-        break;
-      }
       const source = Number.isInteger(m.sourceId) ? getConnection(ws, m.sourceId) : null;
       // Split panes are independent shells/connections, but their browser-side
       // config is intentionally redacted. Clone the full in-memory config from
@@ -322,6 +317,14 @@ function createWsMessageHandler(ctx) {
       // saved-session id, but recover legacy workspace tabs by a unique endpoint
       // match so they also receive the Windows-encrypted credentials.
       mergeStoredCredentials(sess, storedSessionForConfig(sess));
+      const existing = getConnection(ws, m.id);
+      if (existing && existing.state !== 'closed' && existing.state !== 'closing') {
+        if (connectionTargetsMatch(existing.config, sess)) {
+          attachExistingConnection(ws, existing, m.id);
+          break;
+        }
+        try { existing.close(); } catch {}
+      }
       await doConnect(ws, sess, m.id);
       break;
     }

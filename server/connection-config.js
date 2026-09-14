@@ -12,4 +12,23 @@ function connectionConfigForRequest(source, fallback = {}) {
   };
 }
 
-module.exports = { connectionConfigForRequest };
+// Refresh/reattach sends the same numeric tab id and may omit host/user.
+// Double-clicking a different saved session must not inherit that live socket.
+function connectionTargetsMatch(existingCfg, requested) {
+  if (!existingCfg || !requested) return true;
+  if (!requested.host && !requested.username && !requested.user) return true;
+  const hostA = String(existingCfg.host || '').trim().toLowerCase();
+  const hostB = String(requested.host || '').trim().toLowerCase();
+  if (hostB && hostA !== hostB) return false;
+  if (requested.port != null && requested.port !== '') {
+    const defaultPort = requested.type === 'telnet' ? 23 : (requested.type === 'vnc' ? 5901 : 22);
+    if (Number(existingCfg.port || defaultPort) !== Number(requested.port || defaultPort)) return false;
+  }
+  const userB = String(requested.username || requested.user || '').trim();
+  const userA = String(existingCfg.username || existingCfg.user || '').trim();
+  if (userB && userA !== userB) return false;
+  if (requested.type && existingCfg.type && requested.type !== existingCfg.type) return false;
+  return true;
+}
+
+module.exports = { connectionConfigForRequest, connectionTargetsMatch };

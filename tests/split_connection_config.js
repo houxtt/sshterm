@@ -1,5 +1,5 @@
 const assert = require('assert');
-const { connectionConfigForRequest } = require('../server/connection-config');
+const { connectionConfigForRequest, connectionTargetsMatch } = require('../server/connection-config');
 
 const source = {
   state: 'connected',
@@ -35,4 +35,26 @@ assert.deepStrictEqual(
   { ...redactedBrowserConfig, proxy: undefined, jumpAuth: undefined },
   'a closed source must not be reused',
 );
+assert.strictEqual(
+  connectionTargetsMatch({ type: 'ssh', host: '192.168.1.61', port: 22, username: 'linux' }, { type: 'ssh' }),
+  true,
+  'refresh reattach with a partial session must still reuse the live tab',
+);
+assert.strictEqual(
+  connectionTargetsMatch(
+    { type: 'ssh', host: '192.168.1.61', port: 22, username: 'linux' },
+    { type: 'ssh', host: '192.168.1.216', port: 22, username: 'logic' },
+  ),
+  false,
+  'double-clicking 216 must not attach a leftover 61 socket on the same tab id',
+);
+assert.strictEqual(
+  connectionTargetsMatch(
+    { type: 'ssh', host: '192.168.1.216', port: 22, username: 'logic' },
+    { type: 'ssh', host: '192.168.1.216', port: 22, username: 'logic' },
+  ),
+  true,
+  'same endpoint must reattach',
+);
+
 console.log('✅ split connection credential clone passed');

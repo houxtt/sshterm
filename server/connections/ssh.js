@@ -139,8 +139,11 @@ function applyAuth(cfg, config) {
     cfg.agent = process.env.SSH_AUTH_SOCK || '\\\\.\\pipe\\openssh-ssh-agent';
     cfg.agentForward = !!config.agentForward;
   } else {
-    cfg.password = password;
-    if (auth === 'keyboard-interactive') cfg.tryKeyboard = true;
+    if (password != null && password !== '') cfg.password = String(password);
+    // OpenSSH clients try password and keyboard-interactive. Ubuntu/PAM
+    // hosts often advertise only the latter; ssh2 password-only then fails
+    // while `ssh user@host` still works.
+    cfg.tryKeyboard = true;
   }
 }
 function parseJumpChain(value) {
@@ -220,10 +223,23 @@ class SSHConnection extends BaseConnection {
     return { term: 'xterm-256color', ...this._ptySize };
   }
 
+  _rejectIfClosed(reject) {
+    if (this.state !== 'closing' && this.state !== 'closed') return false;
+    const err = Object.assign(new Error('SSH 连接已取消'), { code: 'SSH_CONNECT_CANCELLED' });
+    if (typeof reject === 'function') reject(err);
+    return true;
+  }
+
   async connect() {
+    if (this._rejectIfClosed()) return Promise.reject(Object.assign(new Error('SSH 连接已取消'), { code: 'SSH_CONNECT_CANCELLED' }));
     this.state = 'connecting';
     const { host, port = 22, username, auth = 'password',
             password, privateKey, passphrase, proxy } = this.config;
+    if ((auth === 'password' || !auth) && (password == null || password === '')) {
+      const err = new Error('未找到登录密码。请编辑会话，填写密码并勾选“记住凭据”后再双击连接');
+      this._emitError(`SSH 连接失败: ${err.message}`);
+      return Promise.reject(err);
+    }
     const readyTimeout = readyTimeoutFor(this.config);
     const cfg = {
       host, port, username, readyTimeout,
@@ -266,8 +282,8 @@ class SSHConnection extends BaseConnection {
       applyAuth(jumpCfg, jumpCredentials);
       if (upstream) jumpCfg.sock = await forwardThrough(upstream, hop.host, hop.port);
       const jump = new Client();
-      if (jumpCredentials.auth === 'keyboard-interactive') {
-        jump.on('keyboard-interactive', (n, i, l, prompts, finish) => finish(answerInteractivePrompts(prompts, jumpCredentials.password)));
+      if (jumpCfg.tryKeyboard) {
+        jump.on('keyboard-interactive', (n, i, l, prompts, finishKb) => finishKb(answerInteractivePrompts(prompts, jumpCredentials.password)));
       }
       await waitReady(jump, jumpCfg);
       armSocketKeepalive(jump);
@@ -281,10 +297,22 @@ class SSHConnection extends BaseConnection {
       this.client = client;
       let connectErrorReported = false;
       let settled = false;
-      const finish = (fn) => { if (settled) return; settled = true; fn(); };
-      if (auth === 'keyboard-interactive') {
+      const finish = (fn) => {
+        if (settled) return;
+        settled = true;
+        this._settleConnect = null;
+        fn();
+      };
+      if (cfg.tryKeyboard) {
         attachKeyboardInteractive(client, this, password);
       }
+      if (this._rejectIfClosed()) {
+        finish(() => reject(Object.assign(new Error('SSH 连接已取消'), { code: 'SSH_CONNECT_CANCELLED' })));
+        return;
+      }
+      this._settleConnect = (err) => {
+        finish(() => err ? reject(err) : resolve());
+      };
       client.on('ready', () => {
         armSocketKeepalive(client);
         // The browser commonly sends its fitted size while SSH is still
@@ -327,7 +355,9 @@ class SSHConnection extends BaseConnection {
       });
       client.on('close', (hadError) => {
         if (this.state === 'closing') {
-          finish(() => reject(Object.assign(new Error('SSH 连接已取消'), { code: 'SSH_CONNECT_CANCELLED' })));
+          const err = Object.assign(new Error('SSH 连接已取消'), { code: 'SSH_CONNECT_CANCELLED' });
+          if (this._settleConnect) this._settleConnect(err);
+          else finish(() => reject(err));
           return;
         }
         if (this.state === 'connected' || this.state === 'connecting') {
@@ -793,9 +823,11 @@ class SSHConnection extends BaseConnection {
 
   close() {
     if (this.state === 'closing' && this._disposed) return;
-    const wasConnected = this.state === 'connected';
     this.state = 'closing';
     this._disposeResources();
+    if (this._settleConnect) {
+      this._settleConnect(Object.assign(new Error('SSH 连接已取消'), { code: 'SSH_CONNECT_CANCELLED' }));
+    }
     setTimeout(() => this._emitClose('已断开'), 50);
   }
 
@@ -960,5 +992,5 @@ class SSHConnection extends BaseConnection {
     }
 }
 
-SSHConnection._test = { readyTimeoutFor, connectionErrorMessage, forceDestroyClient, parseRemoteMem, parseCpuTicks, cpuPctBetween };
+SSHConnection._test = { readyTimeoutFor, connectionErrorMessage, forceDestroyClient, parseRemoteMem, parseCpuTicks, cpuPctBetween, applyAuth };
 module.exports = SSHConnection;

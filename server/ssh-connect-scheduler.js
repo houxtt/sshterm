@@ -14,19 +14,53 @@ function isBusy(key) {
   return tails.has(key);
 }
 
+function watchCancel(shouldCancel) {
+  let iv;
+  let stopped = false;
+  const promise = new Promise((_, reject) => {
+    const fail = () => {
+      if (stopped) return;
+      stopped = true;
+      if (iv) { clearInterval(iv); iv = null; }
+      reject(new SSHConnectCancelledError());
+    };
+    iv = setInterval(() => { if (shouldCancel()) fail(); }, 50);
+    if (shouldCancel()) queueMicrotask(fail);
+  });
+  promise.catch(() => {});
+  return {
+    promise,
+    stop() {
+      stopped = true;
+      if (iv) { clearInterval(iv); iv = null; }
+    },
+  };
+}
+
 async function runExclusive(key, task, shouldCancel = () => false) {
   const previous = tails.get(key) || Promise.resolve();
   let release;
   const current = new Promise(resolve => { release = resolve; });
   tails.set(key, current);
 
+  // Keep the serialization chain even if this caller gives up while queued.
+  // Otherwise a cancelled waiter would release the slot and overlap handshakes.
+  const chained = previous.catch(() => {}).then(async () => {
+    try {
+      if (shouldCancel()) throw new SSHConnectCancelledError();
+      return await task();
+    } finally {
+      release();
+      if (tails.get(key) === current) tails.delete(key);
+    }
+  });
+  chained.catch(() => {});
+
+  const watch = watchCancel(shouldCancel);
   try {
-    await previous.catch(() => {});
-    if (shouldCancel()) throw new SSHConnectCancelledError();
-    return await task();
+    return await Promise.race([chained, watch.promise]);
   } finally {
-    release();
-    if (tails.get(key) === current) tails.delete(key);
+    watch.stop();
   }
 }
 

@@ -29,11 +29,31 @@ async function schedulerContract() {
   const cancelled = scheduler.runExclusive('cancel-host:22', () => {
     throw new Error('cancelled task must not run');
   }, () => true);
-  await first;
   await assert.rejects(cancelled, error => error.code === 'SSH_CONNECT_CANCELLED');
+  await first;
+
+  let queuedRan = false;
+  let closed = false;
+  const hung = scheduler.runExclusive('queued-cancel:22', () => delay(400));
+  const queuedStarted = Date.now();
+  const queued = scheduler.runExclusive('queued-cancel:22', async () => {
+    queuedRan = true;
+  }, () => closed);
+  await delay(20);
+  closed = true;
+  await assert.rejects(queued, error => error.code === 'SSH_CONNECT_CANCELLED');
+  assert.ok(Date.now() - queuedStarted < 150, 'queued handshake must fail fast when the tab is closed');
+  await hung;
+  assert.strictEqual(queuedRan, false, 'cancelled waiter must not start a second handshake');
+  assert.strictEqual(scheduler.isBusy('queued-cancel:22'), false);
 }
 
 async function timeoutAndCancellationContract() {
+  const authCfg = {};
+  SSHConnection._test.applyAuth(authCfg, { auth: 'password', password: '1' });
+  assert.strictEqual(authCfg.password, '1');
+  assert.strictEqual(authCfg.tryKeyboard, true, 'password auth must also try keyboard-interactive like OpenSSH');
+
   assert.strictEqual(SSHConnection._test.readyTimeoutFor({}), 30000);
   assert.strictEqual(SSHConnection._test.readyTimeoutFor({ readyTimeout: 45000 }), 45000);
   assert.strictEqual(SSHConnection._test.readyTimeoutFor({ readyTimeout: 1000 }), 30000);
@@ -80,6 +100,12 @@ async function timeoutAndCancellationContract() {
     conn.close();
     await assert.rejects(connecting, error => error.code === 'SSH_CONNECT_CANCELLED');
     assert.ok(Date.now() - started < 1000, 'cancel should not wait for handshake timeout');
+
+    const missing = new SSHConnection({
+      host: '127.0.0.1', port: 1, username: 'logic', auth: 'password',
+    });
+    missing.on('error', () => {});
+    await assert.rejects(missing.connect(), /未找到登录密码/);
   } finally {
     for (const socket of sockets) socket.destroy();
     await new Promise(resolve => server.close(resolve));
