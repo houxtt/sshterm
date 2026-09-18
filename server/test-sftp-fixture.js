@@ -29,6 +29,17 @@ function installLocalSftpFixture(connections, root, id = 9900) {
     close(handle, callback) { fs.close(handle, callback); },
     createReadStream(remotePath, options) { return fs.createReadStream(resolve(remotePath), options); },
     createWriteStream(remotePath, options) { return fs.createWriteStream(resolve(remotePath), options); },
+    lstat(remotePath, callback) { fs.lstat(resolve(remotePath), callback); },
+    readdir(remotePath, callback) {
+      fs.readdir(resolve(remotePath), (err, names) => {
+        if (err) return callback(err);
+        callback(null, names.map((n) => ({ filename: n })));
+      });
+    },
+    rename(oldPath, newPath, callback) { fs.rename(resolve(oldPath), resolve(newPath), callback); },
+    unlink(remotePath, callback) { fs.unlink(resolve(remotePath), callback); },
+    rmdir(remotePath, callback) { fs.rmdir(resolve(remotePath), callback); },
+    chmod(remotePath, mode, callback) { fs.chmod(resolve(remotePath), mode, callback); },
   };
   connections.set(id, {
     id, state: 'connected', config: { type: 'ssh', name: 'fixture' }, getSftpInst: () => sftp,

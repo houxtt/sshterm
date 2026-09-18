@@ -177,6 +177,144 @@ function handleSftpHttp(req, res, ctx) {
     return true;
   }
 
+  // SFTP 文件管理: 重命名/移动/删除/权限修改 (均要求 SFTP 通道就绪)
+  // POST /api/sftp/rename?conn=<id>&path=<old>&newPath=<new>
+  if (req.method === 'POST' && url.startsWith('/api/sftp/rename')) {
+    const qs = new URLSearchParams(req.url.split('?')[1] || '');
+    const conn = getHttpConnection(qs);
+    const rpath = qs.get('path') || '';
+    const newPath = qs.get('newPath') || '';
+    if (!conn || !conn.getSftpInst() || !rpath || !newPath || rpath === newPath ||
+        rpath === '/' || newPath.includes('\0')) {
+      res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+      return res.end('重命名参数错误(连接或路径无效)');
+    }
+    const sftp = conn.getSftpInst();
+    sftp.rename(rpath, newPath, (err) => {
+      if (err) {
+        res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+        return res.end(`重命名失败: ${err.message}`);
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, path: newPath }));
+    });
+    return true;
+  }
+
+  // POST /api/sftp/delete?conn=<id>&path=<path>&recursive=<bool>
+  // 目录仅在 recursive=1 时递归删除; 文件/符号链接直接 unlink
+  if (req.method === 'POST' && url.startsWith('/api/sftp/delete')) {
+    const qs = new URLSearchParams(req.url.split('?')[1] || '');
+    const conn = getHttpConnection(qs);
+    const rpath = qs.get('path') || '';
+    const recursive = qs.get('recursive') === '1' || qs.get('recursive') === 'true';
+    if (!conn || !conn.getSftpInst() || !rpath || rpath === '/' || rpath === '.' || rpath.includes('\0')) {
+      res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+      return res.end('删除参数错误(连接或路径无效)');
+    }
+    const sftp = conn.getSftpInst();
+    sftp.lstat(rpath, (statErr, st) => {
+      if (statErr) {
+        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+        return res.end('远端路径不存在或无法读取');
+      }
+      if (!st.isDirectory()) {
+        return sftp.unlink(rpath, (err) => {
+          if (err) {
+            res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+            return res.end(`删除失败: ${err.message}`);
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, removed: 1 }));
+        });
+      }
+      if (!recursive) {
+        res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+        return res.end('目录需要确认递归删除(recursive=1)');
+      }
+      // 迭代式递归删除: 目录先入 pending 栈; 遇到子目录时把父目录重新压栈在
+      // 子目录之后, 保证子目录先清空再 rmdir 父目录 (深目录树不栈溢出)
+      let removed = 0;
+      const pending = [rpath];
+      const finish = (status, message, payload) => {
+        if (payload) {
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(payload));
+        } else {
+          res.writeHead(status, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end(message);
+        }
+      };
+      const step = () => {
+        const dir = pending.pop();
+        if (dir === undefined) return finish(200, '', { ok: true, removed });
+        sftp.readdir(dir, (rdErr, list) => {
+          if (rdErr) return finish(500, `删除失败: 无法读取目录 ${dir}: ${rdErr.message}`);
+          const children = (list || []).map((f) => `${dir}/${f.filename}`);
+          const removeChild = (i) => {
+            if (i >= children.length) {
+              return sftp.rmdir(dir, (err) => {
+                if (err) return finish(500, `删除目录失败 ${dir}: ${err.message}`);
+                removed++;
+                step();
+              });
+            }
+            const child = children[i];
+            sftp.lstat(child, (lsErr, cst) => {
+              if (lsErr) return finish(500, `删除失败: 无法读取 ${child}: ${lsErr.message}`);
+              if (cst.isDirectory()) {
+                pending.push(dir, child);
+                return step();
+              }
+              sftp.unlink(child, (err) => {
+                if (err) return finish(500, `删除文件失败 ${child}: ${err.message}`);
+                removed++;
+                removeChild(i + 1);
+              });
+            });
+          };
+          removeChild(0);
+        });
+      };
+      step();
+    });
+    return true;
+  }
+
+  // POST /api/sftp/chmod?conn=<id>&path=<path>&mode=<octal> — 仅对文件有效
+  if (req.method === 'POST' && url.startsWith('/api/sftp/chmod')) {
+    const qs = new URLSearchParams(req.url.split('?')[1] || '');
+    const conn = getHttpConnection(qs);
+    const rpath = qs.get('path') || '';
+    const modeText = qs.get('mode') || '';
+    const mode = parseInt(modeText, 8);
+    if (!conn || !conn.getSftpInst() || !rpath || rpath === '/' || rpath.includes('\0') ||
+        !/^[0-7]{3,4}$/.test(modeText) || !Number.isInteger(mode) || mode < 0 || mode > 0o7777) {
+      res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+      return res.end('权限参数错误(连接、路径或权限模式无效)');
+    }
+    const sftp = conn.getSftpInst();
+    sftp.stat(rpath, (statErr, st) => {
+      if (statErr) {
+        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+        return res.end('远端路径不存在或无法读取');
+      }
+      if (st.isDirectory()) {
+        res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+        return res.end('权限修改仅支持文件');
+      }
+      sftp.chmod(rpath, mode, (err) => {
+        if (err) {
+          res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+          return res.end(`修改权限失败: ${err.message}`);
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, mode: mode.toString(8) }));
+      });
+    });
+    return true;
+  }
+
   // SHA-256 is calculated server-side from the remote SFTP stream so uploads
   // can be verified without running shell commands on the remote machine.
   if (url.startsWith('/api/sftp/checksum')) {

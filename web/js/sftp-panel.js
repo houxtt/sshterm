@@ -472,6 +472,7 @@ function closeSftpPanel() {
   sftpSelectMode = false;
   sftpSelectedItems.clear();
   sftpListEntries = [];
+  closeSftpCtxMenu();
   $('sftp-panel')?.classList.add('hidden');
   $('terms')?.classList.remove('sftp-open');
   if ($('sftp-path')) $('sftp-path').value = '';
@@ -531,6 +532,100 @@ function sftpJoin(dir, name) {
   return dir.endsWith('/') ? dir + name : `${dir}/${name}`;
 }
 
+// ---------- SFTP 远端文件管理 (重命名/删除/权限) ----------
+function closeSftpCtxMenu() {
+  document.getElementById('sftp-ctx-menu')?.remove();
+}
+
+// 通用文件管理请求: 复用 apiUrl 携带 token + window 命名空间
+async function sftpFileOp(action, params) {
+  if (!sftpConnId) throw new Error('文件面板未连接');
+  const resp = await fetch(apiUrl(`/api/sftp/${action}`, { conn: sftpConnId, ...params }), { method: 'POST' });
+  const text = await resp.text();
+  if (!resp.ok) throw new Error(text || `请求失败: ${resp.status}`);
+  let data = {};
+  try { data = JSON.parse(text); } catch {}
+  return data;
+}
+
+async function sftpRenameItem(entry, fullPath) {
+  const input = window.prompt(t('sftp_rename_prompt'), entry.name);
+  if (input === null) return;
+  const newName = input.trim();
+  if (!newName || newName === entry.name) return;
+  if (newName.includes('/')) return setStatus(t('sftp_rename_invalid'));
+  try {
+    await sftpFileOp('rename', { path: fullPath, newPath: sftpJoin(sftpPath, newName) });
+    setStatus(t('sftp_rename_done') + `: ${newName}`);
+    sftpLoad();
+  } catch (e) {
+    setStatus(`${t('sftp_op_failed')}: ${e.message}`);
+  }
+}
+
+async function sftpDeleteItem(entry, fullPath) {
+  const tip = entry.isDir ? t('sftp_delete_dir_confirm') : t('sftp_delete_confirm');
+  if (!window.confirm(`${tip}\n${entry.name}`)) return;
+  try {
+    const data = await sftpFileOp('delete', { path: fullPath, recursive: entry.isDir ? '1' : '0' });
+    setStatus(t('sftp_delete_done') + (data.removed > 1 ? ` (${data.removed})` : ''));
+    sftpLoad();
+  } catch (e) {
+    setStatus(`${t('sftp_op_failed')}: ${e.message}`);
+  }
+}
+
+async function sftpChmodItem(entry, fullPath) {
+  if (entry.isDir) return setStatus(t('sftp_chmod_file_only'));
+  const input = window.prompt(t('sftp_chmod_prompt'), '644');
+  if (input === null) return;
+  const mode = input.trim();
+  if (!/^[0-7]{3,4}$/.test(mode)) return setStatus(t('sftp_chmod_invalid'));
+  try {
+    await sftpFileOp('chmod', { path: fullPath, mode });
+    setStatus(`${t('sftp_chmod_done')}: ${mode}`);
+    sftpLoad();
+  } catch (e) {
+    setStatus(`${t('sftp_op_failed')}: ${e.message}`);
+  }
+}
+
+function showSftpCtxMenu(x, y, entry, fullPath) {
+  closeSftpCtxMenu();
+  const menu = document.createElement('div');
+  menu.id = 'sftp-ctx-menu';
+  menu.className = 'sftp-ctx-menu';
+  const items = [
+    { label: t('sftp_op_rename'), action: () => sftpRenameItem(entry, fullPath) },
+    { label: t('sftp_op_delete'), danger: true, action: () => sftpDeleteItem(entry, fullPath) },
+    { label: t('sftp_op_chmod'), action: () => sftpChmodItem(entry, fullPath) },
+  ];
+  for (const item of items) {
+    const btn = document.createElement('button');
+    btn.className = 'sftp-ctx-item' + (item.danger ? ' danger' : '');
+    btn.textContent = item.label;
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      closeSftpCtxMenu();
+      item.action();
+    });
+    menu.appendChild(btn);
+  }
+  document.body.appendChild(menu);
+  // 防止菜单超出窗口右/下边缘
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = Math.max(4, Math.min(x, window.innerWidth - rect.width - 4)) + 'px';
+  menu.style.top = Math.max(4, Math.min(y, window.innerHeight - rect.height - 4)) + 'px';
+}
+
+document.addEventListener('click', (e) => {
+  const menu = document.getElementById('sftp-ctx-menu');
+  if (menu && !menu.contains(e.target)) closeSftpCtxMenu();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeSftpCtxMenu();
+});
+
 function renderSftpList(entries) {
   sftpListEntries = entries;
   const el = $('sftp-list');
@@ -556,7 +651,9 @@ function renderSftpList(entries) {
       <span class="sftp-name" title="${esc(e.name)}">${esc(e.name)}</span>
       <span class="sftp-size">${size}</span>
       <span class="sftp-time">${time}</span>
-      ${sftpSelectMode ? '' : '<button class="mini sftp-dl" title="' + (e.isDir ? '下载整个目录到本地' : '下载') + '">⬇</button>'}`;
+      ${sftpSelectMode ? '' : '<button class="mini sftp-dl" title="' + (e.isDir ? '下载整个目录到本地' : '下载') + '">⬇</button>'}
+      ${sftpSelectMode ? '' : `<button class="mini sftp-rename" title="${t('sftp_op_rename')}">✎</button>`}
+      ${sftpSelectMode ? '' : `<button class="mini danger sftp-del" title="${t('sftp_op_delete')}">✕</button>`}`;
     row.querySelector('.sftp-select-cb')?.addEventListener('click', (ev) => {
       ev.stopPropagation();
       toggleSftpSelection(full, e);
@@ -570,9 +667,22 @@ function renderSftpList(entries) {
       sftpPath = full;
       sftpLoad();
     };
+    row.addEventListener('contextmenu', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (!sftpSelectMode) showSftpCtxMenu(ev.clientX, ev.clientY, e, full);
+    });
     row.querySelector('.sftp-dl')?.addEventListener('click', (ev) => {
       ev.stopPropagation();
       downloadSftpItem(e, full);
+    });
+    row.querySelector('.sftp-rename')?.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      sftpRenameItem(e, full);
+    });
+    row.querySelector('.sftp-del')?.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      sftpDeleteItem(e, full);
     });
     el.appendChild(row);
   }

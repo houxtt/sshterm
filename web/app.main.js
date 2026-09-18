@@ -863,8 +863,13 @@ function newTab(cfg, opts = {}) {
   term.onData((d) => handleUserInput(tab, d));
   term.onResize(({ cols, rows }) => send({ type: 'resize', id, cols, rows }));
 
-  // 窗口尺寸变化 → 重新适配
-  const ro = new ResizeObserver(() => { if (activeTabId === id) fitTerm(tab); });
+  // 窗口尺寸变化 → 重新适配（2×2 网格分隔条按比例跟随）
+  const ro = new ResizeObserver(() => {
+    if (activeTabId === id) {
+      fitTerm(tab);
+      if (countPanes(tab) >= 3) positionGridDividers(tab);
+    }
+  });
   ro.observe(container);
   tab._resizeObserver = ro;
 

@@ -280,6 +280,15 @@ var I18N = {
     sftp_local_dir: '📂 本地目录', sftp_download_dir: '⬇ 下载当前目录',
     sftp_multi: '☑ 多选', sftp_multi_exit: '✕ 退出多选', sftp_select_all: '全选',
     sftp_download_sel: '⬇ 下载选中',
+    sftp_op_rename: '重命名', sftp_op_delete: '删除', sftp_op_chmod: '权限',
+    sftp_rename_prompt: '新名称:', sftp_rename_invalid: '名称无效(不能包含 /)',
+    sftp_rename_done: '已重命名',
+    sftp_delete_confirm: '确认删除该文件?',
+    sftp_delete_dir_confirm: '确认递归删除该目录及其全部内容?',
+    sftp_delete_done: '已删除',
+    sftp_chmod_prompt: '权限 (八进制, 如 644):', sftp_chmod_invalid: '权限格式无效(3-4 位八进制)',
+    sftp_chmod_file_only: '权限修改仅支持文件', sftp_chmod_done: '权限已修改',
+    sftp_op_failed: '操作失败',
     side_title: '已保存会话', side_batch: '批量', side_foot: '双击连接 · 悬停可编辑/删除',
     session_filter: '过滤会话…', hotkeys_title: '快捷键',
     batch_all: '全选', batch_del: '删除选中', batch_cancel: '取消',
@@ -300,6 +309,15 @@ var I18N = {
     sftp_local_dir: '📂 Local folder', sftp_download_dir: '⬇ Download here',
     sftp_multi: '☑ Multi', sftp_multi_exit: '✕ Exit multi', sftp_select_all: 'All',
     sftp_download_sel: '⬇ Download selected',
+    sftp_op_rename: 'Rename', sftp_op_delete: 'Delete', sftp_op_chmod: 'Chmod',
+    sftp_rename_prompt: 'New name:', sftp_rename_invalid: 'Invalid name (must not contain /)',
+    sftp_rename_done: 'Renamed',
+    sftp_delete_confirm: 'Delete this file?',
+    sftp_delete_dir_confirm: 'Recursively delete this directory and all its contents?',
+    sftp_delete_done: 'Deleted',
+    sftp_chmod_prompt: 'Mode (octal, e.g. 644):', sftp_chmod_invalid: 'Invalid mode (3-4 octal digits)',
+    sftp_chmod_file_only: 'Chmod only supports files', sftp_chmod_done: 'Mode changed',
+    sftp_op_failed: 'Operation failed',
     side_title: 'Saved Sessions', side_batch: 'Batch', side_foot: 'Double-click to connect · hover to edit/delete',
     session_filter: 'Filter sessions…', hotkeys_title: 'Hotkeys',
     batch_all: 'All', batch_del: 'Delete', batch_cancel: 'Cancel',
@@ -1482,6 +1500,7 @@ function closeSftpPanel() {
   sftpSelectMode = false;
   sftpSelectedItems.clear();
   sftpListEntries = [];
+  closeSftpCtxMenu();
   $('sftp-panel')?.classList.add('hidden');
   $('terms')?.classList.remove('sftp-open');
   if ($('sftp-path')) $('sftp-path').value = '';
@@ -1541,6 +1560,100 @@ function sftpJoin(dir, name) {
   return dir.endsWith('/') ? dir + name : `${dir}/${name}`;
 }
 
+// ---------- SFTP 远端文件管理 (重命名/删除/权限) ----------
+function closeSftpCtxMenu() {
+  document.getElementById('sftp-ctx-menu')?.remove();
+}
+
+// 通用文件管理请求: 复用 apiUrl 携带 token + window 命名空间
+async function sftpFileOp(action, params) {
+  if (!sftpConnId) throw new Error('文件面板未连接');
+  const resp = await fetch(apiUrl(`/api/sftp/${action}`, { conn: sftpConnId, ...params }), { method: 'POST' });
+  const text = await resp.text();
+  if (!resp.ok) throw new Error(text || `请求失败: ${resp.status}`);
+  let data = {};
+  try { data = JSON.parse(text); } catch {}
+  return data;
+}
+
+async function sftpRenameItem(entry, fullPath) {
+  const input = window.prompt(t('sftp_rename_prompt'), entry.name);
+  if (input === null) return;
+  const newName = input.trim();
+  if (!newName || newName === entry.name) return;
+  if (newName.includes('/')) return setStatus(t('sftp_rename_invalid'));
+  try {
+    await sftpFileOp('rename', { path: fullPath, newPath: sftpJoin(sftpPath, newName) });
+    setStatus(t('sftp_rename_done') + `: ${newName}`);
+    sftpLoad();
+  } catch (e) {
+    setStatus(`${t('sftp_op_failed')}: ${e.message}`);
+  }
+}
+
+async function sftpDeleteItem(entry, fullPath) {
+  const tip = entry.isDir ? t('sftp_delete_dir_confirm') : t('sftp_delete_confirm');
+  if (!window.confirm(`${tip}\n${entry.name}`)) return;
+  try {
+    const data = await sftpFileOp('delete', { path: fullPath, recursive: entry.isDir ? '1' : '0' });
+    setStatus(t('sftp_delete_done') + (data.removed > 1 ? ` (${data.removed})` : ''));
+    sftpLoad();
+  } catch (e) {
+    setStatus(`${t('sftp_op_failed')}: ${e.message}`);
+  }
+}
+
+async function sftpChmodItem(entry, fullPath) {
+  if (entry.isDir) return setStatus(t('sftp_chmod_file_only'));
+  const input = window.prompt(t('sftp_chmod_prompt'), '644');
+  if (input === null) return;
+  const mode = input.trim();
+  if (!/^[0-7]{3,4}$/.test(mode)) return setStatus(t('sftp_chmod_invalid'));
+  try {
+    await sftpFileOp('chmod', { path: fullPath, mode });
+    setStatus(`${t('sftp_chmod_done')}: ${mode}`);
+    sftpLoad();
+  } catch (e) {
+    setStatus(`${t('sftp_op_failed')}: ${e.message}`);
+  }
+}
+
+function showSftpCtxMenu(x, y, entry, fullPath) {
+  closeSftpCtxMenu();
+  const menu = document.createElement('div');
+  menu.id = 'sftp-ctx-menu';
+  menu.className = 'sftp-ctx-menu';
+  const items = [
+    { label: t('sftp_op_rename'), action: () => sftpRenameItem(entry, fullPath) },
+    { label: t('sftp_op_delete'), danger: true, action: () => sftpDeleteItem(entry, fullPath) },
+    { label: t('sftp_op_chmod'), action: () => sftpChmodItem(entry, fullPath) },
+  ];
+  for (const item of items) {
+    const btn = document.createElement('button');
+    btn.className = 'sftp-ctx-item' + (item.danger ? ' danger' : '');
+    btn.textContent = item.label;
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      closeSftpCtxMenu();
+      item.action();
+    });
+    menu.appendChild(btn);
+  }
+  document.body.appendChild(menu);
+  // 防止菜单超出窗口右/下边缘
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = Math.max(4, Math.min(x, window.innerWidth - rect.width - 4)) + 'px';
+  menu.style.top = Math.max(4, Math.min(y, window.innerHeight - rect.height - 4)) + 'px';
+}
+
+document.addEventListener('click', (e) => {
+  const menu = document.getElementById('sftp-ctx-menu');
+  if (menu && !menu.contains(e.target)) closeSftpCtxMenu();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeSftpCtxMenu();
+});
+
 function renderSftpList(entries) {
   sftpListEntries = entries;
   const el = $('sftp-list');
@@ -1566,7 +1679,9 @@ function renderSftpList(entries) {
       <span class="sftp-name" title="${esc(e.name)}">${esc(e.name)}</span>
       <span class="sftp-size">${size}</span>
       <span class="sftp-time">${time}</span>
-      ${sftpSelectMode ? '' : '<button class="mini sftp-dl" title="' + (e.isDir ? '下载整个目录到本地' : '下载') + '">⬇</button>'}`;
+      ${sftpSelectMode ? '' : '<button class="mini sftp-dl" title="' + (e.isDir ? '下载整个目录到本地' : '下载') + '">⬇</button>'}
+      ${sftpSelectMode ? '' : `<button class="mini sftp-rename" title="${t('sftp_op_rename')}">✎</button>`}
+      ${sftpSelectMode ? '' : `<button class="mini danger sftp-del" title="${t('sftp_op_delete')}">✕</button>`}`;
     row.querySelector('.sftp-select-cb')?.addEventListener('click', (ev) => {
       ev.stopPropagation();
       toggleSftpSelection(full, e);
@@ -1580,9 +1695,22 @@ function renderSftpList(entries) {
       sftpPath = full;
       sftpLoad();
     };
+    row.addEventListener('contextmenu', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (!sftpSelectMode) showSftpCtxMenu(ev.clientX, ev.clientY, e, full);
+    });
     row.querySelector('.sftp-dl')?.addEventListener('click', (ev) => {
       ev.stopPropagation();
       downloadSftpItem(e, full);
+    });
+    row.querySelector('.sftp-rename')?.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      sftpRenameItem(e, full);
+    });
+    row.querySelector('.sftp-del')?.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      sftpDeleteItem(e, full);
     });
     el.appendChild(row);
   }
@@ -2613,9 +2741,19 @@ function clampSplitRatio(value) {
   const ratio = Number(value);
   return Number.isFinite(ratio) ? Math.max(0.1, Math.min(0.9, ratio)) : 0.5;
 }
+function clampGridRatio(value) {
+  const ratio = Number(value);
+  return Number.isFinite(ratio) ? Math.max(0.2, Math.min(0.8, ratio)) : 0.5;
+}
 function splitRatio(tab) {
   const prefs = loadSplitPrefs();
   return clampSplitRatio(prefs[tab.id] ? prefs[tab.id].ratio : 0.5);
+}
+// 2×2 grid layout ratios (col: left column width, row: top row height).
+function splitGridRatios(tab) {
+  const prefs = loadSplitPrefs();
+  const grid = (prefs[tab.id] && prefs[tab.id].grid) || {};
+  return { col: clampGridRatio(grid.col), row: clampGridRatio(grid.row) };
 }
 function findPane(tab, connId) {
   if (tab.id === connId) return tab;
@@ -2707,6 +2845,41 @@ function removePane(tab, pane) {
   scheduleTabsSave();
 }
 
+function applyGridRatios(tab) {
+  const container = tab.host;
+  if (!container) return;
+  const { col, row } = splitGridRatios(tab);
+  container.style.gridTemplateColumns = `${col}fr ${1 - col}fr`;
+  container.style.gridTemplateRows = `${row}fr ${1 - row}fr`;
+}
+
+function positionGridDividers(tab) {
+  const container = tab.host;
+  if (!container || countPanes(tab) < 3 || container.classList.contains('hidden')) return;
+  const rect = container.getBoundingClientRect();
+  if (!rect.width || !rect.height) return;
+  const computed = getComputedStyle(container);
+  const boxW = rect.width - parseFloat(computed.paddingLeft) - parseFloat(computed.paddingRight);
+  const boxH = rect.height - parseFloat(computed.paddingTop) - parseFloat(computed.paddingBottom);
+  if (!(boxW > 0) || !(boxH > 0)) return;
+  const { col, row } = splitGridRatios(tab);
+  const [v, h] = tab._dividers || [];
+  if (v) {
+    v.className = 'split-divider grid-divider';
+    v.style.display = 'block';
+    v.style.left = (col * boxW) + 'px';
+    v.style.top = '0';
+    v.style.height = boxH + 'px';
+  }
+  if (h) {
+    h.className = 'split-divider grid-divider col';
+    h.style.display = 'block';
+    h.style.top = (row * boxH) + 'px';
+    h.style.left = '0';
+    h.style.width = boxW + 'px';
+  }
+}
+
 function applySplitLayout(tab, dir, ratio) {
   const container = tab.host;
   const main = container.querySelector('.term-host.main-pane');
@@ -2714,7 +2887,7 @@ function applySplitLayout(tab, dir, ratio) {
   ratio = clampSplitRatio(ratio);
   const n = countPanes(tab);
   if (n <= 1 || dir === 'none') {
-    if (tab._dividers?.[0]) tab._dividers[0].style.display = 'none';
+    (tab._dividers || []).forEach(d => { d.style.display = 'none'; });
     main.style.display = '';
     main.style.flex = '';
     main.style.gridColumn = '';
@@ -2732,8 +2905,10 @@ function applySplitLayout(tab, dir, ratio) {
     if (divider) {
       divider.className = 'split-divider' + (dir === 'col' ? ' col' : '');
       divider.dataset.dir = dir;
+      ['left', 'top', 'width', 'height'].forEach(prop => { divider.style[prop] = ''; });
       divider.style.display = '';
     }
+    if (tab._dividers?.[1]) tab._dividers[1].style.display = 'none';
     container.style.display = '';
     container.style.gridTemplateColumns = '';
     container.style.gridTemplateRows = '';
@@ -2741,17 +2916,17 @@ function applySplitLayout(tab, dir, ratio) {
     main.style.flex = `${ratio} 1 0`;
     tab.extraPanes[0].host.style.flex = `${1 - ratio} 1 0`;
   } else if (n >= 3) {
-    if (tab._dividers?.[0]) tab._dividers[0].style.display = 'none';
-    // 3-4 pane: 2x2 grid
+    // 3-4 pane: 2x2 grid with draggable dividers (n===3 leaves the last cell empty).
     container.style.flexDirection = 'column';
     container.style.display = 'grid';
-    container.style.gridTemplateColumns = '1fr 1fr';
-    container.style.gridTemplateRows = '1fr 1fr';
+    applyGridRatios(tab);
     [main, ...tab.extraPanes.map(p => p.host)].forEach((hostEl, idx) => {
       hostEl.style.flex = '';
       hostEl.style.gridColumn = (idx % 2) + 1;
       hostEl.style.gridRow = Math.floor(idx / 2) + 1;
     });
+    positionGridDividers(tab);
+    setTimeout(() => positionGridDividers(tab), 60);
   }
   // save prefs for first pane dir/ratio
   if (!loadSplitPrefs()[tab.id]) saveSplitPrefs({ ...loadSplitPrefs(), [tab.id]: { dir, ratio } });
@@ -2792,26 +2967,52 @@ function installSplitDragger(tab) {
     return d;
   };
   tab._dividers = [];
-  let divider = makeDivider('row');
+  // NOTE: divider[0] is shared — flex mode (n=2) restyles it via dataset.dir;
+  // grid mode (n>=3) treats it as the vertical divider via dataset.gridDir.
+  const divider = makeDivider('row');        // n=2: 双向复用；n>=3: 垂直（左右列）分隔条
+  const hDivider = makeDivider('col');       // n>=3: 水平（上下行）分隔条
+  divider.dataset.gridDir = 'col';           // 网格模式下调整列宽
+  hDivider.dataset.gridDir = 'row';          // 网格模式下调整行高
   container.appendChild(divider);
-  tab._dividers.push(divider);
-  let dragging = false, dragDir = 'row', dragRatio = null;
+  container.appendChild(hDivider);
+  tab._dividers.push(divider, hDivider);
+  let dragging = false, dragDir = 'row', dragGridDir = null, dragRatio = null, dragEl = null;
+  const fitAll = () => [tab, ...tab.extraPanes].forEach(x => { try { x.fitAddon.fit(); } catch {} });
   const start = (e) => {
     if (e.button != null && e.button !== 0) return;
+    dragEl = e.currentTarget;
     dragging = true;
     dragDir = divider.dataset.dir || 'row';
+    dragGridDir = countPanes(tab) >= 3 ? (dragEl.dataset.gridDir || null) : null;
     dragRatio = null;
-    try { if (e.pointerId != null) divider.setPointerCapture(e.pointerId); } catch {}
+    try { if (e.pointerId != null) dragEl.setPointerCapture(e.pointerId); } catch {}
     e.preventDefault();
   };
   const move = (e) => {
     if (!dragging) return;
-    if (tab.extraPanes.length !== 1) {
-      if (tab.extraPanes.length > 1) setStatus('多分屏模式下暂不支持拖拽分隔条（仅双格可调）');
-      dragging = false;
+    const p = container.getBoundingClientRect();
+    if (countPanes(tab) >= 3) {
+      // 2×2 grid: adjust gridTemplateColumns / gridTemplateRows ratio (20%-80%).
+      if (!dragGridDir) { dragging = false; return; }
+      const computed = getComputedStyle(container);
+      const boxW = p.width - parseFloat(computed.paddingLeft) - parseFloat(computed.paddingRight);
+      const boxH = p.height - parseFloat(computed.paddingTop) - parseFloat(computed.paddingBottom);
+      const pos = dragGridDir === 'col' ? e.clientX - (p.left + parseFloat(computed.paddingLeft))
+                                        : e.clientY - (p.top + parseFloat(computed.paddingTop));
+      const size = dragGridDir === 'col' ? boxW : boxH;
+      if (!Number.isFinite(size) || size <= 0) return;
+      const ratio = clampGridRatio(pos / size);
+      dragRatio = ratio;
+      const current = splitGridRatios(tab);
+      const next = dragGridDir === 'col' ? { col: ratio, row: current.row } : { col: current.col, row: ratio };
+      container.style.gridTemplateColumns = `${next.col}fr ${1 - next.col}fr`;
+      container.style.gridTemplateRows = `${next.row}fr ${1 - next.row}fr`;
+      positionGridDividers(tab);
+      fitAll();
+      e.preventDefault();
       return;
     }
-    const p = container.getBoundingClientRect();
+    if (tab.extraPanes.length !== 1) { dragging = false; return; }
     const pos = dragDir === 'col' ? e.clientY - p.top : e.clientX - p.left;
     const size = dragDir === 'col' ? p.height : p.width;
     if (!Number.isFinite(size) || size <= 0) return;
@@ -2820,22 +3021,35 @@ function installSplitDragger(tab) {
     const main = container.querySelector('.term-host.main-pane');
     main.style.flex = `${ratio} 1 0`;
     tab.extraPanes[0].host.style.flex = `${1 - ratio} 1 0`;
-    [tab, ...tab.extraPanes].forEach(x => { try { x.fitAddon.fit(); } catch {} });
+    fitAll();
     e.preventDefault();
   };
   const end = (e) => {
     if (!dragging) return;
     dragging = false;
-    const main = container.querySelector('.term-host.main-pane');
-    const mFlex = main.style.flex || '';
-    const parsed = parseFloat(mFlex.split(' ')[0]);
-    const mRatio = clampSplitRatio(Number.isFinite(dragRatio) ? dragRatio : parsed);
+    if (dragGridDir) {
+      // Persist the dragged 2×2 grid ratio without clobbering the other axis.
+      const prefs = loadSplitPrefs();
+      const entry = prefs[tab.id] || {};
+      const grid = { col: clampGridRatio(entry.grid?.col), row: clampGridRatio(entry.grid?.row) };
+      grid[dragGridDir] = clampGridRatio(Number.isFinite(dragRatio) ? dragRatio : grid[dragGridDir]);
+      saveSplitPrefs({ ...prefs, [tab.id]: { ...entry, grid } });
+    } else {
+      const main = container.querySelector('.term-host.main-pane');
+      const mFlex = main.style.flex || '';
+      const parsed = parseFloat(mFlex.split(' ')[0]);
+      const mRatio = clampSplitRatio(Number.isFinite(dragRatio) ? dragRatio : parsed);
+      saveSplitPrefs({ ...loadSplitPrefs(), [tab.id]: { dir: dragDir, ratio: mRatio } });
+    }
     dragRatio = null;
-    saveSplitPrefs({ ...loadSplitPrefs(), [tab.id]: { dir: dragDir, ratio: mRatio } });
+    dragGridDir = null;
     saveTabs();
-    try { if (e?.pointerId != null) divider.releasePointerCapture(e.pointerId); } catch {}
+    fitAll();
+    try { if (e?.pointerId != null && dragEl) dragEl.releasePointerCapture(e.pointerId); } catch {}
+    dragEl = null;
   };
   divider.addEventListener('pointerdown', start);
+  hDivider.addEventListener('pointerdown', start);
   document.addEventListener('pointermove', move);
   document.addEventListener('pointerup', end);
   document.addEventListener('pointercancel', end);
@@ -3713,8 +3927,13 @@ function newTab(cfg, opts = {}) {
   term.onData((d) => handleUserInput(tab, d));
   term.onResize(({ cols, rows }) => send({ type: 'resize', id, cols, rows }));
 
-  // 窗口尺寸变化 → 重新适配
-  const ro = new ResizeObserver(() => { if (activeTabId === id) fitTerm(tab); });
+  // 窗口尺寸变化 → 重新适配（2×2 网格分隔条按比例跟随）
+  const ro = new ResizeObserver(() => {
+    if (activeTabId === id) {
+      fitTerm(tab);
+      if (countPanes(tab) >= 3) positionGridDividers(tab);
+    }
+  });
   ro.observe(container);
   tab._resizeObserver = ro;
 

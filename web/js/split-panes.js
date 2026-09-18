@@ -20,9 +20,19 @@ function clampSplitRatio(value) {
   const ratio = Number(value);
   return Number.isFinite(ratio) ? Math.max(0.1, Math.min(0.9, ratio)) : 0.5;
 }
+function clampGridRatio(value) {
+  const ratio = Number(value);
+  return Number.isFinite(ratio) ? Math.max(0.2, Math.min(0.8, ratio)) : 0.5;
+}
 function splitRatio(tab) {
   const prefs = loadSplitPrefs();
   return clampSplitRatio(prefs[tab.id] ? prefs[tab.id].ratio : 0.5);
+}
+// 2×2 grid layout ratios (col: left column width, row: top row height).
+function splitGridRatios(tab) {
+  const prefs = loadSplitPrefs();
+  const grid = (prefs[tab.id] && prefs[tab.id].grid) || {};
+  return { col: clampGridRatio(grid.col), row: clampGridRatio(grid.row) };
 }
 function findPane(tab, connId) {
   if (tab.id === connId) return tab;
@@ -114,6 +124,41 @@ function removePane(tab, pane) {
   scheduleTabsSave();
 }
 
+function applyGridRatios(tab) {
+  const container = tab.host;
+  if (!container) return;
+  const { col, row } = splitGridRatios(tab);
+  container.style.gridTemplateColumns = `${col}fr ${1 - col}fr`;
+  container.style.gridTemplateRows = `${row}fr ${1 - row}fr`;
+}
+
+function positionGridDividers(tab) {
+  const container = tab.host;
+  if (!container || countPanes(tab) < 3 || container.classList.contains('hidden')) return;
+  const rect = container.getBoundingClientRect();
+  if (!rect.width || !rect.height) return;
+  const computed = getComputedStyle(container);
+  const boxW = rect.width - parseFloat(computed.paddingLeft) - parseFloat(computed.paddingRight);
+  const boxH = rect.height - parseFloat(computed.paddingTop) - parseFloat(computed.paddingBottom);
+  if (!(boxW > 0) || !(boxH > 0)) return;
+  const { col, row } = splitGridRatios(tab);
+  const [v, h] = tab._dividers || [];
+  if (v) {
+    v.className = 'split-divider grid-divider';
+    v.style.display = 'block';
+    v.style.left = (col * boxW) + 'px';
+    v.style.top = '0';
+    v.style.height = boxH + 'px';
+  }
+  if (h) {
+    h.className = 'split-divider grid-divider col';
+    h.style.display = 'block';
+    h.style.top = (row * boxH) + 'px';
+    h.style.left = '0';
+    h.style.width = boxW + 'px';
+  }
+}
+
 function applySplitLayout(tab, dir, ratio) {
   const container = tab.host;
   const main = container.querySelector('.term-host.main-pane');
@@ -121,7 +166,7 @@ function applySplitLayout(tab, dir, ratio) {
   ratio = clampSplitRatio(ratio);
   const n = countPanes(tab);
   if (n <= 1 || dir === 'none') {
-    if (tab._dividers?.[0]) tab._dividers[0].style.display = 'none';
+    (tab._dividers || []).forEach(d => { d.style.display = 'none'; });
     main.style.display = '';
     main.style.flex = '';
     main.style.gridColumn = '';
@@ -139,8 +184,10 @@ function applySplitLayout(tab, dir, ratio) {
     if (divider) {
       divider.className = 'split-divider' + (dir === 'col' ? ' col' : '');
       divider.dataset.dir = dir;
+      ['left', 'top', 'width', 'height'].forEach(prop => { divider.style[prop] = ''; });
       divider.style.display = '';
     }
+    if (tab._dividers?.[1]) tab._dividers[1].style.display = 'none';
     container.style.display = '';
     container.style.gridTemplateColumns = '';
     container.style.gridTemplateRows = '';
@@ -148,17 +195,17 @@ function applySplitLayout(tab, dir, ratio) {
     main.style.flex = `${ratio} 1 0`;
     tab.extraPanes[0].host.style.flex = `${1 - ratio} 1 0`;
   } else if (n >= 3) {
-    if (tab._dividers?.[0]) tab._dividers[0].style.display = 'none';
-    // 3-4 pane: 2x2 grid
+    // 3-4 pane: 2x2 grid with draggable dividers (n===3 leaves the last cell empty).
     container.style.flexDirection = 'column';
     container.style.display = 'grid';
-    container.style.gridTemplateColumns = '1fr 1fr';
-    container.style.gridTemplateRows = '1fr 1fr';
+    applyGridRatios(tab);
     [main, ...tab.extraPanes.map(p => p.host)].forEach((hostEl, idx) => {
       hostEl.style.flex = '';
       hostEl.style.gridColumn = (idx % 2) + 1;
       hostEl.style.gridRow = Math.floor(idx / 2) + 1;
     });
+    positionGridDividers(tab);
+    setTimeout(() => positionGridDividers(tab), 60);
   }
   // save prefs for first pane dir/ratio
   if (!loadSplitPrefs()[tab.id]) saveSplitPrefs({ ...loadSplitPrefs(), [tab.id]: { dir, ratio } });
@@ -199,26 +246,52 @@ function installSplitDragger(tab) {
     return d;
   };
   tab._dividers = [];
-  let divider = makeDivider('row');
+  // NOTE: divider[0] is shared — flex mode (n=2) restyles it via dataset.dir;
+  // grid mode (n>=3) treats it as the vertical divider via dataset.gridDir.
+  const divider = makeDivider('row');        // n=2: 双向复用；n>=3: 垂直（左右列）分隔条
+  const hDivider = makeDivider('col');       // n>=3: 水平（上下行）分隔条
+  divider.dataset.gridDir = 'col';           // 网格模式下调整列宽
+  hDivider.dataset.gridDir = 'row';          // 网格模式下调整行高
   container.appendChild(divider);
-  tab._dividers.push(divider);
-  let dragging = false, dragDir = 'row', dragRatio = null;
+  container.appendChild(hDivider);
+  tab._dividers.push(divider, hDivider);
+  let dragging = false, dragDir = 'row', dragGridDir = null, dragRatio = null, dragEl = null;
+  const fitAll = () => [tab, ...tab.extraPanes].forEach(x => { try { x.fitAddon.fit(); } catch {} });
   const start = (e) => {
     if (e.button != null && e.button !== 0) return;
+    dragEl = e.currentTarget;
     dragging = true;
     dragDir = divider.dataset.dir || 'row';
+    dragGridDir = countPanes(tab) >= 3 ? (dragEl.dataset.gridDir || null) : null;
     dragRatio = null;
-    try { if (e.pointerId != null) divider.setPointerCapture(e.pointerId); } catch {}
+    try { if (e.pointerId != null) dragEl.setPointerCapture(e.pointerId); } catch {}
     e.preventDefault();
   };
   const move = (e) => {
     if (!dragging) return;
-    if (tab.extraPanes.length !== 1) {
-      if (tab.extraPanes.length > 1) setStatus('多分屏模式下暂不支持拖拽分隔条（仅双格可调）');
-      dragging = false;
+    const p = container.getBoundingClientRect();
+    if (countPanes(tab) >= 3) {
+      // 2×2 grid: adjust gridTemplateColumns / gridTemplateRows ratio (20%-80%).
+      if (!dragGridDir) { dragging = false; return; }
+      const computed = getComputedStyle(container);
+      const boxW = p.width - parseFloat(computed.paddingLeft) - parseFloat(computed.paddingRight);
+      const boxH = p.height - parseFloat(computed.paddingTop) - parseFloat(computed.paddingBottom);
+      const pos = dragGridDir === 'col' ? e.clientX - (p.left + parseFloat(computed.paddingLeft))
+                                        : e.clientY - (p.top + parseFloat(computed.paddingTop));
+      const size = dragGridDir === 'col' ? boxW : boxH;
+      if (!Number.isFinite(size) || size <= 0) return;
+      const ratio = clampGridRatio(pos / size);
+      dragRatio = ratio;
+      const current = splitGridRatios(tab);
+      const next = dragGridDir === 'col' ? { col: ratio, row: current.row } : { col: current.col, row: ratio };
+      container.style.gridTemplateColumns = `${next.col}fr ${1 - next.col}fr`;
+      container.style.gridTemplateRows = `${next.row}fr ${1 - next.row}fr`;
+      positionGridDividers(tab);
+      fitAll();
+      e.preventDefault();
       return;
     }
-    const p = container.getBoundingClientRect();
+    if (tab.extraPanes.length !== 1) { dragging = false; return; }
     const pos = dragDir === 'col' ? e.clientY - p.top : e.clientX - p.left;
     const size = dragDir === 'col' ? p.height : p.width;
     if (!Number.isFinite(size) || size <= 0) return;
@@ -227,22 +300,35 @@ function installSplitDragger(tab) {
     const main = container.querySelector('.term-host.main-pane');
     main.style.flex = `${ratio} 1 0`;
     tab.extraPanes[0].host.style.flex = `${1 - ratio} 1 0`;
-    [tab, ...tab.extraPanes].forEach(x => { try { x.fitAddon.fit(); } catch {} });
+    fitAll();
     e.preventDefault();
   };
   const end = (e) => {
     if (!dragging) return;
     dragging = false;
-    const main = container.querySelector('.term-host.main-pane');
-    const mFlex = main.style.flex || '';
-    const parsed = parseFloat(mFlex.split(' ')[0]);
-    const mRatio = clampSplitRatio(Number.isFinite(dragRatio) ? dragRatio : parsed);
+    if (dragGridDir) {
+      // Persist the dragged 2×2 grid ratio without clobbering the other axis.
+      const prefs = loadSplitPrefs();
+      const entry = prefs[tab.id] || {};
+      const grid = { col: clampGridRatio(entry.grid?.col), row: clampGridRatio(entry.grid?.row) };
+      grid[dragGridDir] = clampGridRatio(Number.isFinite(dragRatio) ? dragRatio : grid[dragGridDir]);
+      saveSplitPrefs({ ...prefs, [tab.id]: { ...entry, grid } });
+    } else {
+      const main = container.querySelector('.term-host.main-pane');
+      const mFlex = main.style.flex || '';
+      const parsed = parseFloat(mFlex.split(' ')[0]);
+      const mRatio = clampSplitRatio(Number.isFinite(dragRatio) ? dragRatio : parsed);
+      saveSplitPrefs({ ...loadSplitPrefs(), [tab.id]: { dir: dragDir, ratio: mRatio } });
+    }
     dragRatio = null;
-    saveSplitPrefs({ ...loadSplitPrefs(), [tab.id]: { dir: dragDir, ratio: mRatio } });
+    dragGridDir = null;
     saveTabs();
-    try { if (e?.pointerId != null) divider.releasePointerCapture(e.pointerId); } catch {}
+    fitAll();
+    try { if (e?.pointerId != null && dragEl) dragEl.releasePointerCapture(e.pointerId); } catch {}
+    dragEl = null;
   };
   divider.addEventListener('pointerdown', start);
+  hDivider.addEventListener('pointerdown', start);
   document.addEventListener('pointermove', move);
   document.addEventListener('pointerup', end);
   document.addEventListener('pointercancel', end);

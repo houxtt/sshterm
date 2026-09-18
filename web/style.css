@@ -231,7 +231,23 @@ button.mini { padding: 2px 8px; font-size: 11px; }
 .sftp-size { width: 60px; text-align: right; color: #565f89; }
 .sftp-time { width: 72px; text-align: right; color: #565f89; font-size: 11px; }
 .sftp-item .sftp-dl { padding: 0 6px; font-size: 12px; }
+.sftp-item .sftp-rename, .sftp-item .sftp-del { padding: 0 6px; font-size: 12px; }
 .sftp-status { padding: 5px 10px; border-top: 1px solid #2a2b3a; color: #565f89; font-size: 11px; }
+
+/* SFTP 右键菜单 (重命名/删除/权限) */
+.sftp-ctx-menu {
+  position: fixed; z-index: 1000; min-width: 110px;
+  background: #1f2030; border: 1px solid #3b4261; border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(0,0,0,.45); padding: 4px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.sftp-ctx-item {
+  background: none; border: 0; color: #c0caf5; text-align: left;
+  padding: 6px 10px; font-size: 12px; border-radius: 4px; cursor: pointer;
+}
+.sftp-ctx-item:hover { background: #2a354f; }
+.sftp-ctx-item.danger { color: #f7768e; }
+.sftp-ctx-item.danger:hover { background: #7f1d1d; color: #fff; }
 
 /* 分屏 pane */
 #terms .split-container {
@@ -252,6 +268,14 @@ button.mini { padding: 2px 8px; font-size: 11px; }
   touch-action: none; user-select: none;
 }
 .split-divider.col { cursor: row-resize; width: auto; height: 5px; border-left: none; border-right: none; border-top: 1px solid #1f2030; border-bottom: 1px solid #1f2030; }
+/* 2×2 网格模式：分隔条绝对定位悬浮于格线之上（transform 使分隔条居中于分割线） */
+#terms .split-container .split-divider.grid-divider {
+  position: absolute; z-index: 8; flex-shrink: 0;
+  width: 5px; height: auto; transform: translateX(-50%);
+}
+#terms .split-container .split-divider.grid-divider.col {
+  width: auto; height: 5px; transform: translateY(-50%);
+}
 .pane-close {
   position: absolute; top: 4px; right: 8px; z-index: 9;
   background: rgba(0,0,0,.5); color: #ef4444; border: none;

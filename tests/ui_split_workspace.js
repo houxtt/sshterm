@@ -98,6 +98,88 @@ function waitForServer(deadline = Date.now() + 10000) {
     const ratio = await page.$eval('.term-host.main-pane', element => parseFloat(element.style.flex));
     assert(ratio > 0.3 && ratio < 0.4, `unexpected split ratio ${ratio}`);
 
+    // 2×2 grid: adding a third pane must reveal draggable grid dividers.
+    await page.click('#btn-split');
+    await sleep(350);
+    const grid = await page.evaluate(() => {
+      const container = document.querySelector('.split-container:not(.hidden)');
+      const dividers = [...(container?.querySelectorAll('.split-divider') || [])];
+      return {
+        panes: container?.querySelectorAll('.term-host.pane-split').length || 0,
+        display: container?.style.display,
+        cols: container?.style.gridTemplateColumns,
+        rows: container?.style.gridTemplateRows,
+        gridDividers: dividers.filter(d => d.classList.contains('grid-divider')
+          && getComputedStyle(d).display !== 'none').length,
+      };
+    });
+    assert.strictEqual(grid.panes, 2, 'third split must add a second extra pane');
+    assert.strictEqual(grid.display, 'grid');
+    assert.strictEqual(grid.gridDividers, 2, '2×2 grid must show both grid dividers');
+    assert(grid.cols.includes('fr') && grid.rows.includes('fr'));
+
+    // Drag the vertical grid divider: column ratio must change and persist.
+    const containerBox2 = await (await page.$('.split-container:not(.hidden)')).boundingBox();
+    const vDivider = await page.$('.split-divider.grid-divider:not(.col)');
+    const vBox = await vDivider.boundingBox();
+    // Grab away from the center crossing, where the horizontal divider overlays.
+    await page.mouse.move(vBox.x + vBox.width / 2, vBox.y + 30);
+    await page.mouse.down();
+    await page.mouse.move(containerBox2.x + containerBox2.width * 0.3, vBox.y + 30);
+    await page.mouse.up();
+    await sleep(100);
+    const gridAfter = await page.evaluate(() => {
+      const container = document.querySelector('.split-container:not(.hidden)');
+      const tab = tabs.find(t => t.id === activeTabId);
+      return {
+        cols: container.style.gridTemplateColumns,
+        saved: JSON.parse(localStorage.getItem('sshterm.split') || '{}')[tab.id]?.grid,
+      };
+    });
+    const colRatio = parseFloat(gridAfter.cols);
+    assert(colRatio > 0.24 && colRatio < 0.36, `unexpected grid col ratio ${colRatio}`);
+    assert(gridAfter.saved && Math.abs(gridAfter.saved.col - colRatio) < 0.001,
+      'grid col ratio must persist to sshterm.split prefs');
+
+    // Drag the horizontal grid divider: row ratio must change and persist.
+    const hDivider = await page.$('.split-divider.grid-divider.col');
+    const hBox = await hDivider.boundingBox();
+    // Same here: avoid the center crossing, where the vertical divider overlays.
+    await page.mouse.move(hBox.x + 30, hBox.y + hBox.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(hBox.x + 30, containerBox2.y + containerBox2.height * 0.7);
+    await page.mouse.up();
+    await sleep(100);
+    const gridAfter2 = await page.evaluate(() => {
+      const container = document.querySelector('.split-container:not(.hidden)');
+      const tab = tabs.find(t => t.id === activeTabId);
+      return {
+        rows: container.style.gridTemplateRows,
+        saved: JSON.parse(localStorage.getItem('sshterm.split') || '{}')[tab.id]?.grid,
+      };
+    });
+    const rowRatio = parseFloat(gridAfter2.rows);
+    assert(rowRatio > 0.64 && rowRatio < 0.76, `unexpected grid row ratio ${rowRatio}`);
+    assert(gridAfter2.saved && Math.abs(gridAfter2.saved.row - rowRatio) < 0.001,
+      'grid row ratio must persist to sshterm.split prefs');
+    assert.deepStrictEqual(pageErrors, [], `grid drag raised page errors: ${pageErrors.join('; ')}`);
+
+    // Back to 2 panes: flex layout and its single divider must be restored.
+    await page.click('.term-host.pane-split .pane-close');
+    await sleep(250);
+    const backToTwo = await page.evaluate(() => {
+      const container = document.querySelector('.split-container:not(.hidden)');
+      const dividers = [...(container?.querySelectorAll('.split-divider') || [])];
+      return {
+        panes: container?.querySelectorAll('.term-host.pane-split').length || 0,
+        display: container?.style.display,
+        flexDirection: container?.style.flexDirection,
+        visibleDividers: dividers.filter(d => getComputedStyle(d).display !== 'none').length,
+      };
+    });
+    assert.deepStrictEqual(backToTwo, { panes: 1, display: '', flexDirection: 'row', visibleDividers: 1 });
+    assert.deepStrictEqual(pageErrors, [], `grid teardown raised page errors: ${pageErrors.join('; ')}`);
+
     await page.click('#btn-workspace');
     assert.strictEqual(await page.$eval('#dlg-workspace-mask', el => !el.classList.contains('hidden')), true);
     await page.click('#workspace-save');
@@ -106,7 +188,8 @@ function waitForServer(deadline = Date.now() + 10000) {
     assert.strictEqual(saved.tabs.length, 1);
     assert.strictEqual(saved.tabs[0].id, 1);
     assert.strictEqual(saved.tabs[0].panes, 1);
-    assert.deepStrictEqual(saved.tabs[0].paneIds, [2]);
+    // The first extra pane (id 2) was closed above; pane id 3 remains.
+    assert.deepStrictEqual(saved.tabs[0].paneIds, [3]);
     assert(saved.tabs[0].split.ratio > 0.3 && saved.tabs[0].split.ratio < 0.4);
 
     // Change the live layout, then prove workspace restore recreates it.
