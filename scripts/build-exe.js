@@ -5,9 +5,10 @@
 // 产物: dist/sshterm.exe
 //   - 双击即启动后台服务并自动打开浏览器 http://127.0.0.1:8787
 //   - 无需对方安装 Node.js
-//   - 已排除 .git / tests / perf-proto / 源码脚本等非运行时文件，体积约 160MB
+//   - 已用 staging 只打包运行时 (server / web / node_modules)，体积约 50MB
 const { execSync } = require('child_process');
-const { existsSync, mkdirSync } = require('fs');
+const { existsSync, mkdirSync, copyFileSync, cpSync, rmSync } = require('fs');
+const os = require('os');
 const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
@@ -28,37 +29,44 @@ try {
 // 2. 确保 dist/
 mkdirSync(OUT, { recursive: true });
 
-// 3. 排除非运行时目录/文件, 缩小体积
-const EXCLUDE = [
-  '.git', 'tests', 'perf-proto', 'dist', 'assets',
-  'node_modules/.cache', '*.log', 'scripts',
-  // vendor/ 只被浏览器测试 (puppeteer) 使用; docs/ 与运行无关。
-  // 不排除会把产物撑大数百 MB。
-  'vendor', 'docs',
-  '*.bat', '*.vbs', 'README.md', 'package-lock.json'
-];
-const excludeArgs = EXCLUDE.map(e => ` --exclude "${e}"`).join('');
+// 3. 构建采用 staging 目录: 只复制运行时文件再打包, 不依赖 caxa 的
+//    --exclude 语义 (实测对目录不生效, 曾把产物撑到 1GB)。
+const STAGING = path.join(os.tmpdir(), `sshterm-caxa-${process.pid}`);
+const COPY_DIRS = ['server', 'web', 'node_modules'];
+const COPY_FILES = ['package.json', 'LICENSE'];
+
+function prepareStaging() {
+  mkdirSync(STAGING, { recursive: true });
+  for (const dir of COPY_DIRS) {
+    cpSync(path.join(ROOT, dir), path.join(STAGING, dir), { recursive: true });
+  }
+  for (const file of COPY_FILES) {
+    copyFileSync(path.join(ROOT, file), path.join(STAGING, file));
+  }
+  console.log(`│ staging: ${STAGING}`);
+}
 
 // 5. 验证运行时资源 (串口释放脚本必须包含在产物中)
 function assertRuntimeResources() {
   const required = [
     path.join(ROOT, 'server', 'free-serial.ps1'),
     path.join(ROOT, 'server', 'index.js'),
+    path.join(STAGING, 'node_modules', 'serialport', 'package.json'),
   ];
   for (const file of required) {
     if (!existsSync(file)) throw new Error(`缺少运行时资源: ${file}`);
   }
 }
-assertRuntimeResources();
 
 // 4. 构建 (不传 --no-open, 双击自动开浏览器; 对方如需静默可加 --no-open)
 console.log(`│ 输出: ${TARGET}`);
 console.log('│ 打包中 (可能需要几分钟)…');
 try {
+  prepareStaging();
+  assertRuntimeResources();
   execSync(
-    `npx caxa --input "${ROOT}"` +
+    `npx caxa --input "${STAGING}"` +
     ` --output "${TARGET}"` +
-    excludeArgs +
     ` -- "{{caxa}}/node_modules/.bin/node" "{{caxa}}/server/index.js"`,
     { stdio: 'inherit', cwd: ROOT }
   );
@@ -67,9 +75,13 @@ try {
   console.log('│ 双击 sshterm.exe 启动 (后台服务 + 自动打开浏览器 http://127.0.0.1:8787)');
 } catch (e) {
   console.log('│ ❌ caxa 构建失败');
+  const detail = [e.stderr, e.stdout, e.message].filter(Boolean).join('\n').trim();
+  if (detail) console.log(detail.split('\n').map(l => `│ ${l}`).join('\n'));
   console.log('│ 备选方案: ');
   console.log('│   1. 确保已安装 Node.js 和 npx caxa');
   console.log('│   2. 双击 run.bat 即可启动 (无需 EXE)');
   process.exitCode = 1;
+} finally {
+  try { rmSync(STAGING, { recursive: true, force: true }); } catch {}
 }
 console.log('└──────────────────────────────────────┘');
