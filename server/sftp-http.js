@@ -91,7 +91,11 @@ function handleSftpHttp(req, res, ctx) {
       return res.end('上传参数错误(连接或文件名无效)');
     }
     const remotePath = dir.endsWith('/') ? dir + name : `${dir}/${name}`;
-    const uploadKey = `${conn.id}:${remotePath}`;
+    // Include the window namespace so identical conn ids in different browser
+    // windows cannot collide, while uploads from the same window sharing one
+    // connection still block each other on the same remote file.
+    const windowId = String(qs.get('window') || '');
+    const uploadKey = `${windowId}:${conn.id}:${remotePath}`;
     if (uploadState.n >= MAX_CONCURRENT_UPLOADS) {
       res.writeHead(429, { 'Content-Type': 'text/plain; charset=utf-8', 'Retry-After': '2' });
       return res.end('上传队列繁忙，请稍后重试');

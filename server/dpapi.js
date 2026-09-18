@@ -53,6 +53,8 @@ function aesGcmDecrypt(blob) {
   return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString('utf8');
 }
 
+const DPAPI_TIMEOUT_MS = 10000;
+
 function runPowerShell(script, input) {
   const encodedCommand = Buffer.from(script, 'utf16le').toString('base64');
   const result = spawnSync('powershell.exe', [
@@ -63,7 +65,11 @@ function runPowerShell(script, input) {
     encoding: 'utf8',
     windowsHide: true,
     maxBuffer: 16 * 1024 * 1024,
+    timeout: DPAPI_TIMEOUT_MS,
   });
+  if (result.error && result.error.code === 'ETIMEDOUT') {
+    throw new Error(`Windows DPAPI 操作超时（>${DPAPI_TIMEOUT_MS / 1000}s）`);
+  }
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`Windows DPAPI 操作失败（PowerShell 退出码 ${result.status}）`);
   return (result.stdout || '').trim();

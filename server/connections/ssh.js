@@ -337,6 +337,19 @@ class SSHConnection extends BaseConnection {
           finish(() => resolve());
         });
       });
+      // Guard: ssh2 can emit 'close' without 'error' when the remote end
+      // drops the TCP connection before authentication completes.  Without
+      // this the connect() Promise would stay pending forever and the
+      // handshake scheduler would queue subsequent connections to the same
+      // host indefinitely.
+      client.on('close', (hadError) => {
+        if (!settled && this.state === 'connecting') {
+          const err = hadError
+            ? new Error('SSH 连接异常中断(网络问题)')
+            : new Error('SSH 连接已关闭(远端)');
+          finish(() => reject(err));
+        }
+      });
       client.on('error', (e) => {
         // A timeout destroys ssh2's socket, which then emits the secondary
         // "Connection lost before handshake" error.  Report the useful root
