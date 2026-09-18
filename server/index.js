@@ -316,16 +316,19 @@ async function doConnect(ws, cfg, tabId) {
   log('info', `连接 ${cfg.name || cfg.type}:${cfg.host || cfg.port || cfg.port} (${cfg.type})`);
 
   // 终端输出自动落盘: ~/.sshterm/session-logs/<会话名>-<时间戳>.log
+  // 隐私: 默认关闭，需用户显式在会话配置勾选"记录会话日志"才启用。
   const enc = cfg.encoding || 'utf-8';
   const safeName = (cfg.name || cfg.type).replace(/[\\/:*?"<>|]/g, '_');
   const sts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   const sessionLogFile = path.join(SESSION_LOG_DIR, `${safeName}-${sts}.log`);
-  try { fs.mkdirSync(SESSION_LOG_DIR, { recursive: true }); } catch (e) {}
   let sessionLogStream = null;
   let sessionLogDecoder = null;
-  try { sessionLogStream = fs.createWriteStream(sessionLogFile, { flags: 'a' }); }
-  catch (e) { console.log('[session-log] 创建失败:', e.message); }
-  sessionLogStream?.on('error', (e) => log('error', `[session-log] 写入失败: ${e.message}`));
+  if (cfg.sessionLog === true) {
+    try { fs.mkdirSync(SESSION_LOG_DIR, { recursive: true }); } catch (e) {}
+    try { sessionLogStream = fs.createWriteStream(sessionLogFile, { flags: 'a' }); }
+    catch (e) { console.log('[session-log] 创建失败:', e.message); }
+    sessionLogStream?.on('error', (e) => log('error', `[session-log] 写入失败: ${e.message}`));
+  }
 
   conn.on('data', (d) => {
     sendConnectionData(conn, connId, d);

@@ -1281,6 +1281,7 @@ function openDlg(existing = null) {
   // restarts. New sessions therefore opt in to Windows-encrypted credential
   // storage by default; existing sessions retain the user's explicit choice.
   $('f-remember').checked = existing ? !!existing.rememberPassword : true;
+  $('f-session-log').checked = existing ? !!existing.sessionLog : false;
   $('f-proxy-type').value = existing?.proxy?.type || '';
   $('f-proxy-host').value = existing?.proxy?.host || '';
   $('f-proxy-port').value = existing?.proxy?.port || '';
@@ -1353,6 +1354,7 @@ function collectDlg() {
     group: $('f-group').value.trim() || undefined,
     type,
     rememberPassword: type !== 'serial' && $('f-remember').checked,
+    sessionLog: type !== 'serial' && $('f-session-log').checked,
   };
   if (type === 'ssh') {
     const ptype = $('f-proxy-type').value;

@@ -89,6 +89,7 @@ const DOM_TEXT_EN = {
   '跳板私钥路径': 'Jump Private Key Path', '跳板密钥口令': 'Jump Key Passphrase',
   '自动登录': 'Auto Login', '只读模式': 'View Only', '断线自动重连': 'Reconnect Automatically',
   '记住凭据（使用 Windows DPAPI 加密）': 'Remember Credentials (Windows DPAPI encrypted)',
+  '记录会话日志（明文保存到本地文件，含终端输出）': 'Record Session Log (plain text saved locally, includes terminal output)',
   '连接后自动执行(每行一条)': 'Run After Connect (one command per line)', '串口': 'Serial',
   '波特率': 'Baud Rate', '数据位': 'Data Bits', '停止位': 'Stop Bits', '校验位': 'Parity',
   '编码': 'Encoding', 'RTS/CTS 硬件流控': 'RTS/CTS Hardware Flow Control',

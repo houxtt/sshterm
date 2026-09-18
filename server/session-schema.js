@@ -8,7 +8,7 @@ const ALLOWED = [
   'encoding', 'baudRate', 'dataBits', 'stopBits', 'parity', 'flowControl',
   'tunnels', 'proxy', 'jumpAuth', 'agentForward',
   'group', 'autoCmds', 'rtscts', 'hexMode', 'timestamp', 'trigger', 'viewOnly',
-  'connect', 'readonly', 'replay',
+  'connect', 'readonly', 'replay', 'sessionLog',
 ];
 
 function sanitizeSession(s) {
