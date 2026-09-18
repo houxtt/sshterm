@@ -406,13 +406,23 @@ function sendInput(tabId, str, encoding) {
   }
 }
 
+function mfaTargetText(info) {
+  const target = info && info.target;
+  if (!target || !target.host) return '';
+  const endpoint = `${target.host}:${target.port || 22}`;
+  if (!target.hopTotal) return endpoint;
+  return `${t('mfa_jump')} ${target.hopIndex}/${target.hopTotal} · ${endpoint}`;
+}
+
 function showMfaDialog(tabId, info) {
   return new Promise((resolve) => {
     const mask = $('dlg-mfa-mask');
     const promptsEl = $('mfa-prompts');
     const instructionsEl = $('mfa-instructions');
+    const targetEl = $('mfa-target');
     const inputs = [];
-    instructionsEl.textContent = [info.name, info.instructions].filter(Boolean).join('\n') || '请输入验证码或多因素认证信息';
+    if (targetEl) targetEl.textContent = mfaTargetText(info);
+    instructionsEl.textContent = [info.name, info.instructions].filter(Boolean).join('\n') || t('mfa_hint');
     promptsEl.innerHTML = (info.prompts || []).map((p, i) => {
       const label = esc(p.prompt || `提示 ${i + 1}`);
       const type = p.echo ? 'text' : 'password';

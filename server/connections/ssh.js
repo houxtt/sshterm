@@ -16,49 +16,83 @@ function readyTimeoutFor(config) {
     ? Math.trunc(value) : DEFAULT_READY_TIMEOUT;
 }
 
-function answerInteractivePrompts(prompts, password) {
-  return (prompts || []).map((p) => {
-    const prompt = String((p && p.prompt) || p || '');
-    if (/password|passcode|passphrase|口令|密码/i.test(prompt)) return password || '';
-    return '';
-  });
+// Prompts that are really a second factor must be answered by the user even
+// when the wording also contains "password" (e.g. "One-time password:").
+const OTP_PROMPT_RE = /one[-\s]?time|\botp\b|passcode|verification|verify|authenticator|dynamic|token|challenge|验证码|动态口令|动态密码|令牌|校验码/i;
+const SECRET_PROMPT_RE = /password|passphrase|口令|密码/i;
+
+function promptNeedsUserInput(prompt) {
+  if (OTP_PROMPT_RE.test(prompt)) return true;
+  return !SECRET_PROMPT_RE.test(prompt);
 }
 
-function promptsNeedUserInput(prompts, password) {
-  return (prompts || []).some((p) => {
+// Split one keyboard-interactive round into answers the server can fill in
+// itself and prompts that must be answered by the user.  Password-like
+// prompts are answered from the stored credential so the secret never has to
+// travel to the browser; everything else (OTP / verification code / second
+// factor) is asked in the UI, which is what makes jump-host MFA usable.
+function interactiveAnswerPlan(prompts, password) {
+  const answers = [];
+  const ask = [];
+  (prompts || []).forEach((p, index) => {
     const prompt = String((p && p.prompt) || p || '');
-    if (/password|passcode|passphrase|口令|密码/i.test(prompt)) return !password;
-    return true;
+    if (!promptNeedsUserInput(prompt) && password) {
+      answers[index] = String(password);
+      return;
+    }
+    answers[index] = '';
+    ask.push({ index, prompt, echo: !(p && p.echo === false) });
   });
+  return { answers, ask };
 }
 
-function attachKeyboardInteractive(client, connection, password) {
+// Merge user-supplied values (only for the asked prompts) back into the
+// server-side plan, preserving prompt order for ssh2's finish() callback.
+function mergeInteractiveAnswers(plan, userValues) {
+  const out = plan.answers.slice();
+  const values = Array.isArray(userValues) ? userValues : [];
+  plan.ask.forEach((entry, i) => {
+    const value = values[i];
+    out[entry.index] = String(value == null ? '' : value);
+  });
+  return out;
+}
+
+const MFA_TIMEOUT_MS = 120000;
+
+function attachKeyboardInteractive(client, connection, password, options = {}) {
+  const target = options.target || null;
+  const targetText = target
+    ? (target.hopTotal ? `跳板机 ${target.hopIndex}/${target.hopTotal} ${target.host}:${target.port}` : `${target.host}:${target.port}`)
+    : '';
   client.on('keyboard-interactive', (name, instructions, lang, prompts, finish) => {
-    const normalized = (prompts || []).map((p) => ({
-      prompt: String((p && p.prompt) || p || ''),
-      echo: !(p && p.echo === false),
-    }));
-    if (!promptsNeedUserInput(prompts, password)) {
-      finish(answerInteractivePrompts(prompts, password));
+    const plan = interactiveAnswerPlan(prompts, password);
+    if (!plan.ask.length) {
+      finish(plan.answers);
       return;
     }
     if (connection._pendingInteractive) {
       finish([]);
       return;
     }
-    connection._pendingInteractive = {
-      finish,
-      timer: setTimeout(() => {
-        if (!connection._pendingInteractive) return;
-        connection._pendingInteractive = null;
-        try { finish([]); } catch {}
-        connection._emitError('MFA 验证超时');
-      }, 120000),
+    // `finish` is wrapped so the pending slot accepts the user's answers for
+    // the asked prompts only; the stored password stays server-side.
+    const complete = (userValues) => {
+      try { finish(mergeInteractiveAnswers(plan, userValues)); } catch {}
     };
+    const timer = setTimeout(() => {
+      if (!connection._pendingInteractive) return;
+      connection._pendingInteractive = null;
+      complete([]);
+      connection._emitError(targetText ? `${targetText} MFA 验证超时` : 'MFA 验证超时');
+    }, MFA_TIMEOUT_MS);
+    connection._pendingInteractive = { finish: complete, target, timer };
     connection.emit('interactive-auth', {
       name: String(name || ''),
       instructions: String(instructions || ''),
-      prompts: normalized,
+      label: targetText,
+      target,
+      prompts: plan.ask.map(a => ({ prompt: a.prompt, echo: a.echo })),
     });
   });
 }
@@ -272,7 +306,8 @@ class SSHConnection extends BaseConnection {
     // direct-tcpip channel becomes the socket for the next hop/target.
     let upstream = null;
     this.jumpClients = [];
-    for (const hop of jumps) {
+    for (let hopIndex = 0; hopIndex < jumps.length; hopIndex++) {
+      const hop = jumps[hopIndex];
       // A jump chain can use credentials unrelated to the destination.  The
       // UI supplies one credential set for the chain; an explicit user@host
       // in ProxyJump remains the highest-priority username.
@@ -283,7 +318,13 @@ class SSHConnection extends BaseConnection {
       if (upstream) jumpCfg.sock = await forwardThrough(upstream, hop.host, hop.port);
       const jump = new Client();
       if (jumpCfg.tryKeyboard) {
-        jump.on('keyboard-interactive', (n, i, l, prompts, finishKb) => finishKb(answerInteractivePrompts(prompts, jumpCredentials.password)));
+        // Jump hosts frequently enforce MFA (OTP / second factor) and cannot be
+        // satisfied by silently replaying the stored password.  Route the hop
+        // through the same interactive-auth UI as the destination, tagged with
+        // which hop is asking, so the user can answer multi-round challenges.
+        attachKeyboardInteractive(jump, this, jumpCredentials.password, {
+          target: { host: hop.host, port: hop.port, hopIndex: hopIndex + 1, hopTotal: jumps.length },
+        });
       }
       await waitReady(jump, jumpCfg);
       armSocketKeepalive(jump);
@@ -304,7 +345,7 @@ class SSHConnection extends BaseConnection {
         fn();
       };
       if (cfg.tryKeyboard) {
-        attachKeyboardInteractive(client, this, password);
+        attachKeyboardInteractive(client, this, password, { target: { host, port } });
       }
       if (this._rejectIfClosed()) {
         finish(() => reject(Object.assign(new Error('SSH 连接已取消'), { code: 'SSH_CONNECT_CANCELLED' })));
@@ -1005,5 +1046,9 @@ class SSHConnection extends BaseConnection {
     }
 }
 
-SSHConnection._test = { readyTimeoutFor, connectionErrorMessage, forceDestroyClient, parseRemoteMem, parseCpuTicks, cpuPctBetween, applyAuth };
+SSHConnection._test = {
+  readyTimeoutFor, connectionErrorMessage, forceDestroyClient, parseRemoteMem, parseCpuTicks,
+  cpuPctBetween, applyAuth, attachKeyboardInteractive, interactiveAnswerPlan, mergeInteractiveAnswers,
+  promptNeedsUserInput,
+};
 module.exports = SSHConnection;

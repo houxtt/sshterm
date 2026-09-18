@@ -32,6 +32,9 @@ mkdirSync(OUT, { recursive: true });
 const EXCLUDE = [
   '.git', 'tests', 'perf-proto', 'dist', 'assets',
   'node_modules/.cache', '*.log', 'scripts',
+  // vendor/ 只被浏览器测试 (puppeteer) 使用; docs/ 与运行无关。
+  // 不排除会把产物撑大数百 MB。
+  'vendor', 'docs',
   '*.bat', '*.vbs', 'README.md', 'package-lock.json'
 ];
 const excludeArgs = EXCLUDE.map(e => ` --exclude "${e}"`).join('');
