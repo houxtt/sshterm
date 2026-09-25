@@ -92,7 +92,9 @@ async function getToken(deadline = Date.now() + 10000) {
   while (Date.now() < deadline) {
     try {
       const body = await new Promise((resolve, reject) => {
-        require('http').get(`http://127.0.0.1:${PORT}/bootstrap.js`, (response) => {
+        require('http').get(`http://127.0.0.1:${PORT}/bootstrap.js`, {
+          headers: { Origin: `http://127.0.0.1:${PORT}` },
+        }, (response) => {
           let text = '';
           response.setEncoding('utf8');
           response.on('data', chunk => { text += chunk; });
@@ -114,9 +116,18 @@ async function main() {
   // 起临时服务端 (--no-open 避免弹浏览器)
   const srv = spawn('node', ['server/index.js', '--port', String(PORT), '--no-open'],
     { cwd: ROOT, env: TEST_ENV });
-  srv.stdout.on('data', () => {});
-  srv.stderr.on('data', () => {});
-  const token = await getToken();
+  let startupOutput = '';
+  srv.stdout.on('data', chunk => { startupOutput += chunk; });
+  srv.stderr.on('data', chunk => { startupOutput += chunk; });
+  srv.on('error', error => { startupOutput += `\n${error.message}`; });
+  let token;
+  try { token = await getToken(); }
+  catch (error) {
+    srv.kill();
+    restoreProtectedFiles();
+    fs.rmSync(TEST_PROFILE, { recursive: true, force: true });
+    throw new Error(`${error.message}\n${startupOutput.trim()}`);
+  }
 
   const results = [];
   for (const t of tests) {
