@@ -194,7 +194,8 @@ function waitForServer(deadline = Date.now() + 10000) {
 
     // Change the live layout, then prove workspace restore recreates it.
     await page.click('#workspace-close');
-    await page.click('#btn-split');
+    // Split now adds a pane; close the remaining extra pane to change the live layout.
+    await page.click('.term-host.pane-split .pane-close');
     assert.strictEqual(await page.$$eval('.term-host.pane-split', elements => elements.length), 0);
     await page.click('#btn-workspace');
     await page.click('#workspace-restore');
