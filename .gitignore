@@ -12,3 +12,4 @@ Thumbs.db
 
 # 本地数据 (会话/密码在 %USERPROFILE%\.sshterm, 不在仓库内)
 .sshterm/
+vendor/chrome-headless-shell/chrome-headless-shell.exe
