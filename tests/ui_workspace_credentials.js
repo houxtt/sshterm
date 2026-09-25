@@ -4,12 +4,11 @@ const assert = require('assert');
 const http = require('http');
 const path = require('path');
 const { spawn } = require('child_process');
-const puppeteer = require('puppeteer-core');
+const puppeteer = require('./puppeteer_test');
 
 const ROOT = path.join(__dirname, '..');
 const PORT = 8898;
 const BASE = `http://127.0.0.1:${PORT}/`;
-const EDGE = path.join(ROOT, 'vendor', 'chrome-headless-shell', 'chrome-headless-shell.exe');
 
 function waitForServer(deadline = Date.now() + 10000) {
   return new Promise((resolve, reject) => {
@@ -28,7 +27,7 @@ function waitForServer(deadline = Date.now() + 10000) {
   let browser;
   try {
     await waitForServer();
-    browser = await puppeteer.launch({ executablePath: EDGE, headless: 'new' });
+    browser = await puppeteer.launch({ headless: 'new' });
     const page = await browser.newPage();
     await page.goto(BASE, { waitUntil: 'networkidle0' });
     const result = await page.evaluate(() => {
