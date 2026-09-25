@@ -2026,11 +2026,13 @@ updateSftpSelectUi();
   if (btn) btn.onclick = () => openSettingsDialog();
   const closeBtn = $('settings-close');
   if (closeBtn) closeBtn.onclick = () => closeSettingsDialog();
+  const cancelBtn = $('settings-cancel');
+  if (cancelBtn) cancelBtn.onclick = () => closeSettingsDialog();
   const applyBtn = $('btn-settings-apply');
   if (applyBtn) applyBtn.onclick = () => applySettingsFromDialog();
   const resetBtn = $('btn-settings-reset');
   if (resetBtn) resetBtn.onclick = () => {
-    fillSettingsForm(saveTerminalSettings({ ...DEFAULT_TERMINAL_SETTINGS }));
+    fillSettingsForm({ ...DEFAULT_TERMINAL_SETTINGS });
   };
 })();
 
