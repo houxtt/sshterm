@@ -1,6 +1,6 @@
 {
   "name": "sshterm",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "SSH / Telnet / 串口 多标签连接工具 (Node 本地服务 + 浏览器 xterm.js)",
   "main": "server/index.js",
   "scripts": {
