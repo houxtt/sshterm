@@ -10,6 +10,7 @@
     "test:workspace-security": "node tests/ui_workspace_credentials.js",
     "check": "npm run sync:web && node --check server/index.js && node --check server/session-backup.js && node --check web/app.js && npm run test:static",
     "test:integration": "node tests/integration_session_transfer.js && node tests/integration_session_restart.js && node tests/integration_credential_restart.js && node tests/sftp_parallel_transfer.js && node tests/integration_sftp_transport.js && node tests/integration_vnc_bridge.js && node tests/integration_multiwindow_ownership.js && node tests/integration_refresh_reattach.js && node tests/split_connection_config.js && node tests/ui_large_download_stream.js && node tests/ui_split_workspace.js && node tests/ui_settings_layout.js",
+    "build:icon": "node scripts/generate-exe-icon.js",
     "build:exe": "node scripts/build-exe.js",
     "test:package": "node tests/smoke_packaged_exe.js",
     "sync:web": "node scripts/sync-web-app.js"
