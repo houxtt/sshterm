@@ -7,9 +7,10 @@
 //   - 无需对方安装 Node.js
 //   - 已用 staging 只打包运行时 (server / web / node_modules)，体积约 50MB
 const { execSync } = require('child_process');
-const { existsSync, mkdirSync, copyFileSync, cpSync, rmSync } = require('fs');
+const { existsSync, mkdirSync, copyFileSync, cpSync, readFileSync, rmSync, writeFileSync } = require('fs');
 const os = require('os');
 const path = require('path');
+const { gzipSync } = require('zlib');
 
 const ROOT = path.join(__dirname, '..');
 const OUT = path.join(ROOT, 'dist');
@@ -33,7 +34,8 @@ mkdirSync(OUT, { recursive: true });
 //    --exclude 语义 (实测对目录不生效, 曾把产物撑到 1GB)。
 const STAGING = path.join(os.tmpdir(), `sshterm-caxa-${process.pid}`);
 const COPY_DIRS = ['server', 'web', 'node_modules'];
-const COPY_FILES = ['package.json', 'LICENSE'];
+const COPY_FILES = ['package.json', 'package-lock.json', 'LICENSE'];
+const RUNTIME_PAYLOAD = path.join('runtime', 'node-runtime.gz');
 
 function prepareStaging() {
   mkdirSync(STAGING, { recursive: true });
@@ -43,6 +45,21 @@ function prepareStaging() {
   for (const file of COPY_FILES) {
     copyFileSync(path.join(ROOT, file), path.join(STAGING, file));
   }
+
+  // Remove build-only packages without contacting the registry. caxa's own
+  // dedupe step can otherwise wait indefinitely on a restricted network.
+  execSync('npm prune --omit=dev --ignore-scripts --offline', {
+    stdio: 'pipe',
+    cwd: STAGING,
+  });
+
+  // Store Node as a compressed payload rather than caxa's cached node.exe.
+  // Cleanup/security tools may remove executables from %TEMP% while leaving
+  // caxa's application directory behind. The packaged launcher can restore
+  // this runtime payload whenever that happens.
+  const runtimePayload = path.join(STAGING, RUNTIME_PAYLOAD);
+  mkdirSync(path.dirname(runtimePayload), { recursive: true });
+  writeFileSync(runtimePayload, gzipSync(readFileSync(process.execPath), { level: 9 }));
   console.log(`│ staging: ${STAGING}`);
 }
 
@@ -51,6 +68,8 @@ function assertRuntimeResources() {
   const required = [
     path.join(ROOT, 'server', 'free-serial.ps1'),
     path.join(ROOT, 'server', 'index.js'),
+    path.join(ROOT, 'server', 'packaged-launcher.ps1'),
+    path.join(STAGING, RUNTIME_PAYLOAD),
     path.join(STAGING, 'node_modules', 'serialport', 'package.json'),
   ];
   for (const file of required) {
@@ -67,7 +86,10 @@ try {
   execSync(
     `npx caxa --input "${STAGING}"` +
     ` --output "${TARGET}"` +
-    ` -- "{{caxa}}/node_modules/.bin/node" "{{caxa}}/server/index.js"`,
+    ` --no-dedupe` +
+    ` --no-include-node` +
+    ` -- "powershell.exe" "-NoLogo" "-NoProfile" "-NonInteractive"` +
+    ` "-ExecutionPolicy" "Bypass" "-File" "{{caxa}}/server/packaged-launcher.ps1"`,
     { stdio: 'inherit', cwd: ROOT }
   );
   console.log('│ ✅ 构建成功');
