@@ -6,8 +6,8 @@
 //   - 双击即启动后台服务并自动打开浏览器 http://127.0.0.1:8787
 //   - 无需对方安装 Node.js
 //   - 已用 staging 只打包运行时 (server / web / node_modules)，体积约 50MB
-const { execSync } = require('child_process');
-const { existsSync, mkdirSync, copyFileSync, cpSync, readFileSync, rmSync, writeFileSync } = require('fs');
+const { execFileSync, execSync } = require('child_process');
+const { appendFileSync, existsSync, mkdirSync, copyFileSync, cpSync, readFileSync, rmSync, writeFileSync } = require('fs');
 const os = require('os');
 const path = require('path');
 const { gzipSync } = require('zlib');
@@ -36,6 +36,8 @@ const STAGING = path.join(os.tmpdir(), `sshterm-caxa-${process.pid}`);
 const COPY_DIRS = ['server', 'web', 'node_modules'];
 const COPY_FILES = ['package.json', 'package-lock.json', 'LICENSE'];
 const RUNTIME_PAYLOAD = path.join('runtime', 'node-runtime.gz');
+const ICON_SOURCE = path.join(ROOT, 'assets', 'sshterm.ico');
+const ICON_STUB = path.join(os.tmpdir(), `sshterm-icon-stub-${process.pid}.exe`);
 
 function prepareStaging() {
   mkdirSync(STAGING, { recursive: true });
@@ -77,15 +79,40 @@ function assertRuntimeResources() {
   }
 }
 
+function prepareIconStub() {
+  if (process.platform !== 'win32' || process.arch !== 'x64') {
+    throw new Error('带图标的独立 EXE 构建需要 Windows x64');
+  }
+  if (!existsSync(ICON_SOURCE)) throw new Error(`缺少 EXE 图标: ${ICON_SOURCE}`);
+  const stub = path.join(ROOT, 'node_modules', 'caxa', 'stubs', 'stub--win32--x64');
+  if (!existsSync(stub)) throw new Error(`缺少 caxa Windows 启动器: ${stub}`);
+  // caxa appends its archive after the stub. Set the Windows icon first so
+  // resource editing cannot disturb the packaged archive at the EXE tail.
+  copyFileSync(stub, ICON_STUB);
+  execFileSync('powershell.exe', [
+    '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+    '-File', path.join(ROOT, 'scripts', 'apply-exe-icon.ps1'),
+    '-ExecutablePath', ICON_STUB, '-IconPath', ICON_SOURCE,
+  ], { stdio: 'pipe', cwd: ROOT });
+  // Windows resource editing removes the marker stored at the end of caxa's
+  // Go stub. Restore it before caxa appends the tarball and JSON footer.
+  const marker = Buffer.from('\nCAXACAXACAXA\n');
+  const iconStubBytes = readFileSync(ICON_STUB);
+  if (!iconStubBytes.subarray(-marker.length).equals(marker)) appendFileSync(ICON_STUB, marker);
+  console.log('│ SSH 图标: ✓');
+}
+
 // 4. 构建 (不传 --no-open, 双击自动开浏览器; 对方如需静默可加 --no-open)
 console.log(`│ 输出: ${TARGET}`);
 console.log('│ 打包中 (可能需要几分钟)…');
 try {
   prepareStaging();
   assertRuntimeResources();
+  prepareIconStub();
   execSync(
     `npx caxa --input "${STAGING}"` +
     ` --output "${TARGET}"` +
+    ` --stub "${ICON_STUB}"` +
     ` --no-dedupe` +
     ` --no-include-node` +
     ` -- "powershell.exe" "-NoLogo" "-NoProfile" "-NonInteractive"` +
@@ -105,5 +132,6 @@ try {
   process.exitCode = 1;
 } finally {
   try { rmSync(STAGING, { recursive: true, force: true }); } catch {}
+  try { rmSync(ICON_STUB, { force: true }); } catch {}
 }
 console.log('└──────────────────────────────────────┘');
