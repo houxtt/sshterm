@@ -6,7 +6,7 @@ const path = require('path');
 function buildStaticCsp(port) {
   return [
     "default-src 'self'",
-    "connect-src 'self' ws://127.0.0.1:" + port + " ws://localhost:" + port + " ws://[::1]:" + port,
+    "connect-src 'self' ws://127.0.0.1:" + port + " ws://localhost:" + port,
     "style-src 'self' 'unsafe-inline'",
     "script-src 'self' 'wasm-unsafe-eval'",
     "img-src 'self' data: blob:",
