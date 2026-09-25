@@ -7,9 +7,19 @@
 
 ## 快速开始
 
-### 首次运行
+### Windows 用户：下载 EXE（推荐）
 
-首次运行建议双击 `run.bat`。它会检查 Node.js、在缺少 `node_modules` 时自动安装依赖，然后启动服务并打开浏览器：
+1. 打开 [Releases](https://github.com/houxtt/sshterm/releases/latest) 页面；
+2. 在最新版本的 **Assets** 中下载 `sshterm.exe`；
+3. 双击 `sshterm.exe`，程序启动后会自动打开浏览器操作界面。
+
+使用 EXE 无需另外安装 Node.js、运行 `npm install`，也不需要双击 `run.bat`。请只从本项目的 GitHub Releases 页面下载；如果 Windows 首次运行时显示安全提示，请先确认下载来源无误。
+
+程序的会话配置和加密凭据保存在当前 Windows 用户目录的 `%USERPROFILE%\.sshterm` 中，更新 EXE 不会清除这些数据。
+
+### 从源码运行（开发者）
+
+需要调试或修改源码时，可双击 `run.bat`。它会检查 Node.js、在缺少 `node_modules` 时自动安装依赖，然后启动服务并打开浏览器：
 
 ```bat
 run.bat
@@ -17,7 +27,7 @@ run.bat
 
 `run.bat` 是前台诊断启动方式，因此会保留一个命令窗口；关闭该窗口会停止服务。
 
-### 无命令窗口启动（推荐日常使用）
+### 源码模式无命令窗口启动
 
 完成首次依赖安装后，双击：
 
@@ -58,7 +68,7 @@ npm start
 # 浏览器打开 http://127.0.0.1:8787
 ```
 
-### 启动故障排查
+### 源码模式启动故障排查
 
 隐藏启动不会弹出错误窗口。如果双击 `launcher.vbs` 后没有打开页面，请检查：
 
