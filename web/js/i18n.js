@@ -160,6 +160,12 @@ const DOM_TEXT_EN = {
   'SSH 多因素认证': 'SSH Multi-Factor Authentication',
   '提交': 'Submit',
   '⚙ 设置': '⚙ Settings',
+  '设置': 'Settings', '按你的习惯调整终端与快捷键': 'Adjust the terminal and shortcuts to your workflow',
+  '终端外观': 'Terminal Appearance',
+  '主题、字体与滚动设置会应用到当前和新建的终端。': 'Theme, font and scrollback apply to existing and new terminals.',
+  '点击按键框后按下新组合键；按 Backspace 恢复该项默认值。快捷键会立即保存。':
+    'Click a shortcut field and press a new combination; Backspace restores its default. Shortcuts save immediately.',
+  '光标闪烁': 'Cursor Blink',
   '终端外观设置': 'Terminal Appearance',
   '字体、主题与滚动回退保存在本机浏览器 (localStorage)，对新旧终端立即生效。':
     'Font, theme, and scrollback are saved in this browser (localStorage) and apply to new and existing terminals.',
@@ -173,6 +179,7 @@ const DOM_TEXT_EN = {
 };
 
 const DOM_ATTR_EN = {
+  '关闭设置': 'Close Settings',
   '过滤会话…': 'Filter sessions…',
   '终端外观设置 (字体/主题/滚动)': 'Terminal appearance (font / theme / scrollback)',
   '新建连接 (Ctrl+N)': 'New Connection (Ctrl+N)', '保存当前会话配置': 'Save Current Session',
@@ -253,17 +260,27 @@ function translateDom(root = document) {
 
 let domTranslationObserver = null;
 function installDomTranslationObserver() {
-  if (domTranslationObserver || !document.body) return;
-  domTranslationObserver = new MutationObserver(records => {
-    for (const record of records) {
-      if (record.type === 'characterData') translateDom(record.target.parentElement || document);
-      else if (record.type === 'attributes') translateDom(record.target);
-      else for (const node of record.addedNodes) {
-        if (node.nodeType === Node.ELEMENT_NODE) translateDom(node);
-        else if (node.parentElement) translateDom(node.parentElement);
+  if (!document.body) return;
+  if (!domTranslationObserver) {
+    domTranslationObserver = new MutationObserver(records => {
+      // Translating a node changes its text/attributes. Do not observe those
+      // changes recursively: a language toggle otherwise creates a large
+      // self-triggered mutation queue and can freeze the browser tab.
+      domTranslationObserver.disconnect();
+      try {
+        for (const record of records) {
+          if (record.type === 'characterData') translateDom(record.target.parentElement || document);
+          else if (record.type === 'attributes') translateDom(record.target);
+          else for (const node of record.addedNodes) {
+            if (node.nodeType === Node.ELEMENT_NODE) translateDom(node);
+            else if (node.parentElement) translateDom(node.parentElement);
+          }
+        }
+      } finally {
+        installDomTranslationObserver();
       }
-    }
-  });
+    });
+  }
   domTranslationObserver.observe(document.body, {
     childList: true, subtree: true, characterData: true,
     attributes: true, attributeFilter: ['title', 'placeholder'],
@@ -272,6 +289,9 @@ function installDomTranslationObserver() {
 var LANG = localStorage.getItem('sshterm.lang') || 'zh';
 function t(key) { return (I18N[LANG] && I18N[LANG][key]) || I18N.zh[key] || key; }
 function applyI18n() {
+  // Directly translating the whole UI produces hundreds of mutations. Pause
+  // the dynamic observer so it does not rescan each intermediate state.
+  if (domTranslationObserver) domTranslationObserver.disconnect();
   const map = {
     'btn-new': 'btn_new',
     'btn-sftp': 'btn_sftp', 'btn-killall': 'btn_killall', 'btn-split': 'btn_split',
