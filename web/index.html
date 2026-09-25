@@ -452,31 +452,52 @@
 
 
 <div id="dlg-settings-mask" class="hidden">
-  <div id="dlg-settings" class="dlg" style="min-width:420px">
-    <h3>终端外观设置</h3>
-    <p class="muted" style="font-size:12px;margin-top:0">字体、主题与滚动回退保存在本机浏览器 (localStorage)，对新旧终端立即生效。</p>
-    <label>配色主题
-      <select id="set-theme"></select>
-    </label>
-    <label>字体家族
-      <input id="set-font-family" type="text" placeholder='Consolas, "Courier New", monospace' style="width:100%">
-    </label>
-    <label>字号 (px)
-      <input id="set-font-size" type="number" min="10" max="32" step="1" style="width:100px">
-    </label>
-    <label>滚动回退行数
-      <input id="set-scrollback" type="number" min="500" max="100000" step="500" style="width:120px">
-    </label>
-    <label style="display:flex;align-items:center;gap:8px">
-      <input id="set-cursor-blink" type="checkbox"> 光标闪烁
-    </label>
-    <h4 style="margin:12px 0 6px">快捷键</h4>
-    <p class="muted" style="font-size:12px;margin:0 0 8px">自定义常用快捷键 (保存在本机 localStorage)。点击输入框后按下新组合键。</p>
-    <div id="hotkey-editor" class="hotkey-editor"></div>
-    <div class="dlg-actions">
-      <button id="btn-settings-apply" class="primary">应用</button>
-      <button id="btn-settings-reset">恢复默认</button>
-      <button id="settings-close">取消</button>
+  <div id="dlg-settings" class="dlg" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <header class="settings-header">
+      <div>
+        <h3 id="settings-title">设置</h3>
+        <p>按你的习惯调整终端与快捷键</p>
+      </div>
+      <button id="settings-close" class="settings-close" type="button" title="关闭设置" aria-label="关闭设置">✕</button>
+    </header>
+    <div class="settings-content">
+      <section class="settings-section" aria-labelledby="settings-appearance-title">
+        <div class="settings-section-head">
+          <h4 id="settings-appearance-title">终端外观</h4>
+          <p>主题、字体与滚动设置会应用到当前和新建的终端。</p>
+        </div>
+        <div class="settings-grid">
+          <label class="settings-field">配色主题
+            <select id="set-theme"></select>
+          </label>
+          <label class="settings-field">字体家族
+            <input id="set-font-family" type="text" placeholder='Consolas, "Courier New", monospace'>
+          </label>
+          <label class="settings-field">字号 (px)
+            <input id="set-font-size" type="number" min="10" max="32" step="1">
+          </label>
+          <label class="settings-field">滚动回退行数
+            <input id="set-scrollback" type="number" min="500" max="100000" step="500">
+          </label>
+        </div>
+        <label class="settings-toggle" for="set-cursor-blink">
+          <span>光标闪烁</span>
+          <input id="set-cursor-blink" type="checkbox">
+        </label>
+      </section>
+      <section class="settings-section" aria-labelledby="settings-hotkeys-title">
+        <div class="settings-section-head">
+          <h4 id="settings-hotkeys-title">快捷键</h4>
+          <p>点击按键框后按下新组合键；按 Backspace 恢复该项默认值。快捷键会立即保存。</p>
+        </div>
+        <div id="hotkey-editor" class="hotkey-editor"></div>
+      </section>
+    </div>
+    <div class="settings-actions">
+      <button id="btn-settings-reset" type="button">恢复默认</button>
+      <span class="settings-actions-spacer"></span>
+      <button id="settings-cancel" type="button">取消</button>
+      <button id="btn-settings-apply" class="primary" type="button">应用</button>
     </div>
   </div>
 </div>
