@@ -78,7 +78,7 @@ function cancelWindowCleanup(windowId) {
 function closeWindowConnections(windowId) {
   cancelWindowCleanup(windowId);
   for (const [key, conn] of connections) {
-    if (!key.startsWith(`${windowId}:`)) continue;
+    if (typeof key !== 'string' || !key.startsWith(`${windowId}:`)) continue;
     connections.delete(key);
     try { conn.close(); } catch {}
   }
@@ -470,7 +470,7 @@ wss.on('connection', (ws, req) => {
     if (windows.get(ws.windowId) === ws) {
       windows.delete(ws.windowId);
       for (const [key, conn] of connections) {
-        if (key.startsWith(`${ws.windowId}:`) && conn.ownerWs === ws) conn.ownerWs = null;
+        if (typeof key === 'string' && key.startsWith(`${ws.windowId}:`) && conn.ownerWs === ws) conn.ownerWs = null;
       }
       scheduleWindowCleanup(ws.windowId);
     }

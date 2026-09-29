@@ -29,11 +29,19 @@ function trusted(event) {
 }
 
 function closeSocketsFor(webContentsId) {
+  trace(`close sockets start ${sockets.size}`);
   for (const [id, entry] of sockets) {
     if (entry.owner !== webContentsId) continue;
-    entry.socket.close();
+    trace(`close socket ${id}`);
+    try { entry.socket.close(); }
+    catch (error) {
+      trace(`socket close failed: ${error.stack || error}`);
+      console.error('[desktop] socket close failed:', error);
+    }
+    trace(`socket closed ${id}`);
     sockets.delete(id);
   }
+  trace('close sockets done');
 }
 
 async function serve(request) {
@@ -135,9 +143,12 @@ app.whenReady().then(() => {
     if (url !== 'sshterm://app/') event.preventDefault();
   });
   mainWindow.webContents.on('did-start-navigation', () => closeSocketsFor(mainWindow.webContents.id));
-  mainWindow.on('closed', () => { mainWindow = null; });
+  mainWindow.on('close', () => trace('window close'));
+  mainWindow.on('closed', () => { trace('window closed'); mainWindow = null; });
+  mainWindow.webContents.on('will-prevent-unload', () => trace('will prevent unload'));
   if (smokeFile) {
     const finish = (result) => {
+      trace('smoke finished');
       try { fs.writeFileSync(smokeFile, JSON.stringify(result)); }
       finally { app.quit(); }
     };
@@ -187,4 +198,9 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => app.quit());
-app.on('before-quit', () => { if (mainWindow) closeSocketsFor(mainWindow.webContents.id); });
+app.on('before-quit', () => {
+  trace('before quit');
+  if (mainWindow) closeSocketsFor(mainWindow.webContents.id);
+  trace('sockets closed');
+});
+app.on('will-quit', () => trace('will quit'));
