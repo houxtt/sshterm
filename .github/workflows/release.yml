@@ -36,13 +36,17 @@ jobs:
       - run: node tests/desktop_contract.js
       - run: npm run build:exe
       - run: npm run test:package
-      - name: Require release-signing credentials
+      - name: Determine signing mode
+        id: signing
         shell: pwsh
         run: |
-          if ([string]::IsNullOrWhiteSpace($env:SIGNING_CERT_BASE64) -or [string]::IsNullOrWhiteSpace($env:SIGNING_CERT_PASSWORD)) {
-            throw 'Refusing to create an externally distributable unsigned release. Configure SIGNING_CERT_BASE64 and SIGNING_CERT_PASSWORD GitHub secrets.'
-          }
+          $hasCert = -not [string]::IsNullOrWhiteSpace($env:SIGNING_CERT_BASE64)
+          $hasPassword = -not [string]::IsNullOrWhiteSpace($env:SIGNING_CERT_PASSWORD)
+          if ($hasCert -ne $hasPassword) { throw 'Configure both signing secrets or neither of them.' }
+          $mode = if ($hasCert) { 'signed' } else { 'unsigned' }
+          "mode=$mode" >> $env:GITHUB_OUTPUT
       - name: Sign and verify Authenticode artifact
+        if: steps.signing.outputs.mode == 'signed'
         shell: pwsh
         run: |
           $pfx = Join-Path $env:RUNNER_TEMP 'sshterm-signing.pfx'
@@ -56,10 +60,10 @@ jobs:
           } finally {
             Remove-Item -LiteralPath $pfx -Force -ErrorAction SilentlyContinue
           }
-      - name: Upload signed release artifact
+      - name: Upload release artifact
         uses: actions/upload-artifact@v4
         with:
-          name: sshterm-${{ inputs.version }}-signed
+          name: sshterm-${{ inputs.version }}-${{ steps.signing.outputs.mode }}
           path: dist/sshterm.exe
           if-no-files-found: error
       - name: Publish v2 release
@@ -67,4 +71,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          gh release create "v${{ inputs.version }}" dist/sshterm.exe --target "${{ github.sha }}" --title "sshterm v${{ inputs.version }}" --notes-file docs/RELEASE-NOTES-v2.0.0.md
+          $notes = Join-Path $env:RUNNER_TEMP 'release-notes.md'
+          Copy-Item docs/RELEASE-NOTES-v2.0.0.md $notes
+          if ('${{ steps.signing.outputs.mode }}' -eq 'unsigned') {
+            Add-Content $notes "`n此版本 EXE 未进行代码签名；Windows 首次运行时可能显示安全提示。`n"
+          }
+          gh release create "v${{ inputs.version }}" dist/sshterm.exe --target "${{ github.sha }}" --title "sshterm v${{ inputs.version }}" --notes-file $notes

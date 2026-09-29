@@ -21,7 +21,7 @@ node tests/desktop_contract.js
 npm run build:exe
 ```
 
-产物为 `dist/sshterm.exe`。正式发行版由 [Release build](docs/RELEASE.md) 工作流签名并发布。
+产物为 `dist/sshterm.exe`。正式发行版由 [Release build](docs/RELEASE.md) 工作流验证并发布；配置代码签名证书时会签名，未配置时会在发行说明中标明未签名。
 
 ## 使用
 
