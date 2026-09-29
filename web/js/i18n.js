@@ -166,6 +166,7 @@ const DOM_TEXT_EN = {
   '点击按键框后按下新组合键；按 Backspace 恢复该项默认值。快捷键会立即保存。':
     'Click a shortcut field and press a new combination; Backspace restores its default. Shortcuts save immediately.',
   '光标闪烁': 'Cursor Blink',
+  '发送': 'Send', '管理': 'Manage',
   '终端外观设置': 'Terminal Appearance',
   '字体、主题与滚动回退保存在本机浏览器 (localStorage)，对新旧终端立即生效。':
     'Font, theme, and scrollback are saved in this browser (localStorage) and apply to new and existing terminals.',
@@ -179,6 +180,9 @@ const DOM_TEXT_EN = {
 };
 
 const DOM_ATTR_EN = {
+  '输入命令后按 Enter 发送': 'Type a command and press Enter',
+  '发送命令': 'Send Command',
+  '编辑当前主机的快捷命令': 'Edit quick commands for this host',
   '关闭设置': 'Close Settings',
   '过滤会话…': 'Filter sessions…',
   '终端外观设置 (字体/主题/滚动)': 'Terminal appearance (font / theme / scrollback)',

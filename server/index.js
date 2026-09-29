@@ -1,8 +1,9 @@
-// sshterm 服务端: HTTP 静态 + WebSocket 路由 + 连接管理 + 会话持久化
-// 启动: node server/index.js [--port 8787] [--no-open]
+// sshterm 连接核心: 桌面进程内资源/消息路由 + 会话持久化
+// HTTP 监听仅供自动化测试启用，不作为用户入口。
 // Modules: security / logging / sessions-store / ssh-config-loader / sftp-http /
 //          vnc-bridge / net-scan / ws-handlers (behavior preserved).
 const http = require('http');
+const { EventEmitter } = require('events');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -210,6 +211,12 @@ const server = http.createServer((req, res) => {
     res.end(data);
   });
 });
+
+// Electron calls the same request handler through an in-process stream. No
+// listening socket is created in desktop mode.
+function desktopRequest(req, res) {
+  server.emit('request', req, res);
+}
 
 const AUTO_EXIT = process.argv.includes('--auto-exit');
 let wsCount = 0;
@@ -492,7 +499,33 @@ wss.on('connection', (ws, req) => {
 
 attachVncBridge(vncWss, { log });
 
-server.listen(PORT, '127.0.0.1', () => {
+function openDesktopSocket(url, outbound) {
+  const pathname = new URL(url, 'http://127.0.0.1').pathname;
+  if (pathname !== '/' && pathname !== '/vnc') throw new Error('未知桌面通信路径');
+  const ws = new EventEmitter();
+  ws.readyState = 1;
+  ws.bufferedAmount = 0;
+  ws.send = (data) => {
+    if (ws.readyState === 1) outbound('message', { data: Buffer.from(data), binary: typeof data !== 'string' });
+  };
+  ws.ping = () => {};
+  ws.close = (code = 1000, reason = '') => {
+    if (ws.readyState !== 1) return;
+    ws.readyState = 3;
+    ws.emit('close', code, reason);
+    outbound('close', { code, reason });
+  };
+  const req = { url, headers: { 'x-sshterm-token': CLIENT_TOKEN } };
+  const target = pathname === '/vnc' ? vncWss : wss;
+  if (pathname === '/') target.clients.add(ws);
+  ws.once('close', () => target.clients.delete(ws));
+  target.emit('connection', ws, req);
+  return ws;
+}
+
+if (process.env.SSHTERM_TEST_HTTP !== '1') {
+  module.exports = { desktopRequest, openDesktopSocket, clientToken: CLIENT_TOKEN };
+} else server.listen(PORT, '127.0.0.1', () => {
   try {
     fs.mkdirSync(CONN_DIR, { recursive: true });
     fs.writeFileSync(TOKEN_FILE, CLIENT_TOKEN, { mode: 0o600 });
@@ -507,10 +540,6 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log(`  日志: ${getLogFile()}`);
   log('info', `sshterm 服务启动 (端口 ${PORT})`);
   scheduleIdleExit();
-  const open = !process.argv.includes('--no-open');
-  if (open) {
-    require('child_process').exec(`start http://127.0.0.1:${PORT}`);
-  }
 });
 server.on('error', (e) => {
   if (e.code === 'EADDRINUSE') {
@@ -519,11 +548,13 @@ server.on('error', (e) => {
   }
   throw e;
 });
-process.on('SIGINT', () => { for (const c of connections.values()) c.close(); process.exit(0); });
-process.on('uncaughtException', (e) => {
-  console.error('[uncaughtException]', e && (e.stack || e.message));
-  log('error', `服务端异常: ${e && (e.stack || e.message)}`);
-});
-process.on('unhandledRejection', (e) => {
-  console.error('[unhandledRejection]', e && e.message);
-});
+if (process.env.SSHTERM_TEST_HTTP === '1') {
+  process.on('SIGINT', () => { for (const c of connections.values()) c.close(); process.exit(0); });
+  process.on('uncaughtException', (e) => {
+    console.error('[uncaughtException]', e && (e.stack || e.message));
+    log('error', `服务端异常: ${e && (e.stack || e.message)}`);
+  });
+  process.on('unhandledRejection', (e) => {
+    console.error('[unhandledRejection]', e && e.message);
+  });
+}

@@ -10,6 +10,8 @@ permissions:
 jobs:
   static-and-unit:
     runs-on: windows-latest
+    env:
+      SSHTERM_TEST_HTTP: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

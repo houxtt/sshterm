@@ -1,6 +1,7 @@
 # 依赖
 node_modules/
 dist/
+.npm-cache/
 .tools/
 
 # 日志

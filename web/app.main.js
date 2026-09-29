@@ -284,7 +284,7 @@ function reattachLiveTabs() {
 function onWsOpen() {
   wsReconnectAttempt = 0;
   $('conn-status').className = 'status-dot ok';
-  $('conn-status-text').textContent = '服务器已连接';
+  $('conn-status-text').textContent = window.sshtermDesktop ? '桌面通信已连接' : '服务器已连接';
   send({ type: 'list' });
   send({ type: 'serialports' });
   if (tabs.length) reattachLiveTabs();
@@ -953,11 +953,13 @@ function doCloseTab(id) {
   updateWelcome();
   updateSftpBtn();
   saveTabs();
+  renderCommandBar();
   log(`关闭会话「${tab.cfg.name || id}」`);
 }
 
 function activateTab(id) {
   activeTabId = id;
+  renderCommandBar();
   for (const t of tabs) {
     t.host.classList.toggle('hidden', t.id !== id);
     if (t.id === id) setTimeout(() => {
@@ -989,6 +991,7 @@ function setTabState(id, state, msg) {
   tab.state = state;
   tab.stateMsg = msg;
   renderTabbar();
+  if (id === activeTabId) renderCommandBar();
   updateSftpBtn();
   if (state === 'closed' && msg) setStatus(msg);
 }
@@ -1597,6 +1600,7 @@ function renderCommands() {
   const curIp = cmdKey === 'default' ? '未连接' : cmdKey;
   $('cmd-cur').textContent = `命令集 (IP: ${curIp}) — ${cmdSet.items.length} 条命令`;
   $('cmd-auto').checked = cmdSet.auto;
+  renderCommandBar();
   if (!cmdSet.items.length) {
     el.innerHTML = '<div class="muted" style="padding:10px">(该 IP 还没有命令, 上面添加)</div>';
     return;
@@ -1620,6 +1624,50 @@ function renderCommands() {
     el.appendChild(row);
   }
 }
+function renderCommandBar() {
+  const area = $('quick-command-items');
+  if (!area) return;
+  area.replaceChildren();
+  const tab = tabs.find(t => t.id === activeTabId);
+  const canSend = !!tab && tab.cfg.type !== 'vnc' && tab.state === 'connected';
+  $('quick-command-input').disabled = !tab || tab.cfg.type === 'vnc';
+  $('quick-command-send').disabled = !tab || tab.cfg.type === 'vnc';
+  let commands = [];
+  try {
+    const stored = JSON.parse(localStorage.getItem('sshterm.commands.' + sessionCmdKey(tab?.cfg)) || '[]');
+    commands = Array.isArray(stored) ? stored : stored.items || [];
+  } catch {}
+  if (!commands.length) {
+    const hint = document.createElement('span');
+    hint.className = 'quick-empty';
+    hint.textContent = tab ? '暂无命令，点“管理”添加' : '选择会话后显示快捷命令';
+    area.appendChild(hint);
+  }
+  for (const item of commands) {
+    const button = document.createElement('button');
+    button.className = 'mini';
+    button.textContent = item.name || item.cmd;
+    button.title = item.cmd;
+    button.disabled = !canSend;
+    button.addEventListener('click', () => runCommand(item.cmd));
+    area.appendChild(button);
+  }
+}
+function sendQuickCommand() {
+  const input = $('quick-command-input');
+  const command = input.value.trim();
+  if (!command) return;
+  const tab = tabs.find(t => t.id === activeTabId);
+  if (!tab || tab.state !== 'connected') return setStatus('会话未连接');
+  runCommand(command);
+  input.value = '';
+  input.focus();
+}
+$('quick-command-send').onclick = sendQuickCommand;
+$('quick-command-input').addEventListener('keydown', event => {
+  if (event.key === 'Enter') { event.preventDefault(); sendQuickCommand(); }
+});
+$('quick-command-manage').onclick = () => $('btn-cmds').click();
 // 执行命令: 发送到激活会话
 function runCommand(cmd) {
   const tab = tabs.find(t => t.id === activeTabId);
@@ -2152,7 +2200,7 @@ function setStatus(msg) {
   $('sb-left').textContent = msg;
   $('statusbar').style.color = msg.startsWith('错误') ? '#ef4444' : '';
 }
-$('srv-addr').textContent = `localhost${location.port ? ':' + location.port : ''}`;
+$('srv-addr').textContent = window.sshtermDesktop ? '桌面模式 · 无本机端口' : `localhost${location.port ? ':' + location.port : ''}`;
 
 // 初始欢迎
 updateWelcome();

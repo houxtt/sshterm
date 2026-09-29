@@ -14,8 +14,8 @@
 ## 每次发布
 
 1. 更新 `package.json` 的版本和变更日志。
-2. 本地运行 `npm run check` 与 `npm run test:workspace-security`。
+2. 本地运行 `npm run check`、`node tests/desktop_contract.js`，并构建、试运行桌面 EXE。
 3. 在 Actions 手动运行 `Release build`，输入相同版本号。
-4. 工作流会构建、签名并执行 `signtool verify /pa /all`；只上传通过验证的产物。
+4. 工作流会构建桌面 EXE、签名并执行 `signtool verify /pa /all`；成功后创建 `vX.Y.Z` GitHub Release 并上传签名的 `sshterm.exe`。
 
 发布前还应检查依赖审计结果，并将最终签名文件交由安装器/MSI 阶段使用。

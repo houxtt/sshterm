@@ -102,6 +102,21 @@ button.mini { padding: 2px 8px; font-size: 11px; }
 #terms .term-host { position: absolute; inset: 0; padding: 4px; }
 #terms .term-host.hidden { display: none; }
 
+#quick-command-bar {
+  display: flex; align-items: center; gap: 6px; min-height: 39px;
+  padding: 4px 8px; background: #16161e; border-top: 1px solid #3a3b4d;
+}
+.quick-command-label { color: #a9b1d6; white-space: nowrap; font-size: 11px; font-weight: 600; }
+#quick-command-items { display: flex; gap: 4px; flex: 1; min-width: 45px; overflow-x: auto; scrollbar-width: thin; }
+#quick-command-items button { white-space: nowrap; padding: 2px 8px; }
+#quick-command-items .quick-empty { color: #565f89; white-space: nowrap; font-size: 11px; align-self: center; }
+#quick-command-input {
+  width: clamp(130px, 22%, 320px); min-width: 100px; padding: 3px 7px;
+  background: #1a1b26; color: #c0caf5; border: 1px solid #3a3b4d; border-radius: 4px;
+  font: 12px Consolas, monospace;
+}
+#quick-command-input:focus { outline: 1px solid #3b82f6; }
+
 /* 欢迎页 */
 #welcome {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
@@ -639,3 +654,35 @@ button.mini { padding: 2px 8px; font-size: 11px; }
   .settings-actions { padding: 12px 16px; flex-wrap: wrap; }
   .hotkey-editor { grid-template-columns: minmax(0, 1fr) minmax(112px, 140px); gap: 0 10px; }
 }
+/* Desktop chrome: compact light panels around the dark terminal, inspired by
+   the session tree / tabs / command strip layout of classic SSH clients. */
+.desktop-mode #toolbar,
+.desktop-mode #sidebar,
+.desktop-mode #tabbar,
+.desktop-mode #quick-command-bar,
+.desktop-mode #statusbar { background: #f1f3f6; color: #263445; border-color: #cbd2db; }
+.desktop-mode #toolbar button,
+.desktop-mode #sidebar button,
+.desktop-mode #quick-command-bar button { background: #fff; color: #263445; border-color: #c7d0db; }
+.desktop-mode #toolbar button:hover,
+.desktop-mode #sidebar button:hover,
+.desktop-mode #quick-command-bar button:hover { background: #e3edf9; }
+.desktop-mode #toolbar .danger { color: #9b2226; }
+.desktop-mode #sidebar .side-head { border-color: #cbd2db; }
+.desktop-mode #sidebar .side-foot,
+.desktop-mode #sidebar .s-sub,
+.desktop-mode #quick-command-items .quick-empty { color: #657387; }
+.desktop-mode #sidebar .s-row { border-color: #e2e6ed; }
+.desktop-mode #sidebar .s-row:hover,
+.desktop-mode #sidebar .group-head:hover { background: #e3edf9 !important; }
+.desktop-mode #sidebar-divider { background: #d4dbe5; }
+.desktop-mode #sidebar { width: 300px; }
+.desktop-mode #quick-command-bar .quick-command-label { color: #3c4b5f; }
+.desktop-mode #tabbar .tab { color: #44566e; border-color: #cbd2db; }
+.desktop-mode #tabbar .tab.active { background: #3995dd; color: #fff; border-top-color: #1871bd; }
+.desktop-mode #tabbar .tab.active .t-close { color: #fff; }
+.desktop-mode #terms { background: #050505; }
+.desktop-mode #quick-command-input,
+.desktop-mode #quick-connect,
+.desktop-mode #session-filter { background: #fff !important; color: #263445 !important; border: 1px solid #c7d0db !important; }
+.desktop-mode #srv-addr { color: #657387; }

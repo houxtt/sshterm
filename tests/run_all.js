@@ -11,6 +11,7 @@ const TEST_ENV = {
   ...process.env,
   USERPROFILE: TEST_PROFILE,
   HOME: TEST_PROFILE,
+  SSHTERM_TEST_HTTP: '1',
 };
 
 // Tests intentionally use the real protocol/device fixtures, but must not
@@ -113,7 +114,7 @@ async function getToken(deadline = Date.now() + 10000) {
 
 async function main() {
   console.log('══════════ sshterm 测试套件 ══════════\n');
-  // 起临时服务端 (--no-open 避免弹浏览器)
+  // 起测试专用传输层；正式桌面版不会监听本机端口。
   const srv = spawn('node', ['server/index.js', '--port', String(PORT), '--no-open'],
     { cwd: ROOT, env: TEST_ENV });
   let startupOutput = '';

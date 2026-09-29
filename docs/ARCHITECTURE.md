@@ -1,12 +1,12 @@
 ﻿# sshterm Architecture
 
-> Updated: 2026-09-11
+> Updated: 2026-09-29
 >
 > Current-state index: [`STATUS.md`](STATUS.md).
 
 ## Overview
 
-sshterm is a **loopback Node.js** multi-protocol terminal (SSH / Telnet / Serial / VNC) with a browser UI based on **xterm.js**. It intentionally stays off Electron: the Node process owns protocol sockets and credentials (DPAPI on Windows); the browser owns rendering and local UX state.
+sshterm v2 is an Electron desktop terminal (SSH / Telnet / Serial / VNC) with an **xterm.js** UI. The Node process owns protocol sockets and credentials (DPAPI on Windows); the renderer owns rendering and local UX state. The desktop entry uses an in-process resource protocol and IPC bridge and never calls the local HTTP listener.
 
 Borrowed ideas (not code copies):
 
@@ -32,7 +32,7 @@ Borrowed ideas (not code copies):
 | `connections/*` | Per-protocol connection classes |
 | `dpapi.js` / `encoding.js` / … | Existing focused helpers |
 
-Public CLI flags (`--port`, `--no-open`, `--auto-exit`) and listen behavior are unchanged: tests still spawn `node server/index.js`.
+`desktop/main.js` loads the request and session handlers without calling `server.listen`. `SSHTERM_TEST_HTTP=1` enables the old HTTP transport only for automated integration fixtures; there is no browser-mode user launcher.
 
 ## Web layout (`web/`)
 
@@ -64,7 +64,7 @@ Contract tests that assert substrings / `vm`-extract functions continue to read 
 
 ## Security boundary
 
-- HTTP/WS bind to `127.0.0.1` only.
+- Desktop mode uses in-process requests and Electron IPC without a local listener. The test-only HTTP transport binds to `127.0.0.1`.
 - Bootstrap token + Origin/Referer (or CLI `X-SSHTERM-Token`) gate privileged APIs.
 - Session secrets use Windows DPAPI when “remember password” is enabled; browser storage never keeps credentials.
 

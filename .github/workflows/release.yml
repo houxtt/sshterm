@@ -9,11 +9,12 @@ on:
         type: string
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   SIGNING_CERT_BASE64: ${{ secrets.SIGNING_CERT_BASE64 }}
   SIGNING_CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
+  SSHTERM_TEST_HTTP: '1'
 
 jobs:
   build:
@@ -25,9 +26,16 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: node tests/static_security_contract.js
-      - run: node scripts/build-exe.js
-      - run: node tests/smoke_packaged_exe.js
+      - name: Check release version
+        shell: pwsh
+        run: |
+          $actual = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($actual -ne '${{ inputs.version }}') { throw "package.json version $actual does not match ${{ inputs.version }}" }
+      - run: npm run check
+      - run: npm run test:workspace-security
+      - run: node tests/desktop_contract.js
+      - run: npm run build:exe
+      - run: npm run test:package
       - name: Require release-signing credentials
         shell: pwsh
         run: |
@@ -54,3 +62,9 @@ jobs:
           name: sshterm-${{ inputs.version }}-signed
           path: dist/sshterm.exe
           if-no-files-found: error
+      - name: Publish v2 release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          gh release create "v${{ inputs.version }}" dist/sshterm.exe --target "${{ github.sha }}" --title "sshterm v${{ inputs.version }}" --notes-file docs/RELEASE-NOTES-v2.0.0.md
