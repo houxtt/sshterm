@@ -1630,8 +1630,6 @@ function renderCommandBar() {
   area.replaceChildren();
   const tab = tabs.find(t => t.id === activeTabId);
   const canSend = !!tab && tab.cfg.type !== 'vnc' && tab.state === 'connected';
-  $('quick-command-input').disabled = !tab || tab.cfg.type === 'vnc';
-  $('quick-command-send').disabled = !tab || tab.cfg.type === 'vnc';
   let commands = [];
   try {
     const stored = JSON.parse(localStorage.getItem('sshterm.commands.' + sessionCmdKey(tab?.cfg)) || '[]');
@@ -1653,20 +1651,6 @@ function renderCommandBar() {
     area.appendChild(button);
   }
 }
-function sendQuickCommand() {
-  const input = $('quick-command-input');
-  const command = input.value.trim();
-  if (!command) return;
-  const tab = tabs.find(t => t.id === activeTabId);
-  if (!tab || tab.state !== 'connected') return setStatus('会话未连接');
-  runCommand(command);
-  input.value = '';
-  input.focus();
-}
-$('quick-command-send').onclick = sendQuickCommand;
-$('quick-command-input').addEventListener('keydown', event => {
-  if (event.key === 'Enter') { event.preventDefault(); sendQuickCommand(); }
-});
 $('quick-command-manage').onclick = () => $('btn-cmds').click();
 // 执行命令: 发送到激活会话
 function runCommand(cmd) {

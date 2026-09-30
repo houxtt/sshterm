@@ -98,24 +98,18 @@ button.mini { padding: 2px 8px; font-size: 11px; }
 .tab.dragging { opacity: .45; }
 .tab.drop-before { box-shadow: inset 2px 0 0 #3b82f6; }
 .tab.drop-after { box-shadow: inset -2px 0 0 #3b82f6; }
-#terms { flex: 1; position: relative; background: #1a1b26; }
+#terms { flex: 1; min-height: 0; position: relative; background: #1a1b26; }
 #terms .term-host { position: absolute; inset: 0; padding: 4px; }
 #terms .term-host.hidden { display: none; }
 
 #quick-command-bar {
-  display: flex; align-items: center; gap: 6px; min-height: 39px;
+  display: flex; align-items: center; gap: 6px; min-height: 39px; flex: 0 0 auto;
   padding: 4px 8px; background: #16161e; border-top: 1px solid #3a3b4d;
 }
 .quick-command-label { color: #a9b1d6; white-space: nowrap; font-size: 11px; font-weight: 600; }
-#quick-command-items { display: flex; gap: 4px; flex: 1; min-width: 45px; overflow-x: auto; scrollbar-width: thin; }
-#quick-command-items button { white-space: nowrap; padding: 2px 8px; }
+#quick-command-items { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; flex: 1; min-width: 0; }
+#quick-command-items button { flex: 0 0 auto; white-space: nowrap; padding: 2px 8px; }
 #quick-command-items .quick-empty { color: #565f89; white-space: nowrap; font-size: 11px; align-self: center; }
-#quick-command-input {
-  width: clamp(130px, 22%, 320px); min-width: 100px; padding: 3px 7px;
-  background: #1a1b26; color: #c0caf5; border: 1px solid #3a3b4d; border-radius: 4px;
-  font: 12px Consolas, monospace;
-}
-#quick-command-input:focus { outline: 1px solid #3b82f6; }
 
 /* 欢迎页 */
 #welcome {
@@ -518,9 +512,11 @@ button.mini { padding: 2px 8px; font-size: 11px; }
   color: #c0caf5;
   font-family: Consolas, "Courier New", monospace;
   user-select: none;
-  overflow-x: auto;          /* 挂载点多时横向滚动 */
+  overflow-x: auto;          /* 保留触控板/Shift+滚轮横向查看，不占用终端高度 */
+  scrollbar-width: none;
   white-space: nowrap;
 }
+.hostinfo-bar::-webkit-scrollbar { display: none; }
 .hostinfo-bar .hi-item { white-space: nowrap; }
 .hostinfo-bar .hi-disks { display: inline-flex; gap: 14px; padding-left: 6px; border-left: 1px solid #2a2b3a; }
 .hostinfo-bar .hi-disk { white-space: nowrap; }
@@ -682,7 +678,6 @@ button.mini { padding: 2px 8px; font-size: 11px; }
 .desktop-mode #tabbar .tab.active { background: #3995dd; color: #fff; border-top-color: #1871bd; }
 .desktop-mode #tabbar .tab.active .t-close { color: #fff; }
 .desktop-mode #terms { background: #050505; }
-.desktop-mode #quick-command-input,
 .desktop-mode #quick-connect,
 .desktop-mode #session-filter { background: #fff !important; color: #263445 !important; border: 1px solid #c7d0db !important; }
 .desktop-mode #srv-addr { color: #657387; }
