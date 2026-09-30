@@ -1,6 +1,6 @@
 {
   "name": "sshterm",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "SSH / Telnet / VNC / 串口桌面连接工具",
   "main": "desktop/main.js",
   "scripts": {
@@ -12,8 +12,9 @@
     "check": "npm run sync:web && node --check server/index.js && node --check server/session-backup.js && node --check web/app.js && npm run test:static",
     "test:integration": "node tests/integration_session_transfer.js && node tests/integration_session_restart.js && node tests/integration_credential_restart.js && node tests/sftp_parallel_transfer.js && node tests/integration_sftp_transport.js && node tests/integration_vnc_bridge.js && node tests/integration_multiwindow_ownership.js && node tests/integration_refresh_reattach.js && node tests/split_connection_config.js && node tests/ui_large_download_stream.js && node tests/ui_split_workspace.js && node tests/ui_settings_layout.js",
     "build:icon": "node scripts/generate-exe-icon.js",
-    "build:exe": "electron-builder --win portable --x64",
-    "test:package": "node tests/desktop_smoke.js dist/sshterm.exe",
+    "build:exe": "electron-builder --win --x64",
+    "test:package": "node tests/desktop_smoke.js dist/sshterm.exe && node tests/desktop_smoke.js dist/win-unpacked/sshterm.exe",
+    "test:installer": "pwsh -NoProfile -File tests/installer_smoke.ps1",
     "sync:web": "node scripts/sync-web-app.js"
   },
   "keywords": [
@@ -48,10 +49,40 @@
   "build": {
     "appId": "io.github.houxtt.sshterm",
     "productName": "sshterm",
-    "directories": { "output": "dist" },
-    "files": ["desktop/**/*", "server/**/*", "web/**/*", "assets/sshterm.ico", "package.json", "LICENSE", "node_modules/**/*"],
-    "asarUnpack": ["node_modules/@serialport/**/*", "node_modules/serialport/**/*", "node_modules/bindings/**/*"],
-    "win": { "icon": "assets/sshterm.ico", "target": "portable", "artifactName": "sshterm.exe", "signAndEditExecutable": false },
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "desktop/**/*",
+      "server/**/*",
+      "web/**/*",
+      "assets/sshterm.ico",
+      "package.json",
+      "LICENSE",
+      "node_modules/**/*"
+    ],
+    "asarUnpack": [
+      "node_modules/@serialport/**/*",
+      "node_modules/serialport/**/*",
+      "node_modules/bindings/**/*"
+    ],
+    "win": {
+      "icon": "assets/sshterm.ico",
+      "target": [
+        "portable",
+        "nsis"
+      ],
+      "signAndEditExecutable": false
+    },
+    "portable": {
+      "artifactName": "sshterm.exe"
+    },
+    "nsis": {
+      "artifactName": "sshterm-setup.exe",
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false
+    },
     "npmRebuild": false
   }
 }

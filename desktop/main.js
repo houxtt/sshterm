@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, protocol, ipcMain } = require('electron');
+const { app, BrowserWindow, Menu, dialog, protocol, ipcMain } = require('electron');
 const { Readable, PassThrough } = require('stream');
 const path = require('path');
 const fs = require('fs');
@@ -22,6 +22,40 @@ delete process.env.SSHTERM_TEST_HTTP;
 let backend;
 const sockets = new Map();
 let mainWindow;
+
+function setChineseMenu() {
+  const clickToolbar = id => {
+    const contents = mainWindow?.webContents;
+    if (!contents || contents.isDestroyed()) return;
+    contents.executeJavaScript(`document.getElementById(${JSON.stringify(id)})?.click()`, true).catch(() => {});
+  };
+  Menu.setApplicationMenu(Menu.buildFromTemplate([
+    { label: '文件', submenu: [
+      { label: '新建连接', accelerator: 'CmdOrCtrl+N', click: () => clickToolbar('btn-new') },
+      { type: 'separator' },
+      { label: '退出', role: 'quit' },
+    ] },
+    { label: '编辑', submenu: [
+      { label: '撤销', role: 'undo' }, { label: '重做', role: 'redo' },
+      { type: 'separator' },
+      { label: '剪切', role: 'cut' }, { label: '复制', role: 'copy' },
+      { label: '粘贴', role: 'paste' }, { label: '全选', role: 'selectAll' },
+    ] },
+    { label: '查看', submenu: [
+      { label: '重新加载', role: 'reload' },
+      { label: '全屏', role: 'togglefullscreen' },
+    ] },
+    { label: '窗口', submenu: [
+      { label: '最小化', role: 'minimize' }, { label: '关闭窗口', role: 'close' },
+    ] },
+    { label: '帮助', submenu: [
+      { label: '关于 sshterm', click: () => dialog.showMessageBox({
+        title: '关于 sshterm', message: `sshterm v${app.getVersion()}`,
+        detail: 'SSH / Telnet / VNC / 串口桌面连接工具', buttons: ['确定'],
+      }) },
+    ] },
+  ]));
+}
 
 function trusted(event) {
   return event.sender === mainWindow?.webContents &&
@@ -97,6 +131,7 @@ async function serve(request) {
 
 app.whenReady().then(() => {
   trace('app ready');
+  setChineseMenu();
   backend = require('../server/index');
   trace('backend loaded');
   protocol.handle('sshterm', serve);
@@ -183,6 +218,7 @@ app.whenReady().then(() => {
         result.responsiveAfterWait = await mainWindow.webContents.executeJavaScript('ws?.readyState === WebSocket.OPEN');
         const { SerialPort } = require('serialport');
         result.serialBinding = Array.isArray(await SerialPort.list());
+        result.menuLabels = Menu.getApplicationMenu().items.map(item => item.label);
         if (process.env.SSHTERM_SMOKE_SCREENSHOT) {
           const shot = await mainWindow.webContents.capturePage();
           fs.writeFileSync(process.env.SSHTERM_SMOKE_SCREENSHOT, shot.toPNG());

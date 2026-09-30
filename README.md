@@ -4,7 +4,7 @@ SSH、Telnet、VNC、串口多标签连接工具，支持 SFTP、分屏、会话
 
 ## 安装与启动
 
-从 [GitHub Releases](https://github.com/houxtt/sshterm/releases/latest) 下载 `sshterm.exe`，双击启动。EXE 自带运行时，无需安装 Node.js。已有会话配置和通过 Windows DPAPI 记住的凭据保存在 `%USERPROFILE%\.sshterm`，升级不会清除。
+从 [GitHub Releases](https://github.com/houxtt/sshterm/releases/latest) 下载 `sshterm-setup.exe` 安装后启动。安装只需一次，以后从桌面或开始菜单打开速度更快。需要免安装时可下载 `sshterm.exe` 便携版；便携版每次启动会先解压，因此会慢一些。两种版本都自带运行时，无需安装 Node.js。已有会话配置和通过 Windows DPAPI 记住的凭据保存在 `%USERPROFILE%\.sshterm`，升级不会清除。
 
 源码运行需要 Node.js 22：
 
@@ -21,7 +21,7 @@ node tests/desktop_contract.js
 npm run build:exe
 ```
 
-产物为 `dist/sshterm.exe`。正式发行版由 [Release build](docs/RELEASE.md) 工作流验证并发布；配置代码签名证书时会签名，未配置时会在发行说明中标明未签名。
+产物为 `dist/sshterm-setup.exe` 和 `dist/sshterm.exe`。正式发行版由 [Release build](docs/RELEASE.md) 工作流验证并发布；配置代码签名证书时会签名，未配置时会在发行说明中标明未签名。
 
 ## 使用
 

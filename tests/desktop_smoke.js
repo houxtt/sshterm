@@ -43,7 +43,8 @@ child.on('exit', (code) => {
     const result = JSON.parse(fs.readFileSync(resultFile, 'utf8'));
     assert.deepEqual(result, { connected: true, url: 'sshterm://app/', quickBar: true,
       quickButton: true, commandSent: true, desktopBridge: true, socketOpen: true,
-      sftpUpload: true, responsiveAfterWait: true, serialBinding: true });
+      sftpUpload: true, responsiveAfterWait: true, serialBinding: true,
+      menuLabels: ['文件', '编辑', '查看', '窗口', '帮助'] });
     assert.equal(fs.readFileSync(path.join(sftpFixture, 'desktop-smoke.txt'), 'utf8'), 'smoke');
     assert.equal(code, 0, `${timeoutReason}\n${output.slice(-1000)}\n${trace}`);
     if (process.env.SSHTERM_SMOKE_TRACE) console.log(trace);

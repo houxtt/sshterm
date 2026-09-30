@@ -36,6 +36,7 @@ jobs:
       - run: node tests/desktop_contract.js
       - run: npm run build:exe
       - run: npm run test:package
+      - run: npm run test:installer
       - name: Determine signing mode
         id: signing
         shell: pwsh
@@ -53,10 +54,12 @@ jobs:
           [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGNING_CERT_BASE64))
           try {
             $signtool = (Get-Command signtool.exe -ErrorAction Stop).Source
-            & $signtool sign /fd SHA256 /f $pfx /p $env:SIGNING_CERT_PASSWORD /tr http://timestamp.digicert.com /td SHA256 dist/sshterm.exe
-            if ($LASTEXITCODE -ne 0) { throw "signtool sign failed: $LASTEXITCODE" }
-            & $signtool verify /pa /all dist/sshterm.exe
-            if ($LASTEXITCODE -ne 0) { throw "signtool verify failed: $LASTEXITCODE" }
+            foreach ($artifact in @('dist/sshterm.exe', 'dist/sshterm-setup.exe')) {
+              & $signtool sign /fd SHA256 /f $pfx /p $env:SIGNING_CERT_PASSWORD /tr http://timestamp.digicert.com /td SHA256 $artifact
+              if ($LASTEXITCODE -ne 0) { throw "signtool sign failed for $artifact : $LASTEXITCODE" }
+              & $signtool verify /pa /all $artifact
+              if ($LASTEXITCODE -ne 0) { throw "signtool verify failed for $artifact : $LASTEXITCODE" }
+            }
           } finally {
             Remove-Item -LiteralPath $pfx -Force -ErrorAction SilentlyContinue
           }
@@ -64,7 +67,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: sshterm-${{ inputs.version }}-${{ steps.signing.outputs.mode }}
-          path: dist/sshterm.exe
+          path: |
+            dist/sshterm.exe
+            dist/sshterm-setup.exe
           if-no-files-found: error
       - name: Publish v2 release
         env:
@@ -72,8 +77,10 @@ jobs:
         shell: pwsh
         run: |
           $notes = Join-Path $env:RUNNER_TEMP 'release-notes.md'
-          Copy-Item docs/RELEASE-NOTES-v2.0.0.md $notes
+          $notesSource = "docs/RELEASE-NOTES-v${{ inputs.version }}.md"
+          if (-not (Test-Path $notesSource)) { throw "Missing release notes: $notesSource" }
+          Copy-Item $notesSource $notes
           if ('${{ steps.signing.outputs.mode }}' -eq 'unsigned') {
             Add-Content $notes "`n此版本 EXE 未进行代码签名；Windows 首次运行时可能显示安全提示。`n"
           }
-          gh release create "v${{ inputs.version }}" dist/sshterm.exe --target "${{ github.sha }}" --title "sshterm v${{ inputs.version }}" --notes-file $notes
+          gh release create "v${{ inputs.version }}" dist/sshterm-setup.exe dist/sshterm.exe --target "${{ github.sha }}" --title "sshterm v${{ inputs.version }}" --notes-file $notes

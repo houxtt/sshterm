@@ -14,8 +14,8 @@
 ## 每次发布
 
 1. 更新 `package.json` 的版本和变更日志。
-2. 本地运行 `npm run check`、`node tests/desktop_contract.js`，并构建、试运行桌面 EXE。
+2. 本地运行 `npm run check`、`node tests/desktop_contract.js`，并构建后运行 `npm run test:package` 和 `npm run test:installer`。
 3. 在 Actions 手动运行 `Release build`，输入相同版本号。
-4. 工作流构建并测试桌面 EXE；若配置了签名证书，还会签名并执行 `signtool verify /pa /all`。成功后创建 `vX.Y.Z` GitHub Release 并上传 `sshterm.exe`，未签名时在发行说明中标明。
+4. 工作流构建并测试安装版与便携版；若配置了签名证书，还会为两个外发 EXE 签名并执行 `signtool verify /pa /all`。成功后创建 `vX.Y.Z` GitHub Release，上传 `sshterm-setup.exe` 和 `sshterm.exe`，未签名时在发行说明中标明。
 
 发布前还应检查依赖审计结果。未签名 EXE 在 Windows 首次运行时可能显示安全提示。
