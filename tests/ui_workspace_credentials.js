@@ -27,7 +27,7 @@ function waitForServer(deadline = Date.now() + 10000) {
   let browser;
   try {
     await waitForServer();
-    browser = await puppeteer.launch({ headless: 'new' });
+    browser = await puppeteer.launch({ headless: 'new', timeout: 90000 });
     const page = await browser.newPage();
     await page.goto(BASE, { waitUntil: 'networkidle0' });
     const result = await page.evaluate(() => {
